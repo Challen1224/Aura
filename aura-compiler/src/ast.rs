@@ -198,6 +198,9 @@ pub enum Stmt {
     Return(Option<Expr>),
     /// If statement with optional else.
     If(Expr, Vec<Stmt>, Option<Vec<Stmt>>),
+    /// If-let statement: pattern match with optional else.
+    /// `if let pattern = expr { ... } else { ... }`
+    IfLet(Pattern, Expr, Vec<Stmt>, Option<Vec<Stmt>>),
     /// While loop with optional label.
     While {
         label: Option<String>,

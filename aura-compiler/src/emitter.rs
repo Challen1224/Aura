@@ -420,6 +420,133 @@ impl<'a> MethodEmitter<'a> {
                     self.ops[false_jump] = Op::BrFalse(end);
                 }
             }
+            Stmt::IfLet(pattern, expr, then_branch, else_branch) => {
+                // Evaluate the subject into a temporary local.
+                self.emit_expr(expr)?;
+                let subject_local = self.locals.len() as u16;
+                self.locals.push("__iflet_subject".to_string());
+                self.ops.push(Op::Stloc(subject_local));
+
+                // Emit pattern test; failures jump over the then-branch.
+                let mut fail_jumps: Vec<usize> = Vec::new();
+
+                self.ops.push(Op::Ldloc(subject_local));
+                match pattern {
+                    Pattern::Wildcard => {}
+                    Pattern::Int(i) => {
+                        self.ops.push(Op::LdInt(*i));
+                        self.ops.push(Op::Eq);
+                        fail_jumps.push(self.ops.len());
+                        self.ops.push(Op::BrFalse(0));
+                    }
+                    Pattern::Float(f) => {
+                        let idx = self.constants.len() as u32;
+                        self.constants.push(f.to_string());
+                        self.ops.push(Op::LdFloat(idx));
+                        self.ops.push(Op::Eq);
+                        fail_jumps.push(self.ops.len());
+                        self.ops.push(Op::BrFalse(0));
+                    }
+                    Pattern::Bool(b) => {
+                        self.ops.push(Op::LdBool(*b));
+                        self.ops.push(Op::Eq);
+                        fail_jumps.push(self.ops.len());
+                        self.ops.push(Op::BrFalse(0));
+                    }
+                    Pattern::StringLit(s) => {
+                        let idx = self.constants.len() as u32;
+                        self.constants.push(s.clone());
+                        self.ops.push(Op::LdStr(idx));
+                        self.ops.push(Op::Eq);
+                        fail_jumps.push(self.ops.len());
+                        self.ops.push(Op::BrFalse(0));
+                    }
+                    Pattern::Null => {
+                        self.ops.push(Op::LdNull);
+                        self.ops.push(Op::Eq);
+                        fail_jumps.push(self.ops.len());
+                        self.ops.push(Op::BrFalse(0));
+                    }
+                    Pattern::Binding(name) => {
+                        // Binding always matches: copy the subject into a new local.
+                        let local_idx = self.locals.len() as u16;
+                        self.locals.push(name.clone());
+                        self.ops.push(Op::Ldloc(subject_local));
+                        self.ops.push(Op::Stloc(local_idx));
+                    }
+                    Pattern::EnumVariant(enum_name, variant_name, bindings) => {
+                        let enum_def = self.program.enums.get(enum_name).ok_or_else(|| {
+                            format!("unknown enum `{}`", enum_name)
+                        })?;
+                        let variant_idx = enum_def.variants.iter().position(|v| v.name == *variant_name)
+                            .ok_or_else(|| format!("unknown variant `{}.{}`", enum_name, variant_name))?;
+
+                        self.ops.push(Op::EnumTag);
+                        self.ops.push(Op::LdInt(variant_idx as i32));
+                        self.ops.push(Op::Eq);
+                        fail_jumps.push(self.ops.len());
+                        self.ops.push(Op::BrFalse(0));
+
+                        for (i, binding) in bindings.iter().enumerate() {
+                            let local_idx = self.locals.len() as u16;
+                            self.locals.push(binding.clone());
+                            self.ops.push(Op::Ldloc(subject_local));
+                            self.ops.push(Op::EnumField(i as u16));
+                            self.ops.push(Op::Stloc(local_idx));
+                        }
+                    }
+                    Pattern::Range(start, end, inclusive) => {
+                        // subject >= start
+                        self.ops.push(Op::Ldloc(subject_local));
+                        self.emit_expr(start)?;
+                        if *inclusive {
+                            self.ops.push(Op::Ge);
+                        } else {
+                            self.ops.push(Op::Gt);
+                        }
+                        fail_jumps.push(self.ops.len());
+                        self.ops.push(Op::BrFalse(0));
+
+                        // subject <= end (or < for exclusive)
+                        self.ops.push(Op::Ldloc(subject_local));
+                        self.emit_expr(end)?;
+                        self.ops.push(Op::Le);
+                        fail_jumps.push(self.ops.len());
+                        self.ops.push(Op::BrFalse(0));
+                    }
+                }
+
+                if fail_jumps.is_empty() {
+                    // Pattern always matches (wildcard or binding).
+                    for s in then_branch {
+                        self.emit_stmt(s)?;
+                    }
+                } else {
+                    // Emit then-branch (executed when the pattern matches).
+                    for s in then_branch {
+                        self.emit_stmt(s)?;
+                    }
+
+                    if let Some(else_branch) = else_branch {
+                        let end_jump = self.ops.len();
+                        self.ops.push(Op::Br(0));
+                        let else_start = self.ops.len() as u32;
+                        for s in else_branch {
+                            self.emit_stmt(s)?;
+                        }
+                        for jump in &fail_jumps {
+                            self.ops[*jump] = Op::BrFalse(else_start);
+                        }
+                        let end = self.ops.len() as u32;
+                        self.ops[end_jump] = Op::Br(end);
+                    } else {
+                        let end = self.ops.len() as u32;
+                        for jump in &fail_jumps {
+                            self.ops[*jump] = Op::BrFalse(end);
+                        }
+                    }
+                }
+            }
             Stmt::While { label, condition, body } => {
                 let loop_start = self.ops.len() as u32;
                 self.continue_targets.push((label.clone(), Vec::new()));

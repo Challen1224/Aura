@@ -1,0 +1,84 @@
+enum Option {
+    None,
+    Some(int value)
+}
+
+class Program {
+    static void Main() {
+        print("=== if let: enum variant ===");
+        println();
+
+        Option opt = Option.Some(42);
+        if let Option.Some(value) = opt {
+            print("got value: ");
+            print(value);
+            println();
+        } else {
+            print("got none");
+            println();
+        }
+
+        Option none = Option.None;
+        if let Option.Some(value) = none {
+            print("got value: ");
+            print(value);
+            println();
+        } else {
+            print("got none");
+            println();
+        }
+
+        print("=== if let: range pattern ===");
+        println();
+
+        int x = 7;
+        if let 1..=10 = x {
+            print("x is in range");
+            println();
+        } else {
+            print("x is out of range");
+            println();
+        }
+
+        x = 20;
+        if let 1..=10 = x {
+            print("x is in range");
+            println();
+        } else {
+            print("x is out of range");
+            println();
+        }
+
+        print("=== if let: constant pattern ===");
+        println();
+
+        if let 42 = x {
+            print("x is 42");
+            println();
+        } else {
+            print("x is not 42");
+            println();
+        }
+
+        print("=== if let: binding pattern (always matches) ===");
+        println();
+
+        if let y = x {
+            print("bound y = ");
+            print(y);
+            println();
+        }
+
+        print("=== if let: no else branch ===");
+        println();
+
+        Option other = Option.Some(7);
+        if let Option.Some(v) = other {
+            print("no else, but matched: ");
+            print(v);
+            println();
+        }
+        print("done");
+        println();
+    }
+}

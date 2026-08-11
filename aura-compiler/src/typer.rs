@@ -871,6 +871,84 @@ impl TypeChecker {
                     }
                 }
             }
+            Stmt::IfLet(pattern, expr, then_branch, else_branch) => {
+                let subject_ty = self.infer_expr(expr, class, locals, in_instance)?;
+
+                // Validate the pattern against the subject type and collect bindings.
+                let mut bindings: Vec<(String, Type)> = Vec::new();
+                match pattern {
+                    Pattern::EnumVariant(enum_name, variant_name, binding_names) => {
+                        let enum_info = self.enums.get(enum_name).ok_or_else(|| {
+                            TypeError(format!("unknown enum `{}`", enum_name))
+                        })?;
+                        let variant = enum_info.variants.iter().find(|v| v.name == *variant_name)
+                            .ok_or_else(|| TypeError(format!(
+                                "unknown variant `{}.{}`", enum_name, variant_name
+                            )))?;
+                        if binding_names.len() != variant.fields.len() {
+                            return Err(TypeError(format!(
+                                "variant `{}.{}` has {} fields but pattern has {} bindings",
+                                enum_name, variant_name, variant.fields.len(), binding_names.len()
+                            )));
+                        }
+                        if let Type::Enum(ref sn) = subject_ty {
+                            if sn != enum_name {
+                                return Err(TypeError(format!(
+                                    "cannot match enum `{}` against value of type `{}`",
+                                    enum_name, subject_ty.name()
+                                )));
+                            }
+                        }
+                        for (name, (_, field_ty)) in binding_names.iter().zip(variant.fields.iter()) {
+                            bindings.push((name.clone(), field_ty.clone()));
+                        }
+                    }
+                    Pattern::Range(start, end, _) => {
+                        if subject_ty != Type::Int && subject_ty != Type::Float {
+                            return Err(TypeError(format!(
+                                "range pattern requires int or float subject, got {}",
+                                subject_ty.name()
+                            )));
+                        }
+                        let start_ty = self.infer_expr(start, class, locals, in_instance)?;
+                        let end_ty = self.infer_expr(end, class, locals, in_instance)?;
+                        if start_ty != subject_ty || end_ty != subject_ty {
+                            return Err(TypeError(format!(
+                                "range pattern bounds must match subject type {}, got {} and {}",
+                                subject_ty.name(), start_ty.name(), end_ty.name()
+                            )));
+                        }
+                    }
+                    Pattern::Binding(name) => {
+                        bindings.push((name.clone(), subject_ty.clone()));
+                    }
+                    _ => {}
+                }
+
+                // Bind the pattern names for the then branch only.
+                let mut saved: Vec<(String, Option<Type>)> = Vec::new();
+                for (name, _) in &bindings {
+                    saved.push((name.clone(), locals.get(name).cloned()));
+                }
+                for (name, ty) in &bindings {
+                    locals.insert(name.clone(), ty.clone());
+                }
+                for s in then_branch {
+                    self.check_stmt(s, class, locals, return_ty, in_instance, generic_params)?;
+                }
+                for (name, prev) in saved {
+                    match prev {
+                        Some(ty) => { locals.insert(name, ty); }
+                        None => { locals.remove(&name); }
+                    }
+                }
+
+                if let Some(else_branch) = else_branch {
+                    for s in else_branch {
+                        self.check_stmt(s, class, locals, return_ty, in_instance, generic_params)?;
+                    }
+                }
+            }
             Stmt::While { label: _, condition, body } => {
                 let cond_ty = self.infer_expr(condition, class, locals, in_instance)?;
                 if cond_ty != Type::Bool {

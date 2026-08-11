@@ -296,12 +296,13 @@
   }
   ```
 
-- [ ] **Guard clauses**
+- [x] **Guard clauses**
   ```aura
   if let Some(value) = optional {
       // use value
   }
   ```
+  Supports enum variant, range, constant, and binding patterns with optional else.
 
 - [ ] **Expression blocks**
   ```aura

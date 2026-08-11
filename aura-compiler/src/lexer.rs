@@ -149,6 +149,8 @@ pub enum Token {
     Using,
     /// `in`
     In,
+    /// `let`
+    Let,
     /// `??`
     NullCoalesce,
     /// `?.`
@@ -229,6 +231,7 @@ impl fmt::Display for Token {
             Token::Finally => "`finally`",
             Token::Using => "`using`",
             Token::In => "`in`",
+            Token::Let => "`let`",
             Token::NullCoalesce => "`??`",
             Token::NullConditional => "`?.`",
         };
@@ -785,6 +788,7 @@ impl<'a> Lexer<'a> {
             "finally" => Token::Finally,
             "using" => Token::Using,
             "in" => Token::In,
+            "let" => Token::Let,
             _ => Token::Ident(word.to_string()),
         })
     }

@@ -509,6 +509,11 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_if(&mut self) -> Result<Stmt, String> {
+        // Check for `if let` syntax
+        if self.match_token(Token::Let) {
+            return self.parse_if_let();
+        }
+        
         self.consume(Token::LParen, "expected `(` after `if`")?;
         let cond = self.parse_expr()?;
         self.consume(Token::RParen, "expected `)`")?;
@@ -519,6 +524,20 @@ impl<'a> Parser<'a> {
             None
         };
         Ok(Stmt::If(cond, then_branch, else_branch))
+    }
+    
+    fn parse_if_let(&mut self) -> Result<Stmt, String> {
+        // Parse: if let pattern = expr { ... } else { ... }
+        let pattern = self.parse_pattern()?;
+        self.consume(Token::Assign, "expected `=` after pattern in `if let`")?;
+        let expr = self.parse_expr()?;
+        let then_branch = self.parse_stmt_body()?;
+        let else_branch = if self.match_token(Token::Else) {
+            Some(self.parse_stmt_body()?)
+        } else {
+            None
+        };
+        Ok(Stmt::IfLet(pattern, expr, then_branch, else_branch))
     }
 
     fn parse_while(&mut self, label: Option<String>) -> Result<Stmt, String> {
