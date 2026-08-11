@@ -255,11 +255,21 @@
   for (int i in 2+1..2*3) { }   // expressions allowed
   ```
 
+- [x] **Range patterns in match expressions**
+  ```aura
+  match (value) {
+      1..=5 => "low"
+      6..=10 => "medium"
+      * => "other"
+  }
+  ```
+
 #### ⏳ Planned
 
 **P1 - High Priority**
 - [ ] **Pattern matching enhancements**
-  - [ ] Enum variant patterns
+  - [x] Enum variant patterns
+  - [x] Range patterns
   - [ ] Nested patterns
   - [ ] Pattern guards with complex expressions
 

@@ -1095,11 +1095,29 @@ impl<'a> Parser<'a> {
         if let Some(Token::IntLit(i)) = self.peek() {
             let v = *i;
             self.advance();
+            // Check for range pattern: 1..5 or 1..=5
+            if self.match_token(Token::DotDot) {
+                let end = self.parse_pattern_expr()?;
+                return Ok(Pattern::Range(Box::new(Expr::Int(v)), Box::new(end), false));
+            }
+            if self.match_token(Token::DotDotEq) {
+                let end = self.parse_pattern_expr()?;
+                return Ok(Pattern::Range(Box::new(Expr::Int(v)), Box::new(end), true));
+            }
             return Ok(Pattern::Int(v));
         }
         if let Some(Token::FloatLit(x)) = self.peek() {
             let v = *x;
             self.advance();
+            // Check for range pattern
+            if self.match_token(Token::DotDot) {
+                let end = self.parse_pattern_expr()?;
+                return Ok(Pattern::Range(Box::new(Expr::Float(v)), Box::new(end), false));
+            }
+            if self.match_token(Token::DotDotEq) {
+                let end = self.parse_pattern_expr()?;
+                return Ok(Pattern::Range(Box::new(Expr::Float(v)), Box::new(end), true));
+            }
             return Ok(Pattern::Float(v));
         }
         if let Some(Token::StringLit(s)) = self.peek() {
@@ -1134,6 +1152,26 @@ impl<'a> Parser<'a> {
             return Ok(Pattern::Binding(name));
         }
         Err(format!("expected pattern, found {}", self.peek_desc()))
+    }
+
+    /// Parse an expression in a pattern context (limited to literals and simple expressions)
+    fn parse_pattern_expr(&mut self) -> Result<Expr, String> {
+        if let Some(Token::IntLit(i)) = self.peek() {
+            let v = *i;
+            self.advance();
+            return Ok(Expr::Int(v));
+        }
+        if let Some(Token::FloatLit(x)) = self.peek() {
+            let v = *x;
+            self.advance();
+            return Ok(Expr::Float(v));
+        }
+        if let Some(Token::Ident(name)) = self.peek() {
+            let name = name.clone();
+            self.advance();
+            return Ok(Expr::Var(name));
+        }
+        Err(format!("expected literal or identifier in range pattern, found {}", self.peek_desc()))
     }
 
     fn parse_args(&mut self) -> Result<Vec<Expr>, String> {

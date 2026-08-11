@@ -348,6 +348,8 @@ pub enum Pattern {
     EnumVariant(String, String, Vec<String>),
     /// Binding pattern: bind matched value to a name.
     Binding(String),
+    /// Range pattern: `1..=5` or `1..5`.
+    Range(Box<Expr>, Box<Expr>, bool),
 }
 
 /// Binary operators.

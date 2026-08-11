@@ -1,0 +1,11 @@
+class Program {
+    static void Main() {
+        int x = 5;
+        string result = match (x) {
+            1..=5 => "low"
+            * => "other"
+        };
+        print(result);
+        println();
+    }
+}

@@ -1,0 +1,49 @@
+class Program {
+    static void Main() {
+        // Test range patterns in match expressions
+        int value = 7;
+
+        string category = match (value) {
+            1..=5 => "low"
+            6..=10 => "medium"
+            11..=20 => "high"
+            * => "out of range"
+        };
+
+        print("Value ");
+        print(value);
+        print(" is ");
+        print(category);
+        println();
+
+        // Test exclusive range
+        int x = 5;
+        string result = match (x) {
+            1..5 => "1 to 4"
+            5..10 => "5 to 9"
+            * => "other"
+        };
+
+        print("x=");
+        print(x);
+        print(" is ");
+        print(result);
+        println();
+
+        // Test with float
+        float temp = 72.5;
+        string weather = match (temp) {
+            0.0..=32.0 => "freezing"
+            32.1..=60.0 => "cold"
+            60.1..=80.0 => "comfortable"
+            80.1..=100.0 => "hot"
+            * => "extreme"
+        };
+
+        print("Temperature ");
+        print(temp);
+        print(" is ");
+        print(weather);
+        println();
+    }
+}

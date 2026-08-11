@@ -662,6 +662,7 @@ impl<'a> Lexer<'a> {
         // In that case, we want IntLit(0), Dot, IntLit(0), not IntLit(0), FloatLit(0.0)
         // So we check if the fractional part is followed by another .
         // If so, this is likely a tuple index chain, not a float
+        // UNLESS it's followed by .. or ..= (range operators)
         let is_float = if self.peek() == Some('.') && self.peek_next().map_or(false, |c| c.is_ascii_digit()) {
             // Look ahead to see if the fractional part is followed by another .
             let mut lookahead = self.chars.clone();
@@ -673,6 +674,14 @@ impl<'a> Lexer<'a> {
                 } else {
                     // Check if this character is a .
                     if c == '.' {
+                        // Check if it's .. or ..= (range operator)
+                        let mut lookahead2 = lookahead.clone();
+                        if let Some(next) = lookahead2.next() {
+                            if next == '.' || next == '=' {
+                                // This is a range operator, so treat as float
+                                break;
+                            }
+                        }
                         // This is a tuple index chain, not a float
                         return Ok(self.current.parse::<i32>().map(Token::IntLit).map_err(|e| self.error(&e.to_string()))?);
                     } else {

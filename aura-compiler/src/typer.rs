@@ -1243,6 +1243,29 @@ impl TypeChecker {
                                     }
                                 }
                             }
+                            Pattern::Range(start, end, _inclusive) => {
+                                // Range patterns only work with numeric types
+                                if subject_ty != Type::Int && subject_ty != Type::Float {
+                                    return Err(TypeError(format!(
+                                        "range pattern requires int or float subject, got {}",
+                                        subject_ty.name()
+                                    )));
+                                }
+                                let start_ty = self.infer_expr(start, class, locals, in_instance)?;
+                                let end_ty = self.infer_expr(end, class, locals, in_instance)?;
+                                if start_ty != subject_ty {
+                                    return Err(TypeError(format!(
+                                        "range start type {} doesn't match subject type {}",
+                                        start_ty.name(), subject_ty.name()
+                                    )));
+                                }
+                                if end_ty != subject_ty {
+                                    return Err(TypeError(format!(
+                                        "range end type {} doesn't match subject type {}",
+                                        end_ty.name(), subject_ty.name()
+                                    )));
+                                }
+                            }
                             _ => {}
                         }
                     }

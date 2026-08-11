@@ -1061,6 +1061,34 @@ impl<'a> MethodEmitter<'a> {
 
                                 let _ = enum_id;
                             }
+                            Pattern::Range(start, end, inclusive) => {
+                                // Check: subject >= start
+                                self.ops.push(Op::Ldloc(subject_local));
+                                self.emit_expr(start)?;
+                                if *inclusive {
+                                    self.ops.push(Op::Ge);
+                                } else {
+                                    self.ops.push(Op::Gt);
+                                }
+                                let below_start = self.ops.len();
+                                self.ops.push(Op::BrFalse(0));
+
+                                // Check: subject <= end (or < for exclusive)
+                                self.ops.push(Op::Ldloc(subject_local));
+                                self.emit_expr(end)?;
+                                self.ops.push(Op::Le);
+                                let above_end = self.ops.len();
+                                self.ops.push(Op::BrFalse(0));
+
+                                // Both checks passed
+                                pattern_success_jumps.push(self.ops.len());
+                                self.ops.push(Op::Br(0));
+
+                                // Patch failure jumps
+                                let after_range = self.ops.len() as u32;
+                                self.ops[below_start] = Op::BrFalse(after_range);
+                                self.ops[above_end] = Op::BrFalse(after_range);
+                            }
                         }
                     }
                     
