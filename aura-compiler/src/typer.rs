@@ -100,6 +100,15 @@ pub struct ClassInfo {
     pub methods: HashMap<String, MethodInfo>,
     /// Static methods keyed by name.
     pub static_methods: HashMap<String, MethodInfo>,
+    /// Optional constructor (parameter list used when type-checking `new`).
+    pub constructor: Option<ConstructorInfo>,
+}
+
+/// Constructor metadata.
+#[derive(Debug, Clone)]
+pub struct ConstructorInfo {
+    /// Parameter types in declaration order.
+    pub params: Vec<Type>,
 }
 
 /// Method metadata.
@@ -202,6 +211,7 @@ impl TypeChecker {
                         private_static_fields: HashSet::new(),
                         methods: HashMap::new(),
                         static_methods: HashMap::new(),
+                        constructor: None,
                     };
                     if c.is_abstract && c.is_interface {
                         return Err(TypeError(format!(
@@ -249,6 +259,36 @@ impl TypeChecker {
                                 }
                             }
                             Member::Method(m) => {
+                                if m.is_constructor {
+                                    if c.is_interface {
+                                        return Err(TypeError(format!(
+                                            "interface `{}` cannot declare a constructor",
+                                            c.name
+                                        )));
+                                    }
+                                    if m.name != c.name {
+                                        return Err(TypeError(format!(
+                                            "constructor name `{}` must match class name `{}`",
+                                            m.name, c.name
+                                        )));
+                                    }
+                                    if m.return_ty != Type::Unit {
+                                        return Err(TypeError(format!(
+                                            "constructor `{}` cannot have a return type",
+                                            c.name
+                                        )));
+                                    }
+                                    if info.constructor.is_some() {
+                                        return Err(TypeError(format!(
+                                            "duplicate constructor for class `{}`",
+                                            c.name
+                                        )));
+                                    }
+                                    info.constructor = Some(ConstructorInfo {
+                                        params: m.params.iter().map(|p| p.ty.clone()).collect(),
+                                    });
+                                    continue;
+                                }
                                 if c.is_interface && m.is_static {
                                     return Err(TypeError(format!(
                                         "interface `{}` cannot declare static method `{}`",
@@ -1296,22 +1336,45 @@ impl TypeChecker {
                 }
             }
             Expr::Call(call) => self.check_call(call, class, locals, in_instance, return_ty, generic_params),
-            Expr::New(class_name, type_args) => {
-                if self.classes.contains_key(class_name) {
-                    let class_info = self.classes.get(class_name).unwrap();
-                    if class_info.is_abstract || class_info.is_interface {
+            Expr::New(class_name, type_args, args) => {
+                let Some(class_info) = self.classes.get(class_name) else {
+                    return Err(TypeError(format!("unknown class `{}`", class_name)));
+                };
+                if class_info.is_abstract || class_info.is_interface {
+                    return Err(TypeError(format!(
+                        "cannot instantiate {} `{}`",
+                        if class_info.is_interface { "interface" } else { "abstract class" },
+                        class_name
+                    )));
+                }
+                let subst = build_subst(&class_info.generic_params, type_args);
+                let param_types: Vec<Type> = match &class_info.constructor {
+                    Some(ctor) => ctor
+                        .params
+                        .iter()
+                        .map(|p| substitute_type(p, &subst))
+                        .collect(),
+                    None => Vec::new(),
+                };
+                if args.len() != param_types.len() {
+                    return Err(TypeError(format!(
+                        "constructor `{}` expects {} argument(s), got {}",
+                        class_name,
+                        param_types.len(),
+                        args.len()
+                    )));
+                }
+                for (arg, expected) in args.iter().zip(param_types.iter()) {
+                    let arg_ty = self.infer_expr(arg, class, locals, in_instance, return_ty, generic_params)?;
+                    if !self.is_assignable(expected, &arg_ty) {
                         return Err(TypeError(format!(
-                            "cannot instantiate {} `{}`",
-                            if class_info.is_interface { "interface" } else { "abstract class" },
-                            class_name
+                            "argument of type {} is not assignable to constructor parameter of type {}",
+                            arg_ty.name(),
+                            expected.name()
                         )));
                     }
-                    // For now, just return the class type without validating type args
-                    // In a full implementation, we'd check that type_args match the class's generic params
-                    Ok(Type::Class(class_name.clone(), type_args.clone()))
-                } else {
-                    Err(TypeError(format!("unknown class `{}`", class_name)))
                 }
+                Ok(Type::Class(class_name.clone(), type_args.clone()))
             }
             Expr::Ternary(cond, then_expr, else_expr) => {
                 let cond_ty = self.infer_expr(cond, class, locals, in_instance, return_ty, generic_params)?;

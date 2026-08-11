@@ -114,6 +114,8 @@ pub struct MethodDecl {
     pub is_abstract: bool,
     /// Whether this method is final (cannot be overridden or re-declared).
     pub is_final: bool,
+    /// Whether this is a constructor: `Counter(int start) { ... }`.
+    pub is_constructor: bool,
     /// Generic parameters for this method.
     pub generic_params: Vec<GenericParam>,
     /// Return type.
@@ -314,8 +316,8 @@ pub enum Expr {
     Field(Box<Expr>, String),
     /// Static field access.
     StaticField(String, String),
-    /// `new ClassName()` with optional type arguments.
-    New(String, Vec<Type>),
+    /// `new ClassName()` with optional type arguments and constructor arguments.
+    New(String, Vec<Type>, Vec<Expr>),
     /// Match expression.
     Match(Box<Expr>, Vec<MatchArm>),
     /// Enum variant access or construction: `EnumName.VariantName` or `EnumName.VariantName(args)`.

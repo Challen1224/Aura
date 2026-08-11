@@ -107,7 +107,7 @@ impl<'a> Parser<'a> {
             if self.check(Token::RBrace) {
                 break;
             }
-            members.push(self.parse_member(is_interface)?);
+            members.push(self.parse_member(is_interface, &name)?);
         }
         self.consume(Token::RBrace, "expected `}`")?;
         Ok(ClassDecl {
@@ -180,7 +180,7 @@ impl<'a> Parser<'a> {
         Ok(params)
     }
 
-    fn parse_member(&mut self, in_interface: bool) -> Result<Member, String> {
+    fn parse_member(&mut self, in_interface: bool, class_name: &str) -> Result<Member, String> {
         let mut is_static = false;
         let mut visibility = Visibility::Public;
         let mut is_virtual = false;
@@ -213,6 +213,61 @@ impl<'a> Parser<'a> {
         } else {
             Vec::new()
         };
+
+        // A constructor is declared with no return type: `Counter(int start) { ... }`.
+        if let Some(Token::Ident(first)) = self.peek() {
+            if first == class_name && self.pos + 1 < self.tokens.len() {
+                if matches!(self.tokens.get(self.pos + 1), Some(Token::LParen)) {
+                    if in_interface {
+                        return Err(format!(
+                            "interface `{}` cannot declare a constructor",
+                            class_name
+                        ));
+                    }
+                    if is_static || is_virtual || is_override || is_abstract || is_final {
+                        return Err(format!(
+                            "constructor `{}` cannot be {}",
+                            class_name,
+                            if is_static {
+                                "static"
+                            } else if is_virtual {
+                                "virtual"
+                            } else if is_override {
+                                "override"
+                            } else if is_abstract {
+                                "abstract"
+                            } else {
+                                "final"
+                            }
+                        ));
+                    }
+                    if !generic_params.is_empty() {
+                        return Err(format!(
+                            "constructor `{}` cannot have generic parameters",
+                            class_name
+                        ));
+                    }
+                    self.advance();
+                    let params = self.parse_params()?;
+                    self.consume(Token::LBrace, "expected `{`")?;
+                    let body = self.parse_block()?;
+                    return Ok(Member::Method(MethodDecl {
+                        is_static: false,
+                        visibility,
+                        is_virtual: false,
+                        is_override: false,
+                        is_abstract: false,
+                        is_final: false,
+                        is_constructor: true,
+                        generic_params: Vec::new(),
+                        return_ty: Type::Unit,
+                        name: class_name.to_string(),
+                        params,
+                        body,
+                    }));
+                }
+            }
+        }
         let ty = self.parse_type()?;
         let name = self.consume_ident("expected member name")?;
 
@@ -236,6 +291,7 @@ impl<'a> Parser<'a> {
                 is_override,
                 is_abstract,
                 is_final,
+                is_constructor: false,
                 generic_params,
                 return_ty: ty,
                 name,
@@ -1063,9 +1119,8 @@ impl<'a> Parser<'a> {
             } else {
                 Vec::new()
             };
-            self.consume(Token::LParen, "expected `(`")?;
-            self.consume(Token::RParen, "expected `)`")?;
-            return Ok(Expr::New(name, type_args));
+            let args = self.parse_args()?;
+            return Ok(Expr::New(name, type_args, args));
         }
         if self.check(Token::LBrace) {
             self.advance();

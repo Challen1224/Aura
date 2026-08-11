@@ -1,0 +1,64 @@
+class Counter {
+    int count;
+
+    Counter(int start) {
+        this.count = start;
+    }
+
+    void Increment() {
+        this.count = this.count + 1;
+    }
+
+    int Get() {
+        return this.count;
+    }
+}
+
+class Point {
+    int x;
+    int y;
+
+    Point(int x, int y) {
+        this.x = x;
+        this.y = y;
+    }
+
+    void Print() {
+        print("(");
+        print(this.x);
+        print(", ");
+        print(this.y);
+        print(")");
+        println();
+    }
+}
+
+class Box {
+    string label;
+
+    Box(string label) {
+        this.label = label;
+    }
+
+    string GetLabel() {
+        return this.label;
+    }
+}
+
+class Program {
+    static void Main() {
+        Counter c = new Counter(5);
+        c.Increment();
+        c.Increment();
+        print("Counter = ");
+        print(c.Get());
+        println();
+
+        Point p = new Point(3, 4);
+        p.Print();
+
+        Box b = new Box("hello");
+        print(b.GetLabel());
+        println();
+    }
+}

@@ -998,14 +998,33 @@ impl<'a> MethodEmitter<'a> {
                     }
                 }
             }
-            Expr::New(class_name, type_args) => {
+            Expr::New(class_name, type_args, args) => {
                 let class_id = *self.class_ids.get(class_name).ok_or_else(|| {
                     format!("unknown class `{}`", class_name)
                 })?;
+                let has_constructor = self
+                    .program
+                    .classes
+                    .get(class_name)
+                    .map(|ci| ci.constructor.is_some())
+                    .unwrap_or(false);
+                for arg in args {
+                    self.emit_expr(arg)?;
+                }
                 let mapped_type_args: Vec<TypeDesc> = type_args.iter()
                     .map(|arg| map_type(arg, self.class_ids, self.enum_ids, &[]))
                     .collect();
                 self.ops.push(Op::NewObj(class_id, mapped_type_args));
+                if has_constructor {
+                    // Stash the new object, run its constructor, then restore it
+                    // so the `new` expression evaluates to the object.
+                    let obj_local = self.push_local("__new_temp".to_string()) as u16;
+                    self.ops.push(Op::Stloc(obj_local));
+                    self.ops.push(Op::Ldloc(obj_local));
+                    self.ops.push(Op::CallVirt(class_name.clone()));
+                    self.ops.push(Op::Pop);
+                    self.ops.push(Op::Ldloc(obj_local));
+                }
             }
             Expr::Tuple(elements) => {
                 for elem in elements {
@@ -1391,7 +1410,7 @@ impl<'a> MethodEmitter<'a> {
                     }
                 }
             }
-            Expr::New(class_name, _) => Some(class_name.clone()),
+            Expr::New(class_name, _, _) => Some(class_name.clone()),
             Expr::Field(obj, name) => {
                 let owner = self.expr_class(obj)?;
                 let layout = self.field_layout.get(&owner)?;
