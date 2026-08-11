@@ -86,10 +86,31 @@ impl Emitter {
         for decl in &program.program.decls {
             if let Decl::Class(class) = decl {
                 for member in &class.members {
-                    if let Member::Method(m) = member {
-                        let id = MethodId(self.next_method_id);
-                        self.next_method_id += 1;
-                        method_ids.insert((class.name.clone(), m.name.clone(), !m.is_static), id);
+                    match member {
+                        Member::Method(m) => {
+                            let id = MethodId(self.next_method_id);
+                            self.next_method_id += 1;
+                            method_ids.insert((class.name.clone(), m.name.clone(), !m.is_static), id);
+                        }
+                        Member::Property(p) => {
+                            if p.getter.is_some() {
+                                let id = MethodId(self.next_method_id);
+                                self.next_method_id += 1;
+                                method_ids.insert(
+                                    (class.name.clone(), format!("get_{}", p.name), !p.is_static),
+                                    id,
+                                );
+                            }
+                            if p.setter.is_some() {
+                                let id = MethodId(self.next_method_id);
+                                self.next_method_id += 1;
+                                method_ids.insert(
+                                    (class.name.clone(), format!("set_{}", p.name), !p.is_static),
+                                    id,
+                                );
+                            }
+                        }
+                        Member::Field(_) => {}
                     }
                 }
             }
@@ -158,61 +179,59 @@ impl Emitter {
                 let mut static_methods = HashMap::new();
 
                 for member in &class.members {
-                    if let Member::Method(m) = member {
-                        let method_id = *method_ids
-                            .get(&(class.name.clone(), m.name.clone(), !m.is_static))
-                            .unwrap();
+                    match member {
+                        Member::Method(m) => {
+                            let method_id = *method_ids
+                                .get(&(class.name.clone(), m.name.clone(), !m.is_static))
+                                .unwrap();
 
-                        if class.name == "Program" && m.name == "Main" && m.is_static {
-                            entrypoint = Some(method_id);
+                            if class.name == "Program" && m.name == "Main" && m.is_static {
+                                entrypoint = Some(method_id);
+                            }
+
+                            let (method_id, method_def) = self.build_method_def(
+                                program, class, m, info, class_id, &method_ids,
+                                &class_ids, &enum_ids, &field_layouts,
+                                &class_generic_params, &mut module,
+                            )?;
+
+                            if m.is_static {
+                                static_methods.insert(method_id, method_def);
+                            } else {
+                                methods.insert(method_id, method_def);
+                            }
                         }
-
-                        let mut me = MethodEmitter::new(
-                            class_id,
-                            &class.name,
-                            m,
-                            info,
-                            program,
-                            &class_ids,
-                            &enum_ids,
-                            &field_layouts,
-                            &method_ids,
-                        );
-                        me.emit_body()?;
-
-                        let mut method_def = MethodDef {
-                            name: m.name.clone(),
-                            return_ty: map_type(&m.return_ty, &class_ids, &enum_ids, &class_generic_params),
-                            params: m.params.iter().map(|p| map_type(&p.ty, &class_ids, &enum_ids, &class_generic_params)).collect(),
-                            generic_params: m.generic_params.iter().map(|gp| {
-                                aura_bytecode::GenericParam {
-                                    name: gp.name.clone(),
-                                    constraint: gp.constraint.as_ref().map(|c| map_type(c, &class_ids, &enum_ids, &class_generic_params)),
-                                    variance: aura_bytecode::Variance::Invariant,
-                                }
-                            }).collect(),
-                            is_instance: !m.is_static,
-                            body: me.ops,
-                            handlers: me.handlers,
-                            max_stack: 8,
-                            locals: me.max_locals as u16,
-                        };
-
-                        let constant_offset = module.constant_pool.len() as u32;
-                        if !me.constants.is_empty() {
-                            module.constant_pool.extend(me.constants);
-                            for op in &mut method_def.body {
-                                if let Op::LdStr(idx) | Op::LdFloat(idx) = op {
-                                    *idx += constant_offset;
+                        Member::Property(p) => {
+                            let mut emitted: Vec<(bool, (MethodId, MethodDef))> = Vec::new();
+                            if p.getter.is_some() {
+                                emitted.push((
+                                    p.is_static,
+                                    self.build_method_def(
+                                        program, class, &property_accessor_decl(class.name.clone(), p, true),
+                                        info, class_id, &method_ids, &class_ids, &enum_ids,
+                                        &field_layouts, &class_generic_params, &mut module,
+                                    )?,
+                                ));
+                            }
+                            if p.setter.is_some() {
+                                emitted.push((
+                                    p.is_static,
+                                    self.build_method_def(
+                                        program, class, &property_accessor_decl(class.name.clone(), p, false),
+                                        info, class_id, &method_ids, &class_ids, &enum_ids,
+                                        &field_layouts, &class_generic_params, &mut module,
+                                    )?,
+                                ));
+                            }
+                            for (is_static, (method_id, method_def)) in emitted {
+                                if is_static {
+                                    static_methods.insert(method_id, method_def);
+                                } else {
+                                    methods.insert(method_id, method_def);
                                 }
                             }
                         }
-
-                        if m.is_static {
-                            static_methods.insert(method_id, method_def);
-                        } else {
-                            methods.insert(method_id, method_def);
-                        }
+                        Member::Field(_) => {}
                     }
                 }
 
@@ -236,6 +255,118 @@ impl Emitter {
 
         module.entrypoint = entrypoint;
         Ok(module)
+    }
+
+    /// Emit a single method into a `MethodDef`, adding any string/float constants
+    /// to the module constant pool.
+    #[allow(clippy::too_many_arguments)]
+    fn build_method_def(
+        &self,
+        program: &TypedProgram,
+        class: &ClassDecl,
+        m: &MethodDecl,
+        info: &ClassInfo,
+        class_id: ClassId,
+        method_ids: &HashMap<(String, String, bool), MethodId>,
+        class_ids: &HashMap<String, ClassId>,
+        enum_ids: &HashMap<String, EnumId>,
+        field_layouts: &FieldLayout,
+        class_generic_params: &[aura_bytecode::GenericParam],
+        module: &mut Module,
+    ) -> Result<(MethodId, MethodDef), String> {
+        let method_id = *method_ids
+            .get(&(class.name.clone(), m.name.clone(), !m.is_static))
+            .ok_or_else(|| format!("unknown method id for `{}`", m.name))?;
+
+        let mut me = MethodEmitter::new(
+            class_id,
+            &class.name,
+            m,
+            info,
+            program,
+            class_ids,
+            enum_ids,
+            field_layouts,
+            method_ids,
+        );
+        me.emit_body()?;
+
+        let mut method_def = MethodDef {
+            name: m.name.clone(),
+            return_ty: map_type(&m.return_ty, class_ids, enum_ids, class_generic_params),
+            params: m.params.iter().map(|p| map_type(&p.ty, class_ids, enum_ids, class_generic_params)).collect(),
+            generic_params: m.generic_params.iter().map(|gp| {
+                aura_bytecode::GenericParam {
+                    name: gp.name.clone(),
+                    constraint: gp.constraint.as_ref().map(|c| map_type(c, class_ids, enum_ids, class_generic_params)),
+                    variance: aura_bytecode::Variance::Invariant,
+                }
+            }).collect(),
+            is_instance: !m.is_static,
+            body: me.ops,
+            handlers: me.handlers,
+            max_stack: 8,
+            locals: me.max_locals as u16,
+        };
+
+        let constant_offset = module.constant_pool.len() as u32;
+        if !me.constants.is_empty() {
+            module.constant_pool.extend(me.constants);
+            for op in &mut method_def.body {
+                if let Op::LdStr(idx) | Op::LdFloat(idx) = op {
+                    *idx += constant_offset;
+                }
+            }
+        }
+        Ok((method_id, method_def))
+    }
+}
+
+/// Build the synthetic `MethodDecl` for a property accessor.
+///
+/// Auto accessors read/write the synthetic backing field `__prop_{name}`;
+/// explicit accessor bodies are emitted as-is.
+fn property_accessor_decl(class_name: String, p: &PropertyDecl, is_getter: bool) -> MethodDecl {
+    let accessor = if is_getter { &p.getter } else { &p.setter };
+    let body = match accessor {
+        None => Vec::new(),
+        Some(Accessor::Body(body)) => body.clone(),
+        Some(Accessor::Auto) => {
+            let backing = format!("__prop_{}", p.name);
+            if is_getter {
+                let expr = if p.is_static {
+                    Expr::StaticField(class_name.clone(), backing)
+                } else {
+                    Expr::Field(Box::new(Expr::Var("this".to_string())), backing)
+                };
+                vec![Stmt::Return(Some(expr))]
+            } else {
+                let target = if p.is_static {
+                    AssignTarget::StaticField(class_name.clone(), backing)
+                } else {
+                    AssignTarget::Field(Box::new(Expr::Var("this".to_string())), backing)
+                };
+                vec![Stmt::Assign(target, Expr::Var("value".to_string()))]
+            }
+        }
+    };
+    MethodDecl {
+        is_static: p.is_static,
+        visibility: p.visibility,
+        is_virtual: false,
+        is_override: false,
+        is_abstract: false,
+        is_final: false,
+        is_constructor: false,
+        generic_params: Vec::new(),
+        return_ty: if is_getter { p.ty.clone() } else { Type::Unit },
+        name: format!("{}_{}", if is_getter { "get" } else { "set" }, p.name),
+        params: if is_getter {
+            Vec::new()
+        } else {
+            vec![Param { ty: p.ty.clone(), name: "value".to_string() }]
+        },
+        body,
     }
 }
 
@@ -364,6 +495,22 @@ impl<'a> MethodEmitter<'a> {
                         self.ops.push(Op::Stloc(idx));
                     }
             AssignTarget::Field(obj, name) => {
+                let obj_class = self.expr_class(obj);
+                if let Some(obj_class) = &obj_class {
+                    if let Some((_declaring, _)) = self.instance_property_opt(obj_class, name) {
+                        if let Expr::Var(n) = obj.as_ref() {
+                            if n == "this" {
+                                self.ops.push(Op::Ldloc(0));
+                            } else {
+                                self.emit_expr(obj)?;
+                            }
+                        } else {
+                            self.emit_expr(obj)?;
+                        }
+                        self.ops.push(Op::CallVirt(format!("set_{}", name)));
+                        return Ok(());
+                    }
+                }
                 if let Expr::Var(n) = obj.as_ref() {
                     if n == "this" {
                         self.ops.push(Op::Ldloc(0));
@@ -380,14 +527,37 @@ impl<'a> MethodEmitter<'a> {
                 self.ops.push(Op::Stfld(idx));
             }
                     AssignTarget::StaticField(class_name, name) => {
-                        let (declaring, idx) = self.static_field_index(class_name, name)?;
-                        let class_id = *self.class_ids.get(&declaring).unwrap();
-                        self.ops.push(Op::Stsfld(class_id, idx));
+                        if let Some((declaring, _)) = self.static_property_opt(class_name, name) {
+                            let method_id = *self.method_ids.get(&(
+                                declaring.clone(),
+                                format!("set_{}", name),
+                                false,
+                            )).ok_or_else(|| {
+                                format!("unknown setter for property `{}` on `{}`", name, declaring)
+                            })?;
+                            self.ops.push(Op::Call(method_id));
+                        } else {
+                            let (declaring, idx) = self.static_field_index(class_name, name)?;
+                            let class_id = *self.class_ids.get(&declaring).unwrap();
+                            self.ops.push(Op::Stsfld(class_id, idx));
+                        }
                     }
                     AssignTarget::SuperField(name) => {
-                        self.ops.push(Op::Ldloc(0));
-                        let idx = self.super_field_index(name)?;
-                        self.ops.push(Op::Stfld(idx));
+                        if let Some((declaring, _)) = self.super_instance_property(name) {
+                            let method_id = *self.method_ids.get(&(
+                                declaring.clone(),
+                                format!("set_{}", name),
+                                true,
+                            )).ok_or_else(|| {
+                                format!("unknown setter for property `{}` on `{}`", name, declaring)
+                            })?;
+                            self.ops.push(Op::Ldloc(0));
+                            self.ops.push(Op::CallSuper(method_id));
+                        } else {
+                            self.ops.push(Op::Ldloc(0));
+                            let idx = self.super_field_index(name)?;
+                            self.ops.push(Op::Stfld(idx));
+                        }
                     }
                 }
             }
@@ -838,6 +1008,22 @@ impl<'a> MethodEmitter<'a> {
                 }
             }
             Expr::Field(obj, name) => {
+                let obj_class = self.expr_class(obj);
+                if let Some(obj_class) = &obj_class {
+                    if let Some((_declaring, _)) = self.instance_property_opt(obj_class, name) {
+                        if let Expr::Var(n) = obj.as_ref() {
+                            if n == "this" {
+                                self.ops.push(Op::Ldloc(0));
+                            } else {
+                                self.emit_expr(obj)?;
+                            }
+                        } else {
+                            self.emit_expr(obj)?;
+                        }
+                        self.ops.push(Op::CallVirt(format!("get_{}", name)));
+                        return Ok(());
+                    }
+                }
                 if let Expr::Var(n) = obj.as_ref() {
                     if n == "this" {
                         self.ops.push(Op::Ldloc(0));
@@ -861,6 +1047,15 @@ impl<'a> MethodEmitter<'a> {
                     let variant_idx = enum_def.variants.iter().position(|v| v.name == *name)
                         .ok_or_else(|| format!("unknown variant `{}.{}`", class_name, name))?;
                     self.ops.push(Op::NewEnum(*enum_id, variant_idx as u16));
+                } else if let Some((declaring, _)) = self.static_property_opt(class_name, name) {
+                    let method_id = *self.method_ids.get(&(
+                        declaring.clone(),
+                        format!("get_{}", name),
+                        false,
+                    )).ok_or_else(|| {
+                        format!("unknown getter for property `{}` on `{}`", name, declaring)
+                    })?;
+                    self.ops.push(Op::Call(method_id));
                 } else {
                     let (declaring, idx) = self.static_field_index(class_name, name)?;
                     let class_id = *self.class_ids.get(&declaring).unwrap();
@@ -876,9 +1071,21 @@ impl<'a> MethodEmitter<'a> {
                 self.ops.push(Op::CallSuper(method_id));
             }
             Expr::SuperField(name) => {
-                self.ops.push(Op::Ldloc(0)); // this
-                let idx = self.super_field_index(name)?;
-                self.ops.push(Op::Ldfld(idx));
+                if let Some((declaring, _)) = self.super_instance_property(name) {
+                    let method_id = *self.method_ids.get(&(
+                        declaring.clone(),
+                        format!("get_{}", name),
+                        true,
+                    )).ok_or_else(|| {
+                        format!("unknown getter for property `{}` on `{}`", name, declaring)
+                    })?;
+                    self.ops.push(Op::Ldloc(0)); // this
+                    self.ops.push(Op::CallSuper(method_id));
+                } else {
+                    self.ops.push(Op::Ldloc(0)); // this
+                    let idx = self.super_field_index(name)?;
+                    self.ops.push(Op::Ldfld(idx));
+                }
             }
             Expr::EnumVariant(enum_name, variant_name, args) => {
                 let enum_id = *self.enum_ids.get(enum_name).ok_or_else(|| {
@@ -1431,6 +1638,42 @@ impl<'a> MethodEmitter<'a> {
             .and_then(|layout| layout.iter().position(|(n, _)| n == name))
             .map(|i| i as u16)
             .ok_or_else(|| format!("unknown super field `{}`", name))
+    }
+
+    /// Find an instance property on `obj_class` or its super chain.
+    fn instance_property_opt(&self, obj_class: &str, name: &str) -> Option<(String, ())> {
+        let mut cur = Some(obj_class.to_string());
+        while let Some(c) = cur {
+            let info = self.program.classes.get(&c)?;
+            if info.properties.contains_key(name) {
+                return Some((c, ()));
+            }
+            cur = info.super_class.clone();
+        }
+        None
+    }
+
+    /// Find a static property on `class_name` or its super chain.
+    fn static_property_opt(&self, class_name: &str, name: &str) -> Option<(String, ())> {
+        let mut cur = Some(class_name.to_string());
+        while let Some(c) = cur {
+            let info = self.program.classes.get(&c)?;
+            if info.static_properties.contains_key(name) {
+                return Some((c, ()));
+            }
+            cur = info.super_class.clone();
+        }
+        None
+    }
+
+    /// Find an instance property on the current class's super chain.
+    fn super_instance_property(&self, name: &str) -> Option<(String, ())> {
+        let super_name = self
+            .program
+            .classes
+            .get(self.class_name)
+            .and_then(|ci| ci.super_class.clone())?;
+        self.instance_property_opt(&super_name, name)
     }
 
     /// Resolve a static field's declaring class and index, walking the super chain.

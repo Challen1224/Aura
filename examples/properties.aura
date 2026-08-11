@@ -1,0 +1,78 @@
+class Bank {
+    private int balance;
+
+    int Balance {
+        get { return this.balance; }
+    }
+
+    void Deposit(int amount) {
+        if (amount > 0) {
+            this.balance = this.balance + amount;
+        }
+    }
+}
+
+class Person {
+    string Name { get; set; }
+    int Age { get; set; }
+}
+
+class Stats {
+    static int Total {
+        get;
+        set;
+    }
+}
+
+class Base {
+    int Value { get; set; }
+}
+
+class Derived : Base {
+    int DoubleValue {
+        get { return this.Value * 2; }
+    }
+}
+
+class Cache<T> {
+    T Item { get; set; }
+}
+
+class Program {
+    static void Main() {
+        Bank b = new Bank();
+        b.Deposit(100);
+        b.Deposit(-50);
+        print("Balance = ");
+        print(b.Balance);
+        println();
+
+        Person p = new Person();
+        p.Name = "Alice";
+        p.Age = 30;
+        print(p.Name);
+        print(" is ");
+        print(p.Age);
+        println();
+
+        Stats.Total = 42;
+        print("Total = ");
+        print(Stats.Total);
+        println();
+
+        Derived d = new Derived();
+        d.Value = 7;
+        print("DoubleValue = ");
+        print(d.DoubleValue);
+        println();
+
+        Cache<int> ci = new Cache<int>();
+        ci.Item = 99;
+        Cache<string> cs = new Cache<string>();
+        cs.Item = "cached";
+        print(ci.Item);
+        print(" / ");
+        print(cs.Item);
+        println();
+    }
+}

@@ -84,6 +84,38 @@ pub enum Member {
     Field(FieldDecl),
     /// Method declaration.
     Method(MethodDecl),
+    /// Property with optional getter/setter accessors.
+    Property(PropertyDecl),
+}
+
+/// A property declaration: `int Count { get { ... } set { ... } }`.
+///
+/// An accessor is either `Auto` (written as `get;` / `set;`) which is backed
+/// by a compiler-generated field, or `Body` with explicit statements. The
+/// setter body refers to the assigned value as `value`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PropertyDecl {
+    /// Whether the property is static.
+    pub is_static: bool,
+    /// Member visibility.
+    pub visibility: Visibility,
+    /// Property type.
+    pub ty: Type,
+    /// Property name.
+    pub name: String,
+    /// Getter accessor, if declared.
+    pub getter: Option<Accessor>,
+    /// Setter accessor, if declared.
+    pub setter: Option<Accessor>,
+}
+
+/// A property accessor implementation.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Accessor {
+    /// Auto accessor (`get;` / `set;`) backed by a generated field.
+    Auto,
+    /// Accessor with an explicit body.
+    Body(Vec<Stmt>),
 }
 
 /// Field declaration.

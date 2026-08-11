@@ -102,6 +102,27 @@ pub struct ClassInfo {
     pub static_methods: HashMap<String, MethodInfo>,
     /// Optional constructor (parameter list used when type-checking `new`).
     pub constructor: Option<ConstructorInfo>,
+    /// Instance properties keyed by name.
+    pub properties: HashMap<String, PropertyInfo>,
+    /// Static properties keyed by name.
+    pub static_properties: HashMap<String, PropertyInfo>,
+}
+
+/// Property metadata.
+#[derive(Debug, Clone)]
+pub struct PropertyInfo {
+    /// Property name.
+    pub name: String,
+    /// Property type.
+    pub ty: Type,
+    /// Member visibility.
+    pub visibility: Visibility,
+    /// Whether a getter accessor is declared.
+    pub has_getter: bool,
+    /// Whether a setter accessor is declared.
+    pub has_setter: bool,
+    /// Whether this is a static property.
+    pub is_static: bool,
 }
 
 /// Constructor metadata.
@@ -212,6 +233,8 @@ impl TypeChecker {
                         methods: HashMap::new(),
                         static_methods: HashMap::new(),
                         constructor: None,
+                        properties: HashMap::new(),
+                        static_properties: HashMap::new(),
                     };
                     if c.is_abstract && c.is_interface {
                         return Err(TypeError(format!(
@@ -231,6 +254,14 @@ impl TypeChecker {
                                 if c.is_interface {
                                     return Err(TypeError(format!(
                                         "interface `{}` cannot declare field `{}`",
+                                        c.name, f.name
+                                    )));
+                                }
+                                if info.properties.contains_key(&f.name)
+                                    || info.static_properties.contains_key(&f.name)
+                                {
+                                    return Err(TypeError(format!(
+                                        "`{}` already has a property named `{}`",
                                         c.name, f.name
                                     )));
                                 }
@@ -359,6 +390,50 @@ impl TypeChecker {
                                     info.static_methods.insert(m.name.clone(), mi);
                                 } else {
                                     info.methods.insert(m.name.clone(), mi);
+                                }
+                            }
+                            Member::Property(p) => {
+                                if c.is_interface {
+                                    return Err(TypeError(format!(
+                                        "interface `{}` cannot declare property `{}`",
+                                        c.name, p.name
+                                    )));
+                                }
+                                let name_conflict = info.instance_fields.iter().any(|(n, _)| *n == p.name)
+                                    || info.static_fields.iter().any(|(n, _)| *n == p.name)
+                                    || info.methods.contains_key(&p.name)
+                                    || info.static_methods.contains_key(&p.name)
+                                    || info.properties.contains_key(&p.name)
+                                    || info.static_properties.contains_key(&p.name);
+                                if name_conflict {
+                                    return Err(TypeError(format!(
+                                        "`{}` already has a member named `{}`",
+                                        c.name, p.name
+                                    )));
+                                }
+                                let pi = PropertyInfo {
+                                    name: p.name.clone(),
+                                    ty: p.ty.clone(),
+                                    visibility: p.visibility,
+                                    has_getter: p.getter.is_some(),
+                                    has_setter: p.setter.is_some(),
+                                    is_static: p.is_static,
+                                };
+                                if p.is_static {
+                                    info.static_properties.insert(p.name.clone(), pi);
+                                } else {
+                                    info.properties.insert(p.name.clone(), pi);
+                                }
+                                // Auto accessors are backed by a generated field.
+                                if matches!(p.getter, Some(Accessor::Auto))
+                                    || matches!(p.setter, Some(Accessor::Auto))
+                                {
+                                    let backing = format!("__prop_{}", p.name);
+                                    if p.is_static {
+                                        info.static_fields.push((backing, p.ty.clone()));
+                                    } else {
+                                        info.instance_fields.push((backing, p.ty.clone()));
+                                    }
                                 }
                             }
                         }
@@ -528,6 +603,40 @@ impl TypeChecker {
                     return Some((c.to_string(), ty.clone(), visibility));
                 }
                 cur = info.super_class.as_deref();
+            } else {
+                break;
+            }
+        }
+        None
+    }
+
+    /// Look up an instance property starting at `class_name`, walking the super chain.
+    /// Returns (declaring class, property info).
+    fn find_instance_property(&self, class_name: &str, name: &str) -> Option<(String, PropertyInfo)> {
+        let mut cur = Some(class_name.to_string());
+        while let Some(c) = cur {
+            if let Some(info) = self.classes.get(&c) {
+                if let Some(pi) = info.properties.get(name) {
+                    return Some((c.clone(), pi.clone()));
+                }
+                cur = info.super_class.clone();
+            } else {
+                break;
+            }
+        }
+        None
+    }
+
+    /// Look up a static property starting at `class_name`, walking the super chain.
+    /// Returns (declaring class, property info).
+    fn find_static_property(&self, class_name: &str, name: &str) -> Option<(String, PropertyInfo)> {
+        let mut cur = Some(class_name.to_string());
+        while let Some(c) = cur {
+            if let Some(info) = self.classes.get(&c) {
+                if let Some(pi) = info.static_properties.get(name) {
+                    return Some((c.clone(), pi.clone()));
+                }
+                cur = info.super_class.clone();
             } else {
                 break;
             }
@@ -794,6 +903,21 @@ impl TypeChecker {
                 }
             } else if let Member::Field(f) = member {
                 self.validate_type_with_generics(&f.ty, class_generic_params)?;
+            } else if let Member::Property(p) = member {
+                self.validate_type_with_generics(&p.ty, class_generic_params)?;
+                if let Some(Accessor::Body(body)) = &p.getter {
+                    let mut locals: HashMap<String, Type> = HashMap::new();
+                    for stmt in body {
+                        self.check_stmt(stmt, &info, &mut locals, &p.ty, !p.is_static, class_generic_params)?;
+                    }
+                }
+                if let Some(Accessor::Body(body)) = &p.setter {
+                    let mut locals: HashMap<String, Type> = HashMap::new();
+                    locals.insert("value".to_string(), p.ty.clone());
+                    for stmt in body {
+                        self.check_stmt(stmt, &info, &mut locals, &Type::Unit, !p.is_static, class_generic_params)?;
+                    }
+                }
             }
         }
         Ok(())
@@ -1239,6 +1363,23 @@ impl TypeChecker {
                 if !self.classes.contains_key(&class_name) {
                     return Err(TypeError(format!("unknown class `{}`", class_name)));
                 }
+                if let Some((declared_in, pi)) = self.find_instance_property(&class_name, name) {
+                    if !pi.has_getter {
+                        return Err(TypeError(format!(
+                            "property `{}` on `{}` has no getter",
+                            name, declared_in
+                        )));
+                    }
+                    if !self.can_access(&class.name, &declared_in, pi.visibility) {
+                        return Err(TypeError(format!(
+                            "property `{}` on `{}` is {}",
+                            name, declared_in, visibility_name(pi.visibility)
+                        )));
+                    }
+                    let target_class = self.classes.get(&class_name).unwrap();
+                    let subst = build_subst(&target_class.generic_params, &type_args);
+                    return Ok(substitute_type(&pi.ty, &subst));
+                }
                 let (declared_in, field_type, visibility) =
                     self.find_instance_field(&class_name, name).ok_or_else(|| {
                         TypeError(format!("unknown field `{}` on `{}`", name, class_name))
@@ -1278,6 +1419,21 @@ impl TypeChecker {
                 }
                 if !self.classes.contains_key(class_name) {
                     return Err(TypeError(format!("unknown class `{}`", class_name)));
+                }
+                if let Some((declared_in, pi)) = self.find_static_property(class_name, name) {
+                    if !pi.has_getter {
+                        return Err(TypeError(format!(
+                            "static property `{}` on `{}` has no getter",
+                            name, declared_in
+                        )));
+                    }
+                    if !self.can_access(&class.name, &declared_in, pi.visibility) {
+                        return Err(TypeError(format!(
+                            "static property `{}` on `{}` is {}",
+                            name, declared_in, visibility_name(pi.visibility)
+                        )));
+                    }
+                    return Ok(pi.ty);
                 }
                 let (declared_in, ty, visibility) =
                     self.find_static_field(class_name, name).ok_or_else(|| {
@@ -1603,6 +1759,21 @@ impl TypeChecker {
                     return Err(TypeError("`super` in static method".to_string()));
                 }
                 let super_name = self.super_class_of(class)?;
+                if let Some((declared_in, pi)) = self.find_instance_property(super_name, field_name) {
+                    if !pi.has_getter {
+                        return Err(TypeError(format!(
+                            "property `{}` on super class `{}` has no getter",
+                            field_name, super_name
+                        )));
+                    }
+                    if !self.can_access(&class.name, &declared_in, pi.visibility) {
+                        return Err(TypeError(format!(
+                            "property `{}` on `{}` is {}",
+                            field_name, declared_in, visibility_name(pi.visibility)
+                        )));
+                    }
+                    return Ok(pi.ty);
+                }
                 let (declared_in, ty, visibility) =
                     self.find_instance_field(super_name, field_name).ok_or_else(|| {
                         TypeError(format!(
@@ -1662,10 +1833,10 @@ impl TypeChecker {
                 .ok_or_else(|| TypeError(format!("unknown variable `{}`", name))),
             AssignTarget::Field(obj, name) => {
                 let obj_ty = self.infer_expr(obj, class, locals, in_instance, return_ty, generic_params)?;
-                let class_name = if let Type::Class(name, _) = &obj_ty {
-                    name.clone()
+                let (class_name, type_args) = if let Type::Class(cname, args) = &obj_ty {
+                    (cname.clone(), args.clone())
                 } else if in_instance && matches!(obj.as_ref(), Expr::Var(n) if n == "this") {
-                    class.name.clone()
+                    (class.name.clone(), vec![])
                 } else {
                     return Err(TypeError(format!(
                         "cannot assign field `{}` on non-class type {}",
@@ -1675,6 +1846,23 @@ impl TypeChecker {
                 };
                 if !self.classes.contains_key(&class_name) {
                     return Err(TypeError(format!("unknown class `{}`", class_name)));
+                }
+                let target_class = self.classes.get(&class_name).unwrap();
+                let subst = build_subst(&target_class.generic_params, &type_args);
+                if let Some((declared_in, pi)) = self.find_instance_property(&class_name, name) {
+                    if !pi.has_setter {
+                        return Err(TypeError(format!(
+                            "property `{}` on `{}` has no setter",
+                            name, declared_in
+                        )));
+                    }
+                    if !self.can_access(&class.name, &declared_in, pi.visibility) {
+                        return Err(TypeError(format!(
+                            "property `{}` on `{}` is {}",
+                            name, declared_in, visibility_name(pi.visibility)
+                        )));
+                    }
+                    return Ok(substitute_type(&pi.ty, &subst));
                 }
                 let (declared_in, ty, visibility) =
                     self.find_instance_field(&class_name, name).ok_or_else(|| {
@@ -1686,11 +1874,26 @@ impl TypeChecker {
                         name, declared_in, visibility_name(visibility)
                     )));
                 }
-                Ok(ty)
+                Ok(substitute_type(&ty, &subst))
             }
             AssignTarget::StaticField(class_name, name) => {
                 if !self.classes.contains_key(class_name) {
                     return Err(TypeError(format!("unknown class `{}`", class_name)));
+                }
+                if let Some((declared_in, pi)) = self.find_static_property(class_name, name) {
+                    if !pi.has_setter {
+                        return Err(TypeError(format!(
+                            "static property `{}` on `{}` has no setter",
+                            name, declared_in
+                        )));
+                    }
+                    if !self.can_access(&class.name, &declared_in, pi.visibility) {
+                        return Err(TypeError(format!(
+                            "static property `{}` on `{}` is {}",
+                            name, declared_in, visibility_name(pi.visibility)
+                        )));
+                    }
+                    return Ok(pi.ty);
                 }
                 let (declared_in, ty, visibility) =
                     self.find_static_field(class_name, name).ok_or_else(|| {
@@ -1709,6 +1912,21 @@ impl TypeChecker {
                     return Err(TypeError("`super` in static method".to_string()));
                 }
                 let super_name = self.super_class_of(class)?;
+                if let Some((declared_in, pi)) = self.find_instance_property(super_name, name) {
+                    if !pi.has_setter {
+                        return Err(TypeError(format!(
+                            "property `{}` on super class `{}` has no setter",
+                            name, super_name
+                        )));
+                    }
+                    if !self.can_access(&class.name, &declared_in, pi.visibility) {
+                        return Err(TypeError(format!(
+                            "property `{}` on `{}` is {}",
+                            name, declared_in, visibility_name(pi.visibility)
+                        )));
+                    }
+                    return Ok(pi.ty);
+                }
                 let (declared_in, ty, visibility) =
                     self.find_instance_field(super_name, name).ok_or_else(|| {
                         TypeError(format!(

@@ -298,6 +298,61 @@ impl<'a> Parser<'a> {
                 params,
                 body,
             }))
+        } else if self.check(Token::LBrace) {
+            if is_virtual || is_override || is_abstract || is_final {
+                return Err(format!("`{}` cannot be used on a property",
+                    if is_abstract { "abstract" } else if is_virtual { "virtual" } else if is_override { "override" } else { "final" }));
+            }
+            if !generic_params.is_empty() {
+                return Err(format!("property `{}` cannot have generic parameters", name));
+            }
+            self.consume(Token::LBrace, "expected `{`")?;
+            let mut getter = None;
+            let mut setter = None;
+            loop {
+                self.skip_newlines();
+                if self.check(Token::RBrace) {
+                    break;
+                }
+                if let Some(Token::Ident(kw)) = self.peek() {
+                    if kw == "get" || kw == "set" {
+                        let kw = kw.clone();
+                        self.advance();
+                        let accessor = if self.match_token(Token::Semi) {
+                            Accessor::Auto
+                        } else {
+                            self.consume(Token::LBrace, "expected `;` or `{` after accessor")?;
+                            let body = self.parse_block()?;
+                            Accessor::Body(body)
+                        };
+                        if kw == "get" {
+                            if getter.is_some() {
+                                return Err(format!("property `{}` has more than one getter", name));
+                            }
+                            getter = Some(accessor);
+                        } else {
+                            if setter.is_some() {
+                                return Err(format!("property `{}` has more than one setter", name));
+                            }
+                            setter = Some(accessor);
+                        }
+                        continue;
+                    }
+                }
+                return Err(format!("expected `get` or `set` accessor in property `{}`", name));
+            }
+            self.consume(Token::RBrace, "expected `}`")?;
+            if getter.is_none() && setter.is_none() {
+                return Err(format!("property `{}` must declare a getter or setter", name));
+            }
+            Ok(Member::Property(PropertyDecl {
+                is_static,
+                visibility,
+                ty,
+                name,
+                getter,
+                setter,
+            }))
         } else {
             if is_virtual || is_override || is_abstract || is_final {
                 return Err(format!("`{}` cannot be used on a field",
