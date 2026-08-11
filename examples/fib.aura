@@ -1,0 +1,15 @@
+class Program {
+    static int Fib(int n) {
+        if (n <= 1) {
+            return n;
+        }
+        return Program.Fib(n - 1) + Program.Fib(n - 2);
+    }
+
+    static void Main() {
+        int result = Program.Fib(10);
+        print("Fib(10) = ");
+        print(result);
+        println();
+    }
+}

@@ -1,0 +1,15 @@
+class Program {
+    static void Main() {
+        // Simple continue test
+        int sum = 0;
+        for (int i = 1; i <= 10; i = i + 1) {
+            if (i % 2 != 0) {
+                continue;
+            }
+            sum = sum + i;
+        }
+        print("Even sum: ");
+        print(sum);
+        println();
+    }
+}

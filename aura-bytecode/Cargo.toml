@@ -1,0 +1,9 @@
+[package]
+name = "aura-bytecode"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Aura bytecode ISA, values, and object model"
+
+[dependencies]
+thiserror.workspace = true

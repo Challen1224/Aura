@@ -1,0 +1,7 @@
+class Program {
+    static void Main() {
+        (int, int) point = (10, 20);
+        print(point);
+        println();
+    }
+}

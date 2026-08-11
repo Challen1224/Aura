@@ -1,0 +1,9 @@
+class Box<T> {
+    T value;
+}
+
+class Program {
+    static void Main() {
+        print("test");
+    }
+}

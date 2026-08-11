@@ -1,0 +1,69 @@
+class Program {
+    static void Main() {
+        // Test for loop
+        int sum = 0;
+        for (int i = 1; i <= 10; i = i + 1) {
+            sum = sum + i;
+        }
+        print("Sum 1-10: ");
+        print(sum);
+        println();
+        
+        // Test for loop with break
+        int count = 0;
+        for (int i = 0; i < 100; i = i + 1) {
+            if (i == 5) {
+                break;
+            }
+            count = count + 1;
+        }
+        print("Count before break: ");
+        print(count);
+        println();
+        
+        // Test for loop with continue
+        int evenSum = 0;
+        for (int i = 1; i <= 10; i = i + 1) {
+            if (i % 2 != 0) {
+                continue;
+            }
+            evenSum = evenSum + i;
+        }
+        print("Even sum 1-10: ");
+        print(evenSum);
+        println();
+        
+        // Test do-while loop
+        int n = 5;
+        int factorial = 1;
+        do {
+            factorial = factorial * n;
+            n = n - 1;
+        } while (n > 0);
+        print("5! = ");
+        print(factorial);
+        println();
+        
+        // Test ternary operator
+        int a = 10;
+        int b = 20;
+        int max = a > b ? a : b;
+        print("Max: ");
+        print(max);
+        println();
+        
+        // Test match expression
+        int day = 3;
+        string dayName = match (day) {
+            1 => "Monday"
+            2 => "Tuesday"
+            3 => "Wednesday"
+            4 => "Thursday"
+            5 => "Friday"
+            * => "Weekend"
+        };
+        print("Day 3 is: ");
+        print(dayName);
+        println();
+    }
+}

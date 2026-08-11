@@ -1,0 +1,27 @@
+class Box<T> {
+    T value;
+
+    T Get() {
+        return this.value;
+    }
+
+    void Set(T v) {
+        this.value = v;
+    }
+}
+
+class Program {
+    static void Main() {
+        Box<int> intBox = new Box<int>();
+        intBox.Set(42);
+        print("Int box: ");
+        print(intBox.Get());
+        println();
+
+        Box<string> strBox = new Box<string>();
+        strBox.Set("hello");
+        print("String box: ");
+        print(strBox.Get());
+        println();
+    }
+}

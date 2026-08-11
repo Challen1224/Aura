@@ -1,0 +1,21 @@
+enum Color {
+    Red,
+    Green,
+    Blue,
+    Custom(int r, int g, int b)
+}
+
+class Program {
+    static void Main() {
+        Color custom = Color.Custom(255, 128, 0);
+        
+        string result = match (custom) {
+            Color.Red => "red",
+            Color.Green => "green",
+            Color.Blue => "blue",
+            Color.Custom(r, g, b) => "custom"
+        };
+        print(result);
+        println();
+    }
+}

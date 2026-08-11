@@ -1,0 +1,40 @@
+class Program {
+    static void Main() {
+        // Test tuple creation
+        (int, int) point = (10, 20);
+        print("Point: ");
+        print(point);
+        println();
+
+        // Test tuple element access
+        int x = point.0;
+        int y = point.1;
+        print("x = ");
+        print(x);
+        println();
+        print("y = ");
+        print(y);
+        println();
+
+        // Test tuple destructuring
+        (int a, int b) = point;
+        print("a = ");
+        print(a);
+        println();
+        print("b = ");
+        print(b);
+        println();
+
+        // Test nested tuples
+        ((int, int), string) nested = ((1, 2), "hello");
+        print("Nested: ");
+        print(nested);
+        println();
+
+        // Test tuple with different types
+        (int, string, bool) mixed = (42, "test", true);
+        print("Mixed: ");
+        print(mixed);
+        println();
+    }
+}

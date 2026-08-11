@@ -1,0 +1,666 @@
+//! Aura stack-based virtual machine.
+//!
+//! The VM executes a [`Module`](aura_bytecode::Module) consisting of classes
+//! and methods. It maintains a call stack of frames, an evaluation stack per
+//! frame, a managed heap, and a mark-and-sweep GC.
+
+#![warn(missing_docs)]
+
+pub mod heap;
+
+use aura_bytecode::{AuraObject, ClassId, MethodDef, MethodId, Module, Op, TypeDesc, Value};
+use heap::{Heap, HeapError};
+use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
+
+/// Substitute generic parameters in a TypeDesc with concrete types
+fn substitute_type_desc(ty: &TypeDesc, generic_params: &[aura_bytecode::GenericParam], type_args: &[TypeDesc]) -> TypeDesc {
+    match ty {
+        TypeDesc::GenericParam(idx) => {
+            // Look up the parameter name by index, then find the corresponding type argument
+            if let Some(param) = generic_params.get(*idx as usize) {
+                if let Some(arg_idx) = generic_params.iter().position(|p| p.name == param.name) {
+                    if let Some(arg) = type_args.get(arg_idx) {
+                        return arg.clone();
+                    }
+                }
+            }
+            ty.clone()
+        }
+        TypeDesc::Class(id, args) => {
+            let substituted_args: Vec<TypeDesc> = args.iter()
+                .map(|arg| substitute_type_desc(arg, generic_params, type_args))
+                .collect();
+            TypeDesc::Class(*id, substituted_args)
+        }
+        TypeDesc::Tuple(types) => {
+            let substituted_types: Vec<TypeDesc> = types.iter()
+                .map(|t| substitute_type_desc(t, generic_params, type_args))
+                .collect();
+            TypeDesc::Tuple(substituted_types)
+        }
+        _ => ty.clone(),
+    }
+}
+
+/// Errors raised during VM execution.
+#[derive(Debug, thiserror::Error)]
+pub enum VmError {
+    /// The module has no entrypoint.
+    #[error("no entrypoint defined")]
+    NoEntrypoint,
+    /// Unknown method id.
+    #[error("unknown method {0:?}")]
+    UnknownMethod(MethodId),
+    /// Unknown class id.
+    #[error("unknown class {0:?}")]
+    UnknownClass(ClassId),
+    /// Stack underflow.
+    #[error("stack underflow")]
+    StackUnderflow,
+    /// Type mismatch at runtime.
+    #[error("type mismatch: expected {expected}, got {got}")]
+    TypeMismatch { expected: &'static str, got: String },
+    /// Heap access failure.
+    #[error("heap error: {0}")]
+    Heap(#[from] HeapError),
+    /// Division by zero.
+    #[error("divide by zero")]
+    DivideByZero,
+    /// Generic runtime error.
+    #[error("runtime error: {0}")]
+    Runtime(String),
+}
+
+/// A single call frame.
+#[derive(Debug)]
+pub struct Frame {
+    method_id: MethodId,
+    pc: usize,
+    locals: Vec<Value>,
+    stack: Vec<Value>,
+}
+
+impl Frame {
+    fn new(method_id: MethodId, params: Vec<Value>, locals_count: u16) -> Self {
+        let mut locals = Vec::with_capacity(locals_count as usize);
+        locals.extend(params);
+        locals.resize(locals_count as usize, Value::Unit);
+        Self {
+            method_id,
+            pc: 0,
+            locals,
+            stack: Vec::new(),
+        }
+    }
+
+    fn push(&mut self, value: Value) {
+        self.stack.push(value);
+    }
+
+    fn pop(&mut self) -> Result<Value, VmError> {
+        self.stack.pop().ok_or(VmError::StackUnderflow)
+    }
+
+    fn peek(&self) -> Result<&Value, VmError> {
+        self.stack.last().ok_or(VmError::StackUnderflow)
+    }
+}
+
+/// A virtual machine execution context.
+pub struct Vm {
+    module: Arc<Module>,
+    heap: Heap,
+    call_stack: Vec<Frame>,
+    static_fields: HashMap<ClassId, Vec<Value>>,
+}
+
+impl Vm {
+    /// Create a VM for the given module.
+    pub fn new(module: Arc<Module>) -> Self {
+        let mut static_fields = HashMap::new();
+        for (id, class) in &module.classes {
+            static_fields.insert(*id, vec![Value::Unit; class.static_fields.len()]);
+        }
+        Self {
+            module,
+            heap: Heap::new(),
+            call_stack: Vec::new(),
+            static_fields,
+        }
+    }
+
+    /// Run the module entrypoint and return the resulting value.
+    pub fn run(&mut self) -> Result<Value, VmError> {
+        let entry = self.module.entrypoint.ok_or(VmError::NoEntrypoint)?;
+        self.invoke(entry, vec![])
+    }
+
+    /// Invoke a method by id with the supplied arguments.
+    pub fn invoke(&mut self, method_id: MethodId, args: Vec<Value>) -> Result<Value, VmError> {
+        let locals = self.resolve_method(method_id)?.locals;
+        let frame = Frame::new(method_id, args, locals);
+        self.call_stack.push(frame);
+        self.run_frame()
+    }
+
+    fn run_frame(&mut self) -> Result<Value, VmError> {
+        let method_id = self.current_frame().method_id;
+        let method = self.resolve_method(method_id)?.clone();
+        self.execute_frame(method)
+    }
+
+    /// Access the heap directly.
+    pub fn heap(&self) -> &Heap {
+        &self.heap
+    }
+
+    fn execute_frame(&mut self, method: MethodDef) -> Result<Value, VmError> {
+        loop {
+            let op = {
+                let frame = self.current_frame();
+                let op = method
+                    .body
+                    .get(frame.pc)
+                    .ok_or_else(|| VmError::Runtime(format!("pc out of bounds")))?
+                    .clone();
+                frame.pc += 1;
+                op
+            };
+
+            if op == Op::Ret {
+                let result = self.pop().unwrap_or(Value::Unit);
+                self.call_stack.pop();
+                return Ok(result);
+            }
+
+            match op {
+                Op::Nop => {}
+
+                Op::LdInt(i) => self.push(Value::Int(i)),
+                Op::LdFloat(idx) => {
+                    let s = self
+                        .module
+                        .constant_pool
+                        .get(idx as usize)
+                        .ok_or_else(|| VmError::Runtime("float constant out of range".into()))?;
+                    let f = s.parse::<f64>().map_err(|e| VmError::Runtime(e.to_string()))?;
+                    self.push(Value::Float(f));
+                }
+                Op::LdBool(b) => self.push(Value::Bool(b)),
+                Op::LdStr(idx) => {
+                    let s = self
+                        .module
+                        .constant_pool
+                        .get(idx as usize)
+                        .ok_or_else(|| VmError::Runtime("string constant out of range".into()))?
+                        .clone();
+                    let handle = self.heap.allocate(AuraObject::String(s));
+                    self.push(Value::String(handle));
+                }
+                Op::LdNull => self.push(Value::Null),
+
+                Op::Ldloc(idx) => {
+                    let v = self.local(idx)?.clone();
+                    self.push(v);
+                }
+                Op::Stloc(idx) => {
+                    let v = self.pop()?;
+                    *self.local_mut(idx)? = v;
+                }
+                Op::Ldarg(idx) => {
+                    let v = self.arg(idx)?.clone();
+                    self.push(v);
+                }
+                Op::Dup => {
+                    let v = self.current_frame().peek()?.clone();
+                    self.push(v);
+                }
+                Op::Pop => {
+                    self.pop()?;
+                }
+
+                Op::Add => self.binary_int_float(|a, b| Ok(a + b), |a, b| Ok(a + b))?,
+                Op::Sub => self.binary_int_float(|a, b| Ok(a - b), |a, b| Ok(a - b))?,
+                Op::Mul => self.binary_int_float(|a, b| Ok(a * b), |a, b| Ok(a * b))?,
+                Op::Div => self.binary_int_float(
+                    |a, b| if b == 0 { Err(VmError::DivideByZero) } else { Ok(a / b) },
+                    |a, b| if b == 0.0 { Err(VmError::DivideByZero) } else { Ok(a / b) },
+                )?,
+                Op::Rem => self.binary_int_float(
+                    |a, b| if b == 0 { Err(VmError::DivideByZero) } else { Ok(a % b) },
+                    |a, b| if b == 0.0 { Err(VmError::DivideByZero) } else { Ok(a % b) },
+                )?,
+                Op::Neg => {
+                    let v = self.pop()?;
+                    let res = match v {
+                        Value::Int(i) => Value::Int(-i),
+                        Value::Float(f) => Value::Float(-f),
+                        _ => return Err(VmError::TypeMismatch { expected: "int or float", got: v.type_name().into() }),
+                    };
+                    self.push(res);
+                }
+
+                Op::Eq => self.compare_eq()?,
+                Op::Lt => self.compare_int_float(|a, b| a < b, |a, b| a < b)?,
+                Op::Le => self.compare_int_float(|a, b| a <= b, |a, b| a <= b)?,
+                Op::Gt => self.compare_int_float(|a, b| a > b, |a, b| a > b)?,
+                Op::Ge => self.compare_int_float(|a, b| a >= b, |a, b| a >= b)?,
+                Op::Not => {
+                    let v = self.pop()?;
+                    self.push(Value::Bool(!v.is_truthy()));
+                }
+                Op::And => {
+                    let b = self.pop()?.is_truthy();
+                    let a = self.pop()?.is_truthy();
+                    self.push(Value::Bool(a && b));
+                }
+                Op::Or => {
+                    let b = self.pop()?.is_truthy();
+                    let a = self.pop()?.is_truthy();
+                    self.push(Value::Bool(a || b));
+                }
+
+                Op::Br(off) => self.current_frame().pc = off as usize,
+                Op::BrFalse(off) => {
+                    if !self.pop()?.is_truthy() {
+                        self.current_frame().pc = off as usize;
+                    }
+                }
+                Op::BrTrue(off) => {
+                    if self.pop()?.is_truthy() {
+                        self.current_frame().pc = off as usize;
+                    }
+                }
+                Op::Call(id) => {
+                    let (params_len, locals) = {
+                        let m = self.resolve_method(id)?;
+                        (m.params.len(), m.locals)
+                    };
+                    let args = self.pop_args(params_len)?;
+                    self.call_stack.push(Frame::new(id, args, locals));
+                    let result = self.run_frame()?;
+                    self.push(result);
+                }
+                Op::CallVirt(name) => {
+                    // The compiler pushes arguments first, then the instance.
+                    // Pop the instance, resolve the method, then pop the arguments.
+                    let instance = self.pop()?;
+                    let Value::Object(handle) = instance else {
+                        return Err(VmError::TypeMismatch { expected: "object", got: instance.type_name().into() });
+                    };
+                    let class_id = self.heap.get(handle)?.instance_class_id()?;
+                    let method_id = self.resolve_virtual(class_id, &name)?;
+                    let params_len = self.resolve_method(method_id)?.params.len();
+                    // params does NOT include the instance, so we pop params_len arguments
+                    let mut args = self.pop_args(params_len)?;
+                    // Insert the instance at the beginning (as the first parameter)
+                    args.insert(0, Value::Object(handle));
+                    let result = self.invoke(method_id, args)?;
+                    self.push(result);
+                }
+                Op::CallSuper(id) => {
+                    // Non-virtual call to a base class method from `super.Method()`.
+                    // The compiler pushes arguments first, then `this`.
+                    let instance = self.pop()?;
+                    let Value::Object(handle) = instance else {
+                        return Err(VmError::TypeMismatch { expected: "object", got: instance.type_name().into() });
+                    };
+                    let params_len = self.resolve_method(id)?.params.len();
+                    let mut args = self.pop_args(params_len)?;
+                    args.insert(0, Value::Object(handle));
+                    let result = self.invoke(id, args)?;
+                    self.push(result);
+                }
+                Op::NewObj(class_id, type_args) => {
+                    let class = self
+                        .module
+                        .classes
+                        .get(&class_id)
+                        .ok_or(VmError::UnknownClass(class_id))?
+                        .clone();
+                    if class.is_abstract || class.is_interface {
+                        return Err(VmError::Runtime(format!(
+                            "cannot instantiate {} `{}`",
+                            if class.is_interface { "interface" } else { "abstract class" },
+                            class.name
+                        )));
+                    }
+                    let field_count = class.fields.len();
+                    let mut fields = Vec::with_capacity(field_count);
+                    
+                    for field in &class.fields {
+                        // Substitute generic parameters in field types
+                        let field_ty = substitute_type_desc(&field.ty, &class.generic_params, &type_args);
+                        fields.push(match field_ty {
+                            TypeDesc::Int => Value::Int(0),
+                            TypeDesc::Float => Value::Float(0.0),
+                            TypeDesc::Bool => Value::Bool(false),
+                            _ => Value::Null,
+                        });
+                    }
+                    let handle = self
+                        .heap
+                        .allocate(AuraObject::Instance { class_id, fields });
+                    self.push(Value::Object(handle));
+                }
+                Op::Ldfld(idx) => {
+                    let instance = self.pop()?;
+                    let Value::Object(handle) = instance else {
+                        return Err(VmError::TypeMismatch { expected: "object", got: instance.type_name().into() });
+                    };
+                    let field = self.heap.get(handle)?.field(idx as usize)?.clone();
+                    self.push(field);
+                }
+                Op::Stfld(idx) => {
+                    let instance = self.pop()?;
+                    let value = self.pop()?;
+                    let Value::Object(handle) = instance else {
+                        return Err(VmError::TypeMismatch { expected: "object", got: instance.type_name().into() });
+                    };
+                    *self.heap.get_mut(handle)?.field_mut(idx as usize)? = value;
+                }
+                Op::Ldsfld(class_id, idx) => {
+                    let v = self.static_fields[&class_id][idx as usize].clone();
+                    self.push(v);
+                }
+                Op::Stsfld(class_id, idx) => {
+                    let v = self.pop()?;
+                    self.static_fields.get_mut(&class_id).unwrap()[idx as usize] = v;
+                }
+
+                Op::NewEnum(enum_id, variant_idx) => {
+                    let enum_def = self.module.enums.get(&enum_id)
+                        .ok_or_else(|| VmError::Runtime(format!("unknown enum {:?}", enum_id)))?;
+                    let variant = enum_def.variants.get(variant_idx as usize)
+                        .ok_or_else(|| VmError::Runtime(format!("unknown variant index {}", variant_idx)))?;
+                    let field_count = variant.fields.len();
+                    let mut fields = Vec::with_capacity(field_count);
+                    for _ in 0..field_count {
+                        fields.push(self.pop()?);
+                    }
+                    fields.reverse();
+                    self.push(Value::Enum(enum_id.0, variant_idx as u32, fields));
+                }
+                Op::EnumTag => {
+                    let v = self.pop()?;
+                    match v {
+                        Value::Enum(_, variant_idx, _) => self.push(Value::Int(variant_idx as i32)),
+                        _ => return Err(VmError::TypeMismatch {
+                            expected: "enum",
+                            got: v.type_name().into(),
+                        }),
+                    }
+                }
+                Op::EnumField(idx) => {
+                    let v = self.pop()?;
+                    match v {
+                        Value::Enum(_, _, fields) => {
+                            let field = fields.get(idx as usize)
+                                .ok_or_else(|| VmError::Runtime(format!("enum field index {} out of range", idx)))?;
+                            self.push(field.clone());
+                        }
+                        _ => return Err(VmError::TypeMismatch {
+                            expected: "enum",
+                            got: v.type_name().into(),
+                        }),
+                    }
+                }
+
+                Op::NewTuple(count) => {
+                    let mut elements = Vec::with_capacity(count as usize);
+                    for _ in 0..count {
+                        elements.push(self.pop()?);
+                    }
+                    elements.reverse();
+                    self.push(Value::Tuple(elements));
+                }
+                Op::TupleField(idx) => {
+                    let v = self.pop()?;
+                    match v {
+                        Value::Tuple(elements) => {
+                            let elem = elements.get(idx as usize)
+                                .ok_or_else(|| VmError::Runtime(format!("tuple index {} out of range", idx)))?;
+                            self.push(elem.clone());
+                        }
+                        _ => return Err(VmError::TypeMismatch {
+                            expected: "tuple",
+                            got: v.type_name().into(),
+                        }),
+                    }
+                }
+
+                Op::Print => {
+                    let v = self.pop()?;
+                    match &v {
+                        Value::String(handle) => print!("{}", self.heap.get_string(*handle).unwrap_or("")),
+                        _ => print!("{}", v),
+                    }
+                }
+                Op::PrintLn => println!(),
+                Op::StringConcat(count) => {
+                    let mut parts = Vec::with_capacity(count as usize);
+                    for _ in 0..count {
+                        parts.push(self.pop()?);
+                    }
+                    parts.reverse();
+                    
+                    let mut result = String::new();
+                    for part in parts {
+                        match part {
+                            Value::String(handle) => {
+                                result.push_str(self.heap.get_string(handle).unwrap_or(""));
+                            }
+                            Value::Int(i) => result.push_str(&i.to_string()),
+                            Value::Float(f) => result.push_str(&f.to_string()),
+                            Value::Bool(b) => result.push_str(&b.to_string()),
+                            Value::Null => result.push_str("null"),
+                            Value::Unit => result.push_str("()"),
+                            _ => result.push_str(&part.to_string()),
+                        }
+                    }
+                    
+                    let handle = self.heap.allocate(AuraObject::String(result));
+                    self.push(Value::String(handle));
+                }
+                Op::Ret => unreachable!("Ret handled above match"),
+                Op::Break | Op::Continue => unreachable!("Break/Continue should be resolved by emitter"),
+            }
+        }
+    }
+
+    fn current_frame(&mut self) -> &mut Frame {
+        self.call_stack.last_mut().expect("call stack underflow")
+    }
+
+    fn push(&mut self, value: Value) {
+        self.current_frame().push(value);
+    }
+
+    fn pop(&mut self) -> Result<Value, VmError> {
+        self.current_frame().pop()
+    }
+
+    fn pop_args(&mut self, count: usize) -> Result<Vec<Value>, VmError> {
+        let mut args = Vec::with_capacity(count);
+        for _ in 0..count {
+            args.push(self.pop()?);
+        }
+        args.reverse();
+        Ok(args)
+    }
+
+    fn local(&self, idx: u16) -> Result<&Value, VmError> {
+        self.call_stack
+            .last()
+            .and_then(|f| f.locals.get(idx as usize))
+            .ok_or_else(|| VmError::Runtime(format!("local {idx} out of range")))
+    }
+
+    fn local_mut(&mut self, idx: u16) -> Result<&mut Value, VmError> {
+        self.call_stack
+            .last_mut()
+            .and_then(|f| f.locals.get_mut(idx as usize))
+            .ok_or_else(|| VmError::Runtime(format!("local {idx} out of range")))
+    }
+
+    fn arg(&self, idx: u16) -> Result<&Value, VmError> {
+        // Arguments are stored at the start of locals.
+        self.local(idx)
+    }
+
+    fn resolve_method(&self, id: MethodId) -> Result<&MethodDef, VmError> {
+        self.module.method(id).ok_or(VmError::UnknownMethod(id))
+    }
+
+    fn resolve_virtual(&self, class_id: ClassId, name: &str) -> Result<MethodId, VmError> {
+        let mut visited = HashSet::new();
+        self.resolve_virtual_from(class_id, name, &mut visited)
+    }
+
+    /// Search a class's own methods, then its super class chain, then its
+    /// implemented/extended interfaces for a method by name.
+    fn resolve_virtual_from(
+        &self,
+        class_id: ClassId,
+        name: &str,
+        visited: &mut HashSet<ClassId>,
+    ) -> Result<MethodId, VmError> {
+        if !visited.insert(class_id) {
+            return Err(VmError::Runtime(format!("method {} not found", name)));
+        }
+        let class = self
+            .module
+            .classes
+            .get(&class_id)
+            .ok_or(VmError::UnknownClass(class_id))?;
+        for (id, m) in &class.methods {
+            if m.name == name {
+                return Ok(*id);
+            }
+        }
+        if let Some(super_id) = class.super_class {
+            if let Ok(id) = self.resolve_virtual_from(super_id, name, visited) {
+                return Ok(id);
+            }
+        }
+        for iface_id in &class.interfaces {
+            if let Ok(id) = self.resolve_virtual_from(*iface_id, name, visited) {
+                return Ok(id);
+            }
+        }
+        Err(VmError::Runtime(format!("method {} not found", name)))
+    }
+
+    fn binary_int_float<FI, FF>(&mut self, int_op: FI, float_op: FF) -> Result<(), VmError>
+    where
+        FI: FnOnce(i32, i32) -> Result<i32, VmError>,
+        FF: FnOnce(f64, f64) -> Result<f64, VmError>,
+    {
+        let b = self.pop()?;
+        let a = self.pop()?;
+        let res = match (a, b) {
+            (Value::Int(a), Value::Int(b)) => Value::Int(int_op(a, b)?),
+            (Value::Float(a), Value::Float(b)) => Value::Float(float_op(a, b)?),
+            (Value::Int(a), Value::Float(b)) => Value::Float(float_op(a as f64, b)?),
+            (Value::Float(a), Value::Int(b)) => Value::Float(float_op(a, b as f64)?),
+            (a, b) => {
+                return Err(VmError::TypeMismatch {
+                    expected: "int or float",
+                    got: format!("{} and {}", a.type_name(), b.type_name()),
+                })
+            }
+        };
+        self.push(res);
+        Ok(())
+    }
+
+    fn compare_eq(&mut self) -> Result<(), VmError> {
+        let b = self.pop()?;
+        let a = self.pop()?;
+        let res = match (a, b) {
+            (Value::Int(a), Value::Int(b)) => Value::Bool(a == b),
+            (Value::Float(a), Value::Float(b)) => Value::Bool(a == b),
+            (Value::Bool(a), Value::Bool(b)) => Value::Bool(a == b),
+            (Value::Null, Value::Null) => Value::Bool(true),
+            (Value::Null, Value::Object(_)) | (Value::Object(_), Value::Null) => Value::Bool(false),
+            (Value::Object(a), Value::Object(b)) => Value::Bool(a == b),
+            (Value::Enum(eid_a, vid_a, ref fields_a), Value::Enum(eid_b, vid_b, ref fields_b)) => {
+                Value::Bool(eid_a == eid_b && vid_a == vid_b && fields_a == fields_b)
+            }
+            (a, b) => {
+                return Err(VmError::TypeMismatch {
+                    expected: "comparable values",
+                    got: format!("{} and {}", a.type_name(), b.type_name()),
+                })
+            }
+        };
+        self.push(res);
+        Ok(())
+    }
+
+    fn compare_int_float<FI, FF>(&mut self, int_op: FI, float_op: FF) -> Result<(), VmError>
+    where
+        FI: FnOnce(i32, i32) -> bool,
+        FF: FnOnce(f64, f64) -> bool,
+    {
+        let b = self.pop()?;
+        let a = self.pop()?;
+        let res = match (a, b) {
+            (Value::Int(a), Value::Int(b)) => Value::Bool(int_op(a, b)),
+            (Value::Float(a), Value::Float(b)) => Value::Bool(float_op(a, b)),
+            (Value::Int(a), Value::Float(b)) => Value::Bool(float_op(a as f64, b)),
+            (Value::Float(a), Value::Int(b)) => Value::Bool(float_op(a, b as f64)),
+            (a, b) => {
+                return Err(VmError::TypeMismatch {
+                    expected: "int or float",
+                    got: format!("{} and {}", a.type_name(), b.type_name()),
+                })
+            }
+        };
+        self.push(res);
+        Ok(())
+    }
+}
+
+trait ObjectExt {
+    fn instance_class_id(&self) -> Result<ClassId, VmError>;
+    fn field(&self, idx: usize) -> Result<&Value, VmError>;
+    fn field_mut(&mut self, idx: usize) -> Result<&mut Value, VmError>;
+}
+
+impl ObjectExt for AuraObject {
+    fn instance_class_id(&self) -> Result<ClassId, VmError> {
+        match self {
+            AuraObject::Instance { class_id, .. } => Ok(*class_id),
+            _ => Err(VmError::TypeMismatch {
+                expected: "instance",
+                got: "non-instance object".into(),
+            }),
+        }
+    }
+
+    fn field(&self, idx: usize) -> Result<&Value, VmError> {
+        match self {
+            AuraObject::Instance { fields, .. } => {
+                fields.get(idx).ok_or_else(|| VmError::Runtime("field index out of range".into()))
+            }
+            _ => Err(VmError::TypeMismatch {
+                expected: "instance",
+                got: "non-instance object".into(),
+            }),
+        }
+    }
+
+    fn field_mut(&mut self, idx: usize) -> Result<&mut Value, VmError> {
+        match self {
+            AuraObject::Instance { fields, .. } => fields
+                .get_mut(idx)
+                .ok_or_else(|| VmError::Runtime("field index out of range".into())),
+            _ => Err(VmError::TypeMismatch {
+                expected: "instance",
+                got: "non-instance object".into(),
+            }),
+        }
+    }
+}

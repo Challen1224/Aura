@@ -1,0 +1,66 @@
+class Animal {
+    string name;
+    protected int age;
+
+    virtual void Speak() {
+        print("...");
+    }
+
+    void Describe() {
+        print(name);
+        print(" is ");
+        print(age);
+        print(" years old");
+        println();
+    }
+
+    protected void SetAge(int a) {
+        this.age = a;
+    }
+}
+
+class Dog : Animal {
+    string breed;
+
+    override void Speak() {
+        print("Woof!");
+        println();
+    }
+
+    void Init(string n, string b, int a) {
+        this.name = n;
+        this.breed = b;
+        super.SetAge(a);
+    }
+
+    void CallBaseSpeak() {
+        super.Speak();
+    }
+
+    void Info() {
+        print(this.name);
+        print(" the ");
+        print(this.breed);
+        print(" is ");
+        print(this.age);
+        println();
+    }
+}
+
+class Program {
+    static void Main() {
+        Dog d = new Dog();
+        d.Init("Rex", "Husky", 3);
+        d.Describe();
+        d.Info();
+        d.Speak();
+        d.CallBaseSpeak();
+
+        Animal a = new Dog();
+        a.Speak();
+
+        Dog d2 = new Dog();
+        print(d2.name);
+        println();
+    }
+}

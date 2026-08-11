@@ -1,0 +1,74 @@
+sealed class MathUtils {
+    static int square(int x) {
+        return x * x;
+    }
+
+    static int max(int a, int b) {
+        if (a > b) {
+            return a;
+        }
+        return b;
+    }
+}
+
+abstract class Animal {
+    string name;
+
+    void init(string n) {
+        this.name = n;
+    }
+
+    abstract string sound();
+
+    virtual void describe() {
+        print(this.name);
+        print(": ");
+        print(this.sound());
+        println();
+    }
+
+    final string getName() {
+        return this.name;
+    }
+}
+
+class Dog : Animal {
+    override string sound() {
+        return "Woof";
+    }
+
+    override void describe() {
+        print(this.name);
+        print(" the dog says ");
+        print(this.sound());
+        println();
+    }
+}
+
+class Cat : Animal {
+    override string sound() {
+        return "Meow";
+    }
+}
+
+class Program {
+    static void Main() {
+        Dog d = new Dog();
+        d.init("Rex");
+        d.describe();
+        print("getName: ");
+        print(d.getName());
+        println();
+
+        Cat c = new Cat();
+        c.init("Whiskers");
+        c.describe();
+
+        print("square(7): ");
+        print(MathUtils.square(7));
+        println();
+        print("max(3, 9): ");
+        print(MathUtils.max(3, 9));
+        println();
+    }
+}

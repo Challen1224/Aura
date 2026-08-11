@@ -1,0 +1,17 @@
+[package]
+name = "aura-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Aura language CLI — compile and run .aura programs"
+
+[[bin]]
+name = "aura"
+path = "src/main.rs"
+
+[dependencies]
+aura-bytecode.workspace = true
+aura-compiler.workspace = true
+aura-vm.workspace = true
+anyhow.workspace = true
+clap.workspace = true

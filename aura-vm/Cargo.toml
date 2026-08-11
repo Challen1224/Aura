@@ -1,0 +1,10 @@
+[package]
+name = "aura-vm"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Aura stack-based VM with managed heap and mark-and-sweep GC"
+
+[dependencies]
+aura-bytecode.workspace = true
+thiserror.workspace = true

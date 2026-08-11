@@ -1,0 +1,8 @@
+class Program {
+    static void Main() {
+        ((int, int), string) nested = ((1, 2), "hello");
+        int first = nested.0.0;
+        print(first);
+        println();
+    }
+}

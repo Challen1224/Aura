@@ -1,0 +1,22 @@
+[workspace]
+resolver = "2"
+members = [
+    "aura-bytecode",
+    "aura-vm",
+    "aura-compiler",
+    "aura-cli",
+]
+
+[workspace.package]
+version = "1.0.0"
+edition = "2021"
+license = "MIT"
+authors = ["Aura Contributors"]
+
+[workspace.dependencies]
+aura-bytecode = { path = "aura-bytecode" }
+aura-vm = { path = "aura-vm" }
+aura-compiler = { path = "aura-compiler" }
+thiserror = "2"
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }

@@ -1,0 +1,10 @@
+[package]
+name = "aura-compiler"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Aura compiler front-end: lexer, parser, type-checker, bytecode emitter"
+
+[dependencies]
+aura-bytecode.workspace = true
+thiserror.workspace = true

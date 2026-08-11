@@ -1,0 +1,13 @@
+enum Color {
+    Red,
+    Green,
+    Blue
+}
+
+class Program {
+    static void Main() {
+        Color c = Color.Red;
+        print(c);
+        println();
+    }
+}

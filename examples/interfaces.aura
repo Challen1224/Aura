@@ -1,0 +1,135 @@
+interface Drawable {
+    void draw();
+
+    string label() {
+        return "shape";
+    }
+}
+
+interface Resizable {
+    void resize(int width, int height);
+}
+
+interface Named {
+    string getName();
+}
+
+interface Shape : Named {
+    int area();
+}
+
+abstract class BaseShape : Drawable {
+    abstract int area();
+
+    virtual void draw() {
+        print("Drawing a base shape");
+        println();
+    }
+}
+
+class Circle : BaseShape, Resizable, Named {
+    string name;
+    int radius;
+
+    void init(string n, int r) {
+        this.name = n;
+        this.radius = r;
+    }
+
+    override int area() {
+        return 3 * this.radius * this.radius;
+    }
+
+    override void draw() {
+        print("Drawing Circle ");
+        print(this.name);
+        println();
+    }
+
+    void resize(int w, int h) {
+        this.radius = this.radius + w;
+    }
+
+    string getName() {
+        return this.name;
+    }
+}
+
+class Square : Drawable, Shape, Resizable {
+    string name;
+    int side;
+
+    void init(string n, int s) {
+        this.name = n;
+        this.side = s;
+    }
+
+    void draw() {
+        print("Drawing Square ");
+        print(this.name);
+        println();
+    }
+
+    int area() {
+        return this.side * this.side;
+    }
+
+    void resize(int w, int h) {
+        this.side = this.side + w;
+    }
+
+    string getName() {
+        return this.name;
+    }
+}
+
+class Program {
+    static void describe(Drawable d) {
+        d.draw();
+    }
+
+    static void Main() {
+        Circle c = new Circle();
+        c.init("Red", 3);
+
+        Square s = new Square();
+        s.init("Blue", 4);
+
+        // Interface-typed reference with virtual dispatch.
+        Drawable d = c;
+        d.draw();
+        d = s;
+        d.draw();
+
+        // Default interface method.
+        print("default label: ");
+        print(d.label());
+        println();
+
+        // Interface-typed reference to an abstract class subtype.
+        BaseShape b = c;
+        print("Circle area: ");
+        print(b.area());
+        println();
+
+        // Interface inheritance: Shape extends Named.
+        Shape sh = s;
+        print("Square name: ");
+        print(sh.getName());
+        println();
+        print("Square area: ");
+        print(sh.area());
+        println();
+
+        // Multiple interface implementation on one object.
+        Resizable r = c;
+        r.resize(2, 0);
+        print("Resized radius: ");
+        print(c.radius);
+        println();
+
+        // Interface as a parameter type.
+        Program.describe(c);
+        Program.describe(s);
+    }
+}

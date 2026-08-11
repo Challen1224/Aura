@@ -1,0 +1,22 @@
+class Program {
+    static void Main() {
+        string name = "World";
+        int age = 25;
+        
+        // Simple interpolation
+        print("Hello {name}!");
+        println();
+        
+        // Multiple interpolations
+        print("Name: {name}, Age: {age}");
+        println();
+        
+        // Interpolation with expressions
+        print("Next year I will be {age + 1} years old");
+        println();
+        
+        // Mixed literals and interpolations
+        print("The answer is {40 + 2}");
+        println();
+    }
+}

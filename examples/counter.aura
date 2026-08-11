@@ -1,0 +1,23 @@
+class Counter {
+    int value;
+
+    void Increment() {
+        this.value = this.value + 1;
+    }
+
+    int GetValue() {
+        return this.value;
+    }
+}
+
+class Program {
+    static void Main() {
+        Counter c = new Counter();
+        c.Increment();
+        c.Increment();
+        c.Increment();
+        print("Counter = ");
+        print(c.GetValue());
+        println();
+    }
+}
