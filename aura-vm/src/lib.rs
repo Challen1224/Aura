@@ -13,6 +13,16 @@ use heap::{Heap, HeapError};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
+/// Default (zero) value for a field of the given type.
+fn default_value(ty: &TypeDesc) -> Value {
+    match ty {
+        TypeDesc::Int => Value::Int(0),
+        TypeDesc::Float => Value::Float(0.0),
+        TypeDesc::Bool => Value::Bool(false),
+        _ => Value::Null,
+    }
+}
+
 /// Substitute generic parameters in a TypeDesc with concrete types
 fn substitute_type_desc(ty: &TypeDesc, generic_params: &[aura_bytecode::GenericParam], type_args: &[TypeDesc]) -> TypeDesc {
     match ty {
@@ -120,7 +130,10 @@ impl Vm {
     pub fn new(module: Arc<Module>) -> Self {
         let mut static_fields = HashMap::new();
         for (id, class) in &module.classes {
-            static_fields.insert(*id, vec![Value::Unit; class.static_fields.len()]);
+            static_fields.insert(
+                *id,
+                class.static_fields.iter().map(|f| default_value(&f.ty)).collect(),
+            );
         }
         Self {
             module,
@@ -332,12 +345,7 @@ impl Vm {
                     for field in &class.fields {
                         // Substitute generic parameters in field types
                         let field_ty = substitute_type_desc(&field.ty, &class.generic_params, &type_args);
-                        fields.push(match field_ty {
-                            TypeDesc::Int => Value::Int(0),
-                            TypeDesc::Float => Value::Float(0.0),
-                            TypeDesc::Bool => Value::Bool(false),
-                            _ => Value::Null,
-                        });
+                        fields.push(default_value(&field_ty));
                     }
                     let handle = self
                         .heap

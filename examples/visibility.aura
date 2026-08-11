@@ -1,0 +1,72 @@
+class BankAccount {
+    private string owner;
+    private int balance;
+    protected int accountId;
+
+    void init(string ownerName, int id) {
+        this.owner = ownerName;
+        this.balance = 0;
+        this.accountId = id;
+    }
+
+    void deposit(int amount) {
+        this.balance = this.balance + amount;
+    }
+
+    void withdraw(int amount) {
+        if (amount <= this.balance) {
+            this.balance = this.balance - amount;
+        } else {
+            print("insufficient funds for ");
+            print(this.owner);
+            println();
+        }
+    }
+
+    private int getBalance() {
+        return this.balance;
+    }
+
+    void report() {
+        print(this.owner);
+        print(" (id ");
+        print(this.accountId);
+        print("): $");
+        print(this.getBalance());
+        println();
+    }
+}
+
+class SavingsAccount : BankAccount {
+    float interestRate;
+
+    void init(string ownerName, int id, float rate) {
+        super.init(ownerName, id);
+        this.interestRate = rate;
+    }
+
+    // Private field of the base class is NOT accessible here.
+    // Private method of the base class is NOT callable here.
+    void applyInterest() {
+        // this.balance = this.balance + ... would be a compile error.
+        print("applying interest to account ");
+        print(this.accountId);
+        println();
+    }
+}
+
+class Program {
+    static void Main() {
+        BankAccount acc = new BankAccount();
+        acc.init("Alice", 1001);
+        acc.deposit(500);
+        acc.withdraw(120);
+        acc.report();
+
+        SavingsAccount sa = new SavingsAccount();
+        sa.init("Bob", 1002, 0.05);
+        sa.deposit(1000);
+        sa.applyInterest();
+        sa.report();
+    }
+}

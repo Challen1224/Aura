@@ -64,6 +64,8 @@ pub enum Visibility {
     Public,
     /// Accessible from the declaring class and its subclasses.
     Protected,
+    /// Accessible only from within the declaring class.
+    Private,
 }
 
 /// Generic parameter declaration.

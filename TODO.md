@@ -159,10 +159,10 @@
   - [x] Interface-typed variables, fields, parameters, and return types
   - [x] Interface validation (no fields, no static/protected methods, cannot extend classes)
 
-- [ ] **Visibility modifiers**
-  - [ ] `public` (default)
-  - [ ] `private`
-  - [ ] `protected`
+- [x] **Visibility modifiers**
+  - [x] `public` (default)
+  - [x] `private`
+  - [x] `protected`
   - [ ] `internal` (module-scoped)
 
 **P1 - High Priority**

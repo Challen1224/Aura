@@ -168,6 +168,8 @@ impl<'a> Parser<'a> {
                 is_static = true;
             } else if self.match_token(Token::Protected) {
                 visibility = Visibility::Protected;
+            } else if self.match_token(Token::Private) {
+                visibility = Visibility::Private;
             } else if self.match_token(Token::Virtual) {
                 is_virtual = true;
             } else if self.match_token(Token::Override) {

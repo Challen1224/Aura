@@ -6,6 +6,15 @@ use std::collections::{HashMap, HashSet};
 /// Type substitution map: generic parameter name -> concrete type
 pub type TypeSubst = HashMap<String, Type>;
 
+/// Human-readable name for a visibility level, used in diagnostics.
+fn visibility_name(v: Visibility) -> &'static str {
+    match v {
+        Visibility::Public => "public",
+        Visibility::Protected => "protected",
+        Visibility::Private => "private",
+    }
+}
+
 /// Substitute generic parameters in a type with concrete types
 fn substitute_type(ty: &Type, subst: &TypeSubst) -> Type {
     match ty {
@@ -33,8 +42,7 @@ fn substitute_type(ty: &Type, subst: &TypeSubst) -> Type {
 }
 
 /// Build a substitution map from generic parameter names and concrete type arguments
-fn build_subst(generic_params: &[GenericParam], type_args: &[Type]) -> TypeSubst {
-    let mut subst = TypeSubst::new();
+fn build_subst(generic_params: &[GenericParam], type_args: &[Type]) -> TypeSubst {    let mut subst = TypeSubst::new();
     for (param, arg) in generic_params.iter().zip(type_args.iter()) {
         subst.insert(param.name.clone(), arg.clone());
     }
@@ -84,6 +92,10 @@ pub struct ClassInfo {
     pub protected_fields: HashSet<String>,
     /// Names of protected static fields.
     pub protected_static_fields: HashSet<String>,
+    /// Names of private instance fields.
+    pub private_fields: HashSet<String>,
+    /// Names of private static fields.
+    pub private_static_fields: HashSet<String>,
     /// Instance methods keyed by name.
     pub methods: HashMap<String, MethodInfo>,
     /// Static methods keyed by name.
@@ -186,6 +198,8 @@ impl TypeChecker {
                         static_fields: Vec::new(),
                         protected_fields: HashSet::new(),
                         protected_static_fields: HashSet::new(),
+                        private_fields: HashSet::new(),
+                        private_static_fields: HashSet::new(),
                         methods: HashMap::new(),
                         static_methods: HashMap::new(),
                     };
@@ -211,13 +225,25 @@ impl TypeChecker {
                                     )));
                                 }
                                 if f.is_static {
-                                    if f.visibility == Visibility::Protected {
-                                        info.protected_static_fields.insert(f.name.clone());
+                                    match f.visibility {
+                                        Visibility::Protected => {
+                                            info.protected_static_fields.insert(f.name.clone());
+                                        }
+                                        Visibility::Private => {
+                                            info.private_static_fields.insert(f.name.clone());
+                                        }
+                                        Visibility::Public => {}
                                     }
                                     info.static_fields.push((f.name.clone(), f.ty.clone()));
                                 } else {
-                                    if f.visibility == Visibility::Protected {
-                                        info.protected_fields.insert(f.name.clone());
+                                    match f.visibility {
+                                        Visibility::Protected => {
+                                            info.protected_fields.insert(f.name.clone());
+                                        }
+                                        Visibility::Private => {
+                                            info.private_fields.insert(f.name.clone());
+                                        }
+                                        Visibility::Public => {}
                                     }
                                     info.instance_fields.push((f.name.clone(), f.ty.clone()));
                                 }
@@ -232,6 +258,12 @@ impl TypeChecker {
                                 if c.is_interface && m.visibility == Visibility::Protected {
                                     return Err(TypeError(format!(
                                         "interface `{}` method `{}` cannot be protected",
+                                        c.name, m.name
+                                    )));
+                                }
+                                if c.is_interface && m.visibility == Visibility::Private {
+                                    return Err(TypeError(format!(
+                                        "interface `{}` method `{}` cannot be private",
                                         c.name, m.name
                                     )));
                                 }
@@ -440,14 +472,20 @@ impl TypeChecker {
     }
 
     /// Look up an instance field starting at `class_name`, walking the super chain.
-    /// Returns (declaring class, type, is_protected).
-    fn find_instance_field(&self, class_name: &str, field: &str) -> Option<(String, Type, bool)> {
+    /// Returns (declaring class, type, visibility).
+    fn find_instance_field(&self, class_name: &str, field: &str) -> Option<(String, Type, Visibility)> {
         let mut cur = Some(class_name);
         while let Some(c) = cur {
             if let Some(info) = self.classes.get(c) {
                 if let Some((_, ty)) = info.instance_fields.iter().find(|(n, _)| n == field) {
-                    let is_protected = info.protected_fields.contains(field);
-                    return Some((c.to_string(), ty.clone(), is_protected));
+                    let visibility = if info.private_fields.contains(field) {
+                        Visibility::Private
+                    } else if info.protected_fields.contains(field) {
+                        Visibility::Protected
+                    } else {
+                        Visibility::Public
+                    };
+                    return Some((c.to_string(), ty.clone(), visibility));
                 }
                 cur = info.super_class.as_deref();
             } else {
@@ -458,14 +496,20 @@ impl TypeChecker {
     }
 
     /// Look up a static field starting at `class_name`, walking the super chain.
-    /// Returns (declaring class, type, is_protected).
-    fn find_static_field(&self, class_name: &str, field: &str) -> Option<(String, Type, bool)> {
+    /// Returns (declaring class, type, visibility).
+    fn find_static_field(&self, class_name: &str, field: &str) -> Option<(String, Type, Visibility)> {
         let mut cur = Some(class_name);
         while let Some(c) = cur {
             if let Some(info) = self.classes.get(c) {
                 if let Some((_, ty)) = info.static_fields.iter().find(|(n, _)| n == field) {
-                    let is_protected = info.protected_static_fields.contains(field);
-                    return Some((c.to_string(), ty.clone(), is_protected));
+                    let visibility = if info.private_static_fields.contains(field) {
+                        Visibility::Private
+                    } else if info.protected_static_fields.contains(field) {
+                        Visibility::Protected
+                    } else {
+                        Visibility::Public
+                    };
+                    return Some((c.to_string(), ty.clone(), visibility));
                 }
                 cur = info.super_class.as_deref();
             } else {
@@ -523,13 +567,16 @@ impl TypeChecker {
         None
     }
 
-    /// Whether members declared in `declared_in` with `is_protected` visibility
-    /// are accessible from code in class `current`.
-    fn can_access(&self, current: &str, declared_in: &str, is_protected: bool) -> bool {
-        if !is_protected {
-            return true;
+    /// Whether members declared in `declared_in` with `visibility` are
+    /// accessible from code in class `current`.
+    fn can_access(&self, current: &str, declared_in: &str, visibility: Visibility) -> bool {
+        match visibility {
+            Visibility::Public => true,
+            Visibility::Protected => {
+                current == declared_in || self.is_subclass_of(current, declared_in)
+            }
+            Visibility::Private => current == declared_in,
         }
-        current == declared_in || self.is_subclass_of(current, declared_in)
     }
 
     fn check_class(&mut self, class: &ClassDecl) -> Result<(), TypeError> {
@@ -881,30 +928,30 @@ impl TypeChecker {
                 } else if let Some(ty) = locals.get(name) {
                     Ok(ty.clone())
                 } else if in_instance {
-                    if let Some((declared_in, ty, protected)) = self.find_instance_field(&class.name, name) {
-                        if !self.can_access(&class.name, &declared_in, protected) {
+                    if let Some((declared_in, ty, visibility)) = self.find_instance_field(&class.name, name) {
+                        if !self.can_access(&class.name, &declared_in, visibility) {
                             return Err(TypeError(format!(
-                                "field `{}` on `{}` is protected",
-                                name, declared_in
+                                "field `{}` on `{}` is {}",
+                                name, declared_in, visibility_name(visibility)
                             )));
                         }
                         Ok(ty)
-                    } else if let Some((declared_in, ty, protected)) = self.find_static_field(&class.name, name) {
-                        if !self.can_access(&class.name, &declared_in, protected) {
+                    } else if let Some((declared_in, ty, visibility)) = self.find_static_field(&class.name, name) {
+                        if !self.can_access(&class.name, &declared_in, visibility) {
                             return Err(TypeError(format!(
-                                "static field `{}` on `{}` is protected",
-                                name, declared_in
+                                "static field `{}` on `{}` is {}",
+                                name, declared_in, visibility_name(visibility)
                             )));
                         }
                         Ok(ty)
                     } else {
                         Err(TypeError(format!("unknown variable `{}`", name)))
                     }
-                } else if let Some((declared_in, ty, protected)) = self.find_static_field(&class.name, name) {
-                    if !self.can_access(&class.name, &declared_in, protected) {
+                } else if let Some((declared_in, ty, visibility)) = self.find_static_field(&class.name, name) {
+                    if !self.can_access(&class.name, &declared_in, visibility) {
                         return Err(TypeError(format!(
-                            "static field `{}` on `{}` is protected",
-                            name, declared_in
+                            "static field `{}` on `{}` is {}",
+                            name, declared_in, visibility_name(visibility)
                         )));
                     }
                     Ok(ty)
@@ -929,14 +976,14 @@ impl TypeChecker {
                 if !self.classes.contains_key(&class_name) {
                     return Err(TypeError(format!("unknown class `{}`", class_name)));
                 }
-                let (declared_in, field_type, protected) =
+                let (declared_in, field_type, visibility) =
                     self.find_instance_field(&class_name, name).ok_or_else(|| {
                         TypeError(format!("unknown field `{}` on `{}`", name, class_name))
                     })?;
-                if !self.can_access(&class.name, &declared_in, protected) {
+                if !self.can_access(&class.name, &declared_in, visibility) {
                     return Err(TypeError(format!(
-                        "field `{}` on `{}` is protected",
-                        name, declared_in
+                        "field `{}` on `{}` is {}",
+                        name, declared_in, visibility_name(visibility)
                     )));
                 }
 
@@ -969,14 +1016,14 @@ impl TypeChecker {
                 if !self.classes.contains_key(class_name) {
                     return Err(TypeError(format!("unknown class `{}`", class_name)));
                 }
-                let (declared_in, ty, protected) =
+                let (declared_in, ty, visibility) =
                     self.find_static_field(class_name, name).ok_or_else(|| {
                         TypeError(format!("unknown static field `{}` on `{}`", name, class_name))
                     })?;
-                if !self.can_access(&class.name, &declared_in, protected) {
+                if !self.can_access(&class.name, &declared_in, visibility) {
                     return Err(TypeError(format!(
-                        "static field `{}` on `{}` is protected",
-                        name, declared_in
+                        "static field `{}` on `{}` is {}",
+                        name, declared_in, visibility_name(visibility)
                     )));
                 }
                 Ok(ty)
@@ -1224,17 +1271,17 @@ impl TypeChecker {
                     return Err(TypeError("`super` in static method".to_string()));
                 }
                 let super_name = self.super_class_of(class)?;
-                let (declared_in, ty, protected) =
+                let (declared_in, ty, visibility) =
                     self.find_instance_field(super_name, field_name).ok_or_else(|| {
                         TypeError(format!(
                             "unknown field `{}` on super class `{}`",
                             field_name, super_name
                         ))
                     })?;
-                if !self.can_access(&class.name, &declared_in, protected) {
+                if !self.can_access(&class.name, &declared_in, visibility) {
                     return Err(TypeError(format!(
-                        "field `{}` on `{}` is protected",
-                        field_name, declared_in
+                        "field `{}` on `{}` is {}",
+                        field_name, declared_in, visibility_name(visibility)
                     )));
                 }
                 Ok(ty)
@@ -1277,14 +1324,14 @@ impl TypeChecker {
                 if !self.classes.contains_key(&class_name) {
                     return Err(TypeError(format!("unknown class `{}`", class_name)));
                 }
-                let (declared_in, ty, protected) =
+                let (declared_in, ty, visibility) =
                     self.find_instance_field(&class_name, name).ok_or_else(|| {
                         TypeError(format!("unknown field `{}` on `{}`", name, class_name))
                     })?;
-                if !self.can_access(&class.name, &declared_in, protected) {
+                if !self.can_access(&class.name, &declared_in, visibility) {
                     return Err(TypeError(format!(
-                        "field `{}` on `{}` is protected",
-                        name, declared_in
+                        "field `{}` on `{}` is {}",
+                        name, declared_in, visibility_name(visibility)
                     )));
                 }
                 Ok(ty)
@@ -1293,14 +1340,14 @@ impl TypeChecker {
                 if !self.classes.contains_key(class_name) {
                     return Err(TypeError(format!("unknown class `{}`", class_name)));
                 }
-                let (declared_in, ty, protected) =
+                let (declared_in, ty, visibility) =
                     self.find_static_field(class_name, name).ok_or_else(|| {
                         TypeError(format!("unknown static field `{}` on `{}`", name, class_name))
                     })?;
-                if !self.can_access(&class.name, &declared_in, protected) {
+                if !self.can_access(&class.name, &declared_in, visibility) {
                     return Err(TypeError(format!(
-                        "static field `{}` on `{}` is protected",
-                        name, declared_in
+                        "static field `{}` on `{}` is {}",
+                        name, declared_in, visibility_name(visibility)
                     )));
                 }
                 Ok(ty)
@@ -1310,17 +1357,17 @@ impl TypeChecker {
                     return Err(TypeError("`super` in static method".to_string()));
                 }
                 let super_name = self.super_class_of(class)?;
-                let (declared_in, ty, protected) =
+                let (declared_in, ty, visibility) =
                     self.find_instance_field(super_name, name).ok_or_else(|| {
                         TypeError(format!(
                             "unknown field `{}` on super class `{}`",
                             name, super_name
                         ))
                     })?;
-                if !self.can_access(&class.name, &declared_in, protected) {
+                if !self.can_access(&class.name, &declared_in, visibility) {
                     return Err(TypeError(format!(
-                        "field `{}` on `{}` is protected",
-                        name, declared_in
+                        "field `{}` on `{}` is {}",
+                        name, declared_in, visibility_name(visibility)
                     )));
                 }
                 Ok(ty)
@@ -1370,10 +1417,10 @@ impl TypeChecker {
                                 call.method, class.name
                             ))
                         })?;
-                    if !self.can_access(&class.name, &declared_in, method_info.visibility == Visibility::Protected) {
+                    if !self.can_access(&class.name, &declared_in, method_info.visibility) {
                         return Err(TypeError(format!(
-                            "method `{}` on `{}` is protected",
-                            call.method, declared_in
+                            "method `{}` on `{}` is {}",
+                            call.method, declared_in, visibility_name(method_info.visibility)
                         )));
                     }
                     return self.check_call_args(call, &method_info, class, locals, in_instance);
@@ -1387,10 +1434,10 @@ impl TypeChecker {
                                 call.method, class_name
                             ))
                         })?;
-                    if !self.can_access(&class.name, &declared_in, method_info.visibility == Visibility::Protected) {
+                    if !self.can_access(&class.name, &declared_in, method_info.visibility) {
                         return Err(TypeError(format!(
-                            "static method `{}` on `{}` is protected",
-                            call.method, declared_in
+                            "static method `{}` on `{}` is {}",
+                            call.method, declared_in, visibility_name(method_info.visibility)
                         )));
                     }
                     return self.check_call_args(call, &method_info, class, locals, in_instance);
@@ -1415,10 +1462,10 @@ impl TypeChecker {
             let (declared_in, method_info) = self.find_method(&name, &call.method).ok_or_else(|| {
                 TypeError(format!("unknown method `{}` on `{}`", call.method, name))
             })?;
-            if !self.can_access(&class.name, &declared_in, method_info.visibility == Visibility::Protected) {
+            if !self.can_access(&class.name, &declared_in, method_info.visibility) {
                 return Err(TypeError(format!(
-                    "method `{}` on `{}` is protected",
-                    call.method, declared_in
+                    "method `{}` on `{}` is {}",
+                    call.method, declared_in, visibility_name(method_info.visibility)
                 )));
             }
 
@@ -1473,10 +1520,10 @@ impl TypeChecker {
                         call.method, class_name
                     ))
                 })?;
-            if !self.can_access(&class.name, &declared_in, method_info.visibility == Visibility::Protected) {
+            if !self.can_access(&class.name, &declared_in, method_info.visibility) {
                 return Err(TypeError(format!(
-                    "static method `{}` on `{}` is protected",
-                    call.method, declared_in
+                    "static method `{}` on `{}` is {}",
+                    call.method, declared_in, visibility_name(method_info.visibility)
                 )));
             }
             return self.check_call_args(call, &method_info, class, locals, in_instance);

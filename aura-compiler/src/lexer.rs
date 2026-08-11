@@ -123,6 +123,8 @@ pub enum Token {
     Override,
     /// `protected`
     Protected,
+    /// `private`
+    Private,
     /// `interface`
     Interface,
     /// `abstract`
@@ -194,6 +196,7 @@ impl fmt::Display for Token {
             Token::Virtual => "`virtual`",
             Token::Override => "`override`",
             Token::Protected => "`protected`",
+            Token::Private => "`private`",
             Token::Interface => "`interface`",
             Token::Abstract => "`abstract`",
             Token::Sealed => "`sealed`",
@@ -698,6 +701,7 @@ impl<'a> Lexer<'a> {
             "virtual" => Token::Virtual,
             "override" => Token::Override,
             "protected" => Token::Protected,
+            "private" => Token::Private,
             "interface" => Token::Interface,
             "abstract" => Token::Abstract,
             "sealed" => Token::Sealed,
