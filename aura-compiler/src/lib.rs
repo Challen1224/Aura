@@ -75,6 +75,7 @@ pub fn synthetic_module(body: Vec<aura_bytecode::Op>) -> Module {
                     generic_params: vec![],
                     is_instance: false,
                     body,
+                    handlers: vec![],
                     max_stack: 8,
                     locals: 0,
                 },

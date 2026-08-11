@@ -8,7 +8,7 @@
 
 pub mod heap;
 
-use aura_bytecode::{AuraObject, ClassId, MethodDef, MethodId, Module, Op, TypeDesc, Value};
+use aura_bytecode::{AuraObject, ClassId, EnumId, ExceptionHandler, MethodDef, MethodId, Module, Op, TypeDesc, Value};
 use heap::{Heap, HeapError};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -20,6 +20,51 @@ fn default_value(ty: &TypeDesc) -> Value {
         TypeDesc::Float => Value::Float(0.0),
         TypeDesc::Bool => Value::Bool(false),
         _ => Value::Null,
+    }
+}
+
+/// Human-readable description of a value, used in error messages.
+fn describe_value(vm: &Vm, v: &Value) -> String {
+    match v {
+        Value::Int(i) => i.to_string(),
+        Value::Float(f) => f.to_string(),
+        Value::Bool(b) => b.to_string(),
+        Value::Null => "null".to_string(),
+        Value::Unit => "unit".to_string(),
+        Value::String(s) => vm.heap.get_string(*s).unwrap_or("<string>").to_string(),
+        Value::Enum(enum_id, variant_idx, fields) => {
+            let (name, variant) = vm
+                .module
+                .enums
+                .get(&EnumId(*enum_id))
+                .map(|e| {
+                    (
+                        e.name.clone(),
+                        e.variants
+                            .get(*variant_idx as usize)
+                            .map(|v| v.name.clone())
+                            .unwrap_or_else(|| format!("#{}", variant_idx)),
+                    )
+                })
+                .unwrap_or_else(|| (format!("enum#{}", enum_id), format!("#{}", variant_idx)));
+            if fields.is_empty() {
+                format!("{}.{}", name, variant)
+            } else {
+                format!("{}.{}(...)", name, variant)
+            }
+        }
+        Value::Object(handle) => vm
+            .heap
+            .get(*handle)
+            .ok()
+            .and_then(|o| match o {
+                AuraObject::Instance { class_id, .. } => {
+                    vm.module.classes.get(class_id).map(|c| c.name.clone())
+                }
+                _ => None,
+            })
+            .unwrap_or_else(|| "instance".to_string()),
+        Value::Tuple(_) => "tuple".to_string(),
     }
 }
 
@@ -80,6 +125,14 @@ pub enum VmError {
     /// Generic runtime error.
     #[error("runtime error: {0}")]
     Runtime(String),
+}
+
+/// The outcome of executing a frame.
+enum FrameResult {
+    /// The frame returned normally with a value.
+    Normal(Value),
+    /// An exception propagated out of the frame without being handled.
+    Exception(Value),
 }
 
 /// A single call frame.
@@ -151,13 +204,25 @@ impl Vm {
 
     /// Invoke a method by id with the supplied arguments.
     pub fn invoke(&mut self, method_id: MethodId, args: Vec<Value>) -> Result<Value, VmError> {
+        match self.invoke_frame(method_id, args)? {
+            FrameResult::Normal(v) => Ok(v),
+            FrameResult::Exception(e) => Err(VmError::Runtime(format!(
+                "uncaught exception: {}",
+                describe_value(&self, &e)
+            ))),
+        }
+    }
+
+    /// Push a frame for `method_id` and run it. The frame is popped before this
+    /// returns, whether the method returns normally or throws.
+    fn invoke_frame(&mut self, method_id: MethodId, args: Vec<Value>) -> Result<FrameResult, VmError> {
         let locals = self.resolve_method(method_id)?.locals;
         let frame = Frame::new(method_id, args, locals);
         self.call_stack.push(frame);
         self.run_frame()
     }
 
-    fn run_frame(&mut self) -> Result<Value, VmError> {
+    fn run_frame(&mut self) -> Result<FrameResult, VmError> {
         let method_id = self.current_frame().method_id;
         let method = self.resolve_method(method_id)?.clone();
         self.execute_frame(method)
@@ -168,8 +233,33 @@ impl Vm {
         &self.heap
     }
 
-    fn execute_frame(&mut self, method: MethodDef) -> Result<Value, VmError> {
+    fn execute_frame(&mut self, method: MethodDef) -> Result<FrameResult, VmError> {
+        let mut pending: Option<Value> = None;
+        let mut after_finally: Option<Value> = None;
         loop {
+            if let Some(exc) = pending.take() {
+                let instr_pc = self.current_frame().pc.saturating_sub(1) as u32;
+                let handler = self.find_handler(&method.handlers, instr_pc, &exc);
+                match handler {
+                    Some(h) if h.catch_type.is_some() => {
+                        let frame = self.current_frame();
+                        if let Some(slot) = frame.locals.get_mut(h.catch_local as usize) {
+                            *slot = exc;
+                        }
+                        frame.pc = h.handler_pc as usize;
+                    }
+                    Some(h) => {
+                        after_finally = Some(exc);
+                        self.current_frame().pc = h.handler_pc as usize;
+                    }
+                    None => {
+                        self.call_stack.pop();
+                        return Ok(FrameResult::Exception(exc));
+                    }
+                }
+                continue;
+            }
+
             let op = {
                 let frame = self.current_frame();
                 let op = method
@@ -184,7 +274,7 @@ impl Vm {
             if op == Op::Ret {
                 let result = self.pop().unwrap_or(Value::Unit);
                 self.call_stack.pop();
-                return Ok(result);
+                return Ok(FrameResult::Normal(result));
             }
 
             match op {
@@ -292,8 +382,10 @@ impl Vm {
                     };
                     let args = self.pop_args(params_len)?;
                     self.call_stack.push(Frame::new(id, args, locals));
-                    let result = self.run_frame()?;
-                    self.push(result);
+                    match self.run_frame()? {
+                        FrameResult::Normal(v) => self.push(v),
+                        FrameResult::Exception(e) => pending = Some(e),
+                    }
                 }
                 Op::CallVirt(name) => {
                     // The compiler pushes arguments first, then the instance.
@@ -309,8 +401,10 @@ impl Vm {
                     let mut args = self.pop_args(params_len)?;
                     // Insert the instance at the beginning (as the first parameter)
                     args.insert(0, Value::Object(handle));
-                    let result = self.invoke(method_id, args)?;
-                    self.push(result);
+                    match self.invoke_frame(method_id, args)? {
+                        FrameResult::Normal(v) => self.push(v),
+                        FrameResult::Exception(e) => pending = Some(e),
+                    }
                 }
                 Op::CallSuper(id) => {
                     // Non-virtual call to a base class method from `super.Method()`.
@@ -322,8 +416,10 @@ impl Vm {
                     let params_len = self.resolve_method(id)?.params.len();
                     let mut args = self.pop_args(params_len)?;
                     args.insert(0, Value::Object(handle));
-                    let result = self.invoke(id, args)?;
-                    self.push(result);
+                    match self.invoke_frame(id, args)? {
+                        FrameResult::Normal(v) => self.push(v),
+                        FrameResult::Exception(e) => pending = Some(e),
+                    }
                 }
                 Op::NewObj(class_id, type_args) => {
                     let class = self
@@ -473,6 +569,16 @@ impl Vm {
                 }
                 Op::Ret => unreachable!("Ret handled above match"),
                 Op::Break | Op::Continue => unreachable!("Break/Continue should be resolved by emitter"),
+                Op::Throw => {
+                    let exc = self.pop()?;
+                    after_finally = None;
+                    pending = Some(exc);
+                }
+                Op::EndFinally => {
+                    if let Some(exc) = after_finally.take() {
+                        pending = Some(exc);
+                    }
+                }
             }
         }
     }
@@ -558,6 +664,83 @@ impl Vm {
             }
         }
         Err(VmError::Runtime(format!("method {} not found", name)))
+    }
+
+    /// Find the innermost exception handler covering `pc` that applies to the
+    /// given exception value. Catch handlers take precedence over the `finally`
+    /// handler of the same protected region.
+    fn find_handler(&self, handlers: &[ExceptionHandler], pc: u32, exc: &Value) -> Option<ExceptionHandler> {
+        let mut best: Option<(u32, usize, bool)> = None;
+        for (i, h) in handlers.iter().enumerate() {
+            if h.start <= pc && pc < h.end {
+                let matches = match &h.catch_type {
+                    Some(ty) => self.value_matches(ty, exc),
+                    None => true,
+                };
+                if !matches {
+                    continue;
+                }
+                let is_catch = h.catch_type.is_some();
+                let better = match best {
+                    None => true,
+                    Some((b_start, _, b_is_catch)) => {
+                        h.start > b_start || (h.start == b_start && is_catch && !b_is_catch)
+                    }
+                };
+                if better {
+                    best = Some((h.start, i, is_catch));
+                }
+            }
+        }
+        best.map(|(_, i, _)| handlers[i].clone())
+    }
+
+    /// True if the runtime type of `exc` is assignable to `ty`.
+    fn value_matches(&self, ty: &TypeDesc, exc: &Value) -> bool {
+        match (ty, exc) {
+            (TypeDesc::String, Value::String(_)) => true,
+            (TypeDesc::Int, Value::Int(_)) => true,
+            (TypeDesc::Float, Value::Float(_)) => true,
+            (TypeDesc::Bool, Value::Bool(_)) => true,
+            (TypeDesc::Null, Value::Null) => true,
+            (TypeDesc::Tuple(_), Value::Tuple(_)) => true,
+            (TypeDesc::Enum(eid), Value::Enum(eid2, _, _)) => *eid == EnumId(*eid2),
+            (TypeDesc::GenericParam(_), _) => true,
+            (TypeDesc::Class(target, _), Value::Object(handle)) => match self.heap.get(*handle) {
+                Ok(AuraObject::Instance { class_id, .. }) => self.is_instance_of(*class_id, *target),
+                _ => false,
+            },
+            _ => false,
+        }
+    }
+
+    /// True if `sub` is the same as, a subclass of, or an implementer of `base`.
+    fn is_instance_of(&self, sub: ClassId, base: ClassId) -> bool {
+        let mut visited = HashSet::new();
+        self.is_instance_of_inner(sub, base, &mut visited)
+    }
+
+    fn is_instance_of_inner(&self, sub: ClassId, base: ClassId, visited: &mut HashSet<ClassId>) -> bool {
+        if sub == base {
+            return true;
+        }
+        if !visited.insert(sub) {
+            return false;
+        }
+        let Some(class) = self.module.classes.get(&sub) else {
+            return false;
+        };
+        if let Some(sup) = class.super_class {
+            if self.is_instance_of_inner(sup, base, visited) {
+                return true;
+            }
+        }
+        for iface in &class.interfaces {
+            if self.is_instance_of_inner(*iface, base, visited) {
+                return true;
+            }
+        }
+        false
     }
 
     fn binary_int_float<FI, FF>(&mut self, int_op: FI, float_op: FF) -> Result<(), VmError>

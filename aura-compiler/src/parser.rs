@@ -281,6 +281,10 @@ impl<'a> Parser<'a> {
             Ok(Stmt::Continue)
         } else if self.match_token(Token::Return) {
             self.parse_return()
+        } else if self.match_token(Token::Throw) {
+            self.parse_throw()
+        } else if self.match_token(Token::Try) {
+            self.parse_try()
         } else if self.check(Token::LParen) && self.peek_ahead_is_tuple_decl() {
             self.parse_tuple_decl()
         } else if self.check_type() && self.peek_ahead_is_ident_after_type() {
@@ -506,6 +510,44 @@ impl<'a> Parser<'a> {
         };
         self.consume_semi()?;
         Ok(Stmt::Return(expr))
+    }
+
+    fn parse_throw(&mut self) -> Result<Stmt, String> {
+        let expr = self.parse_expr()?;
+        self.consume_semi()?;
+        Ok(Stmt::Throw(expr))
+    }
+
+    fn parse_try(&mut self) -> Result<Stmt, String> {
+        let try_body = self.parse_stmt_body()?;
+        let mut catches = Vec::new();
+        loop {
+            self.skip_newlines();
+            if self.match_token(Token::Catch) {
+                self.consume(Token::LParen, "expected `(` after `catch`")?;
+                let ty = self.parse_type()?;
+                let name = self.consume_ident("expected catch variable name")?;
+                self.consume(Token::RParen, "expected `)` after catch variable")?;
+                let body = self.parse_stmt_body()?;
+                catches.push(CatchClause { ty, name, body });
+            } else {
+                break;
+            }
+        }
+        self.skip_newlines();
+        let finally_body = if self.match_token(Token::Finally) {
+            Some(self.parse_stmt_body()?)
+        } else {
+            None
+        };
+        if catches.is_empty() && finally_body.is_none() {
+            return Err("expected `catch` or `finally` after `try` block".to_string());
+        }
+        Ok(Stmt::Try {
+            try_body,
+            catches,
+            finally_body,
+        })
     }
 
     fn parse_var_decl(&mut self) -> Result<Stmt, String> {

@@ -4,7 +4,7 @@
 
 use crate::ast::*;
 use crate::typer::{ClassInfo, TypedProgram};
-use aura_bytecode::{ClassDef, ClassId, EnumDef, EnumId, FieldDef, MethodDef, MethodId, Module, Op, TypeDesc, VariantDef};
+use aura_bytecode::{ClassDef, ClassId, EnumDef, EnumId, ExceptionHandler, FieldDef, MethodDef, MethodId, Module, Op, TypeDesc, VariantDef};
 use std::collections::HashMap;
 
 /// Emitter state.
@@ -36,6 +36,7 @@ struct MethodEmitter<'a> {
     method_ids: &'a HashMap<(String, String, bool), MethodId>,
     break_targets: Vec<Vec<usize>>,
     continue_targets: Vec<Vec<usize>>,
+    handlers: Vec<ExceptionHandler>,
 }
 
 impl Emitter {
@@ -191,6 +192,7 @@ impl Emitter {
                             }).collect(),
                             is_instance: !m.is_static,
                             body: me.ops,
+                            handlers: me.handlers,
                             max_stack: 8,
                             locals: me.locals.len() as u16,
                         };
@@ -298,6 +300,7 @@ impl<'a> MethodEmitter<'a> {
             method_ids,
             break_targets: Vec::new(),
             continue_targets: Vec::new(),
+            handlers: Vec::new(),
         }
     }
 
@@ -529,6 +532,75 @@ impl<'a> MethodEmitter<'a> {
                 for s in stmts {
                     self.emit_stmt(s)?;
                 }
+            }
+            Stmt::Throw(e) => {
+                self.emit_expr(e)?;
+                self.ops.push(Op::Throw);
+            }
+            Stmt::Try {
+                try_body,
+                catches,
+                finally_body,
+            } => {
+                let try_start = self.ops.len() as u32;
+                for s in try_body {
+                    self.emit_stmt(s)?;
+                }
+                let try_end = self.ops.len() as u32;
+                let normal_jump = self.ops.len();
+                self.ops.push(Op::Br(0));
+
+                let mut catch_end_jumps = Vec::new();
+                let mut handler_entries = Vec::new();
+                for catch in catches {
+                    let handler_pc = self.ops.len() as u32;
+                    self.locals.push(catch.name.clone());
+                    let catch_local = (self.locals.len() - 1) as u16;
+                    self.local_types
+                        .insert(catch.name.clone(), catch.ty.clone());
+                    handler_entries.push(ExceptionHandler {
+                        start: try_start,
+                        end: try_end,
+                        catch_type: Some(map_type(
+                            &catch.ty,
+                            self.class_ids,
+                            self.enum_ids,
+                            &[],
+                        )),
+                        handler_pc,
+                        catch_local,
+                    });
+                    for s in &catch.body {
+                        self.emit_stmt(s)?;
+                    }
+                    let jump = self.ops.len();
+                    self.ops.push(Op::Br(0));
+                    catch_end_jumps.push(jump);
+                }
+
+                let after_catches = self.ops.len() as u32;
+                let finally_entry = if let Some(finally_body) = finally_body {
+                    handler_entries.push(ExceptionHandler {
+                        start: try_start,
+                        end: after_catches,
+                        catch_type: None,
+                        handler_pc: after_catches,
+                        catch_local: 0,
+                    });
+                    for s in finally_body {
+                        self.emit_stmt(s)?;
+                    }
+                    self.ops.push(Op::EndFinally);
+                    after_catches
+                } else {
+                    after_catches
+                };
+
+                self.ops[normal_jump] = Op::Br(finally_entry);
+                for jump in catch_end_jumps {
+                    self.ops[jump] = Op::Br(finally_entry);
+                }
+                self.handlers.extend(handler_entries);
             }
         }
         Ok(())

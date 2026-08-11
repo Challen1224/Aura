@@ -133,6 +133,14 @@ pub enum Token {
     Sealed,
     /// `final`
     Final,
+    /// `throw`
+    Throw,
+    /// `try`
+    Try,
+    /// `catch`
+    Catch,
+    /// `finally`
+    Finally,
 }
 
 impl fmt::Display for Token {
@@ -201,6 +209,10 @@ impl fmt::Display for Token {
             Token::Abstract => "`abstract`",
             Token::Sealed => "`sealed`",
             Token::Final => "`final`",
+            Token::Throw => "`throw`",
+            Token::Try => "`try`",
+            Token::Catch => "`catch`",
+            Token::Finally => "`finally`",
         };
         write!(f, "{}", s)
     }
@@ -706,6 +718,10 @@ impl<'a> Lexer<'a> {
             "abstract" => Token::Abstract,
             "sealed" => Token::Sealed,
             "final" => Token::Final,
+            "throw" => Token::Throw,
+            "try" => Token::Try,
+            "catch" => Token::Catch,
+            "finally" => Token::Finally,
             _ => Token::Ident(word.to_string()),
         })
     }

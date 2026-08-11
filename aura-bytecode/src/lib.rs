@@ -212,10 +212,32 @@ pub struct MethodDef {
     pub is_instance: bool,
     /// Bytecode body, empty for runtime/intrinsic methods.
     pub body: Vec<Op>,
+    /// Exception handler table covering ranges of the bytecode body.
+    pub handlers: Vec<ExceptionHandler>,
     /// Maximum stack depth required by this method.
     pub max_stack: u16,
     /// Number of local variables (parameters + locals).
     pub locals: u16,
+}
+
+/// A protected region of a method's bytecode.
+///
+/// The region spans instructions `[start, end)` (inclusive/exclusive). When an
+/// exception is raised at a protected instruction, the innermost applicable
+/// handler takes over: a matching `catch` clause, or a `finally` clause that
+/// re-propagates the exception after running.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExceptionHandler {
+    /// Start pc of the protected region (inclusive).
+    pub start: u32,
+    /// End pc of the protected region (exclusive).
+    pub end: u32,
+    /// Type of exception caught. `None` for a `finally` handler.
+    pub catch_type: Option<TypeDesc>,
+    /// Pc of the handler body.
+    pub handler_pc: u32,
+    /// Local slot that receives the caught exception (catch handlers only).
+    pub catch_local: u16,
 }
 
 /// Class descriptor.
@@ -436,6 +458,10 @@ pub enum Op {
     Break,
     /// Continue to the next iteration of the innermost loop (resolved to Br by emitter).
     Continue,
+    /// Throw the value on top of the stack as an exception.
+    Throw,
+    /// End of a `finally` block: re-propagate a pending exception, if any.
+    EndFinally,
 
     // Object model
     /// Create a new instance of class id with optional type arguments.

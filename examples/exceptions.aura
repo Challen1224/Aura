@@ -1,0 +1,59 @@
+class MyError {
+    string message;
+
+    void Init(string msg) {
+        this.message = msg;
+    }
+}
+
+class Program {
+    static void Main() {
+        // Basic catch
+        try {
+            print("try start");
+            println();
+            MyError e = new MyError();
+            e.Init("boom");
+            throw e;
+            print("unreachable");
+            println();
+        } catch (MyError e2) {
+            print("caught: ");
+            print(e2.message);
+            println();
+        }
+        print("after try/catch");
+        println();
+
+        // Finally runs on the normal path
+        try {
+            print("normal try");
+            println();
+        } finally {
+            print("finally ran");
+            println();
+        }
+
+        // Finally runs on the exceptional path
+        try {
+            throw new MyError();
+        } catch (MyError err) {
+            print("outer catch");
+            println();
+        }
+
+        // Exception escaping a catch propagates to an outer try
+        try {
+            try {
+                throw new MyError();
+            } catch (MyError inner) {
+                print("inner catch rethrows");
+                println();
+                throw inner;
+            }
+        } catch (MyError outer) {
+            print("outer catch got it");
+            println();
+        }
+    }
+}

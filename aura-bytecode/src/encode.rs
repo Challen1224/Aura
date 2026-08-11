@@ -3,7 +3,7 @@
 //! This is intentionally simple: length-prefixed strings and vectors, with
 //! opcodes stored as a single byte plus fixed-size operands.
 
-use crate::{ClassDef, ClassId, EnumDef, EnumId, FieldDef, GenericParam, MethodDef, MethodId, Module, Op, TypeDesc, VariantDef, Variance};
+use crate::{ClassDef, ClassId, EnumDef, EnumId, ExceptionHandler, FieldDef, GenericParam, MethodDef, MethodId, Module, Op, TypeDesc, VariantDef, Variance};
 use std::collections::HashMap;
 use std::io::{self, Read, Write};
 
@@ -173,6 +173,7 @@ fn write_method<W: Write>(w: &mut W, m: &MethodDef) -> io::Result<()> {
     write_vec(w, &m.generic_params, |w, gp| write_generic_param(w, gp))?;
     write_u16(w, m.max_stack)?;
     write_u16(w, m.locals)?;
+    write_vec(w, &m.handlers, |w, h| write_handler(w, h))?;
     write_vec(w, &m.body, |w, op| write_op(w, op))
 }
 
@@ -183,6 +184,7 @@ fn read_method<R: Read>(r: &mut R) -> io::Result<MethodDef> {
     let generic_params = read_vec(r, |r| read_generic_param(r))?;
     let max_stack = read_u16(r)?;
     let locals = read_u16(r)?;
+    let handlers = read_vec(r, |r| read_handler(r))?;
     let body = read_vec(r, |r| read_op(r))?;
     Ok(MethodDef {
         name,
@@ -191,8 +193,44 @@ fn read_method<R: Read>(r: &mut R) -> io::Result<MethodDef> {
         generic_params,
         is_instance: false, // set by caller
         body,
+        handlers,
         max_stack,
         locals,
+    })
+}
+
+fn write_handler<W: Write>(w: &mut W, h: &ExceptionHandler) -> io::Result<()> {
+    write_u32(w, h.start)?;
+    write_u32(w, h.end)?;
+    write_u32(w, h.handler_pc)?;
+    write_u16(w, h.catch_local)?;
+    match &h.catch_type {
+        Some(ty) => {
+            write_u8(w, 1)?;
+            write_type(w, ty)?;
+        }
+        None => write_u8(w, 0)?,
+    }
+    Ok(())
+}
+
+fn read_handler<R: Read>(r: &mut R) -> io::Result<ExceptionHandler> {
+    let start = read_u32(r)?;
+    let end = read_u32(r)?;
+    let handler_pc = read_u32(r)?;
+    let catch_local = read_u16(r)?;
+    let has_type = read_u8(r)? != 0;
+    let catch_type = if has_type {
+        Some(read_type(r)?)
+    } else {
+        None
+    };
+    Ok(ExceptionHandler {
+        start,
+        end,
+        catch_type,
+        handler_pc,
+        catch_local,
     })
 }
 
@@ -324,6 +362,8 @@ fn write_op<W: Write>(w: &mut W, op: &Op) -> io::Result<()> {
         Op::Ret => (60, vec![]),
         Op::Break => (61, vec![]),
         Op::Continue => (62, vec![]),
+        Op::Throw => (63, vec![]),
+        Op::EndFinally => (64, vec![]),
         Op::NewObj(ClassId(id), type_args) => {
             let mut v = id.to_le_bytes().to_vec();
             // Encode type arguments
@@ -397,6 +437,8 @@ fn read_op<R: Read>(r: &mut R) -> io::Result<Op> {
         60 => Op::Ret,
         61 => Op::Break,
         62 => Op::Continue,
+        63 => Op::Throw,
+        64 => Op::EndFinally,
         70 => {
             let id = ClassId(read_u32(r)?);
             let type_args = decode_type_args(r)?;

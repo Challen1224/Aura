@@ -885,6 +885,30 @@ impl TypeChecker {
             Stmt::Break | Stmt::Continue => {
                 // These are valid inside loops, checked by the emitter
             }
+            Stmt::Throw(e) => {
+                let _ = self.infer_expr(e, class, locals, in_instance)?;
+            }
+            Stmt::Try {
+                try_body,
+                catches,
+                finally_body,
+            } => {
+                for s in try_body {
+                    self.check_stmt(s, class, locals, return_ty, in_instance, generic_params)?;
+                }
+                for catch in catches {
+                    self.validate_type_with_generics(&catch.ty, generic_params)?;
+                    locals.insert(catch.name.clone(), catch.ty.clone());
+                    for s in &catch.body {
+                        self.check_stmt(s, class, locals, return_ty, in_instance, generic_params)?;
+                    }
+                }
+                if let Some(finally_body) = finally_body {
+                    for s in finally_body {
+                        self.check_stmt(s, class, locals, return_ty, in_instance, generic_params)?;
+                    }
+                }
+            }
             Stmt::Block(stmts) => {
                 for s in stmts {
                     self.check_stmt(s, class, locals, return_ty, in_instance, generic_params)?;

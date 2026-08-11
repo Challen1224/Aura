@@ -210,6 +210,28 @@ pub enum Stmt {
     Continue,
     /// Block of statements.
     Block(Vec<Stmt>),
+    /// Throw an exception: `throw expr;`.
+    Throw(Expr),
+    /// Try/catch/finally statement.
+    Try {
+        /// Statements protected by the exception handlers.
+        try_body: Vec<Stmt>,
+        /// Catch clauses in source order.
+        catches: Vec<CatchClause>,
+        /// Optional finally body.
+        finally_body: Option<Vec<Stmt>>,
+    },
+}
+
+/// A single `catch (Type name) { body }` clause.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CatchClause {
+    /// Type of exception this clause catches.
+    pub ty: Type,
+    /// Variable bound to the caught exception.
+    pub name: String,
+    /// Handler body.
+    pub body: Vec<Stmt>,
 }
 
 /// Assignment target.
