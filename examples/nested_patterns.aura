@@ -1,0 +1,64 @@
+enum Shape {
+    Circle(float radius),
+    Rect(int width, int height),
+    Point(int x, int y)
+}
+
+enum Option {
+    None,
+    Some(int value)
+}
+
+class Program {
+    static void Main() {
+        print("=== nested enum variant patterns in match ===");
+        println();
+
+        Shape s = Shape.Point(3, 4);
+        string kind = match (s) {
+            Shape.Point(0, 0) => "origin",
+            Shape.Point(x, 0) => "on x-axis",
+            Shape.Point(x, y) => "point at ({x}, {y})",
+            Shape.Circle(1.0) => "unit circle",
+            Shape.Circle(r) => "circle radius {r}",
+            Shape.Rect(w, h) => "rect {w}x{h}"
+        };
+        print(kind);
+        println();
+
+        Shape t = Shape.Rect(5, 3);
+        string kind2 = match (t) {
+            Shape.Rect(5, 5) => "square",
+            Shape.Rect(w, h) => "rect {w}x{h}",
+            Shape.Point(x, y) => "point ({x}, {y})",
+            Shape.Circle(r) => "circle {r}"
+        };
+        print(kind2);
+        println();
+
+        print("=== nested enum inside if let ===");
+        println();
+
+        Option outer = Option.Some(7);
+        if let Option.Some(1..=5) = outer {
+            print("small value");
+            println();
+        } else if let Option.Some(value) = outer {
+            print("value: ");
+            print(value);
+            println();
+        } else {
+            print("none");
+            println();
+        }
+
+        Option small = Option.Some(3);
+        if let Option.Some(1..=5) = small {
+            print("small value");
+            println();
+        } else {
+            print("large or none");
+            println();
+        }
+    }
+}

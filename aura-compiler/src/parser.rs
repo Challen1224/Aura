@@ -1265,7 +1265,7 @@ impl<'a> Parser<'a> {
                     let mut args = Vec::new();
                     if !self.check(Token::RParen) {
                         loop {
-                            let arg = self.consume_ident("expected binding name")?;
+                            let arg = self.parse_pattern()?;
                             args.push(arg);
                             if !self.match_token(Token::Comma) {
                                 break;

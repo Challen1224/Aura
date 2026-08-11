@@ -432,92 +432,7 @@ impl<'a> MethodEmitter<'a> {
 
                 // Emit pattern test; failures jump over the then-branch.
                 let mut fail_jumps: Vec<usize> = Vec::new();
-
-                self.ops.push(Op::Ldloc(subject_local));
-                match pattern {
-                    Pattern::Wildcard => {}
-                    Pattern::Int(i) => {
-                        self.ops.push(Op::LdInt(*i));
-                        self.ops.push(Op::Eq);
-                        fail_jumps.push(self.ops.len());
-                        self.ops.push(Op::BrFalse(0));
-                    }
-                    Pattern::Float(f) => {
-                        let idx = self.constants.len() as u32;
-                        self.constants.push(f.to_string());
-                        self.ops.push(Op::LdFloat(idx));
-                        self.ops.push(Op::Eq);
-                        fail_jumps.push(self.ops.len());
-                        self.ops.push(Op::BrFalse(0));
-                    }
-                    Pattern::Bool(b) => {
-                        self.ops.push(Op::LdBool(*b));
-                        self.ops.push(Op::Eq);
-                        fail_jumps.push(self.ops.len());
-                        self.ops.push(Op::BrFalse(0));
-                    }
-                    Pattern::StringLit(s) => {
-                        let idx = self.constants.len() as u32;
-                        self.constants.push(s.clone());
-                        self.ops.push(Op::LdStr(idx));
-                        self.ops.push(Op::Eq);
-                        fail_jumps.push(self.ops.len());
-                        self.ops.push(Op::BrFalse(0));
-                    }
-                    Pattern::Null => {
-                        self.ops.push(Op::LdNull);
-                        self.ops.push(Op::Eq);
-                        fail_jumps.push(self.ops.len());
-                        self.ops.push(Op::BrFalse(0));
-                    }
-                    Pattern::Binding(name) => {
-                        // Binding always matches: copy the subject into a new local.
-                        let local_idx = self.locals.len() as u16;
-                        self.push_local(name.clone());
-                        self.ops.push(Op::Ldloc(subject_local));
-                        self.ops.push(Op::Stloc(local_idx));
-                    }
-                    Pattern::EnumVariant(enum_name, variant_name, bindings) => {
-                        let enum_def = self.program.enums.get(enum_name).ok_or_else(|| {
-                            format!("unknown enum `{}`", enum_name)
-                        })?;
-                        let variant_idx = enum_def.variants.iter().position(|v| v.name == *variant_name)
-                            .ok_or_else(|| format!("unknown variant `{}.{}`", enum_name, variant_name))?;
-
-                        self.ops.push(Op::EnumTag);
-                        self.ops.push(Op::LdInt(variant_idx as i32));
-                        self.ops.push(Op::Eq);
-                        fail_jumps.push(self.ops.len());
-                        self.ops.push(Op::BrFalse(0));
-
-                        for (i, binding) in bindings.iter().enumerate() {
-                            let local_idx = self.locals.len() as u16;
-                            self.push_local(binding.clone());
-                            self.ops.push(Op::Ldloc(subject_local));
-                            self.ops.push(Op::EnumField(i as u16));
-                            self.ops.push(Op::Stloc(local_idx));
-                        }
-                    }
-                    Pattern::Range(start, end, inclusive) => {
-                        // subject >= start
-                        self.ops.push(Op::Ldloc(subject_local));
-                        self.emit_expr(start)?;
-                        if *inclusive {
-                            self.ops.push(Op::Ge);
-                        } else {
-                            self.ops.push(Op::Gt);
-                        }
-                        fail_jumps.push(self.ops.len());
-                        self.ops.push(Op::BrFalse(0));
-
-                        // subject <= end (or < for exclusive)
-                        self.ops.push(Op::Ldloc(subject_local));
-                        self.emit_expr(end)?;
-                        self.ops.push(Op::Le);
-                        fail_jumps.push(self.ops.len());
-                        self.ops.push(Op::BrFalse(0));
-                    }
-                }
+                self.emit_pattern(pattern, subject_local, &mut fail_jumps)?;
 
                 if fail_jumps.is_empty() {
                     // Pattern always matches (wildcard or binding).
@@ -1228,120 +1143,19 @@ impl<'a> MethodEmitter<'a> {
                     let mut pattern_success_jumps = Vec::new();
                     
                     for pattern in &arm.patterns {
-                        self.ops.push(Op::Ldloc(subject_local));
-                        match pattern {
-                            Pattern::Wildcard => {
-                                // Wildcard always matches, jump to body
-                                pattern_success_jumps.push(self.ops.len());
-                                self.ops.push(Op::Br(0)); // placeholder
-                                break; // No need to check more patterns
-                            }
-                            Pattern::Int(i) => {
-                                self.ops.push(Op::LdInt(*i));
-                                self.ops.push(Op::Eq);
-                                // If matches, jump to body
-                                pattern_success_jumps.push(self.ops.len());
-                                self.ops.push(Op::BrTrue(0)); // placeholder
-                            }
-                            Pattern::Float(f) => {
-                                let idx = self.constants.len() as u32;
-                                self.constants.push(f.to_string());
-                                self.ops.push(Op::LdFloat(idx));
-                                self.ops.push(Op::Eq);
-                                pattern_success_jumps.push(self.ops.len());
-                                self.ops.push(Op::BrTrue(0)); // placeholder
-                            }
-                            Pattern::Bool(b) => {
-                                self.ops.push(Op::LdBool(*b));
-                                self.ops.push(Op::Eq);
-                                pattern_success_jumps.push(self.ops.len());
-                                self.ops.push(Op::BrTrue(0)); // placeholder
-                            }
-                            Pattern::StringLit(s) => {
-                                let idx = self.constants.len() as u32;
-                                self.constants.push(s.clone());
-                                self.ops.push(Op::LdStr(idx));
-                                self.ops.push(Op::Eq);
-                                pattern_success_jumps.push(self.ops.len());
-                                self.ops.push(Op::BrTrue(0)); // placeholder
-                            }
-                            Pattern::Null => {
-                                self.ops.push(Op::LdNull);
-                                self.ops.push(Op::Eq);
-                                pattern_success_jumps.push(self.ops.len());
-                                self.ops.push(Op::BrTrue(0)); // placeholder
-                            }
-                            Pattern::Binding(name) => {
-                                // Bind the subject to a new local
-                                let local_idx = self.locals.len() as u16;
-                                self.push_local(name.clone());
-                                self.ops.push(Op::Ldloc(subject_local));
-                                self.ops.push(Op::Stloc(local_idx));
-                                // Binding always succeeds
-                                pattern_success_jumps.push(self.ops.len());
-                                self.ops.push(Op::Br(0)); // placeholder
-                                break; // No need to check more patterns
-                            }
-                            Pattern::EnumVariant(enum_name, variant_name, bindings) => {
-                                let enum_id = *self.enum_ids.get(enum_name).ok_or_else(|| {
-                                    format!("unknown enum `{}`", enum_name)
-                                })?;
-                                let enum_def = self.program.enums.get(enum_name).ok_or_else(|| {
-                                    format!("unknown enum `{}`", enum_name)
-                                })?;
-                                let variant_idx = enum_def.variants.iter().position(|v| v.name == *variant_name)
-                                    .ok_or_else(|| format!("unknown variant `{}.{}`", enum_name, variant_name))?;
-
-                                self.ops.push(Op::EnumTag);
-                                self.ops.push(Op::LdInt(variant_idx as i32));
-                                self.ops.push(Op::Eq);
-                                let tag_mismatch = self.ops.len();
-                                self.ops.push(Op::BrFalse(0));
-
-                                for (i, binding) in bindings.iter().enumerate() {
-                                    let local_idx = self.locals.len() as u16;
-                                    self.push_local(binding.clone());
-                                    self.ops.push(Op::Ldloc(subject_local));
-                                    self.ops.push(Op::EnumField(i as u16));
-                                    self.ops.push(Op::Stloc(local_idx));
-                                }
-
-                                pattern_success_jumps.push(self.ops.len());
-                                self.ops.push(Op::Br(0));
-
-                                let after_bindings = self.ops.len() as u32;
-                                self.ops[tag_mismatch] = Op::BrFalse(after_bindings);
-
-                                let _ = enum_id;
-                            }
-                            Pattern::Range(start, end, inclusive) => {
-                                // Check: subject >= start
-                                self.ops.push(Op::Ldloc(subject_local));
-                                self.emit_expr(start)?;
-                                if *inclusive {
-                                    self.ops.push(Op::Ge);
-                                } else {
-                                    self.ops.push(Op::Gt);
-                                }
-                                let below_start = self.ops.len();
-                                self.ops.push(Op::BrFalse(0));
-
-                                // Check: subject <= end (or < for exclusive)
-                                self.ops.push(Op::Ldloc(subject_local));
-                                self.emit_expr(end)?;
-                                self.ops.push(Op::Le);
-                                let above_end = self.ops.len();
-                                self.ops.push(Op::BrFalse(0));
-
-                                // Both checks passed
-                                pattern_success_jumps.push(self.ops.len());
-                                self.ops.push(Op::Br(0));
-
-                                // Patch failure jumps
-                                let after_range = self.ops.len() as u32;
-                                self.ops[below_start] = Op::BrFalse(after_range);
-                                self.ops[above_end] = Op::BrFalse(after_range);
-                            }
+                        let mut fail_jumps = Vec::new();
+                        self.emit_pattern(pattern, subject_local, &mut fail_jumps)?;
+                        // On success (no fail jump taken), jump to the body.
+                        pattern_success_jumps.push(self.ops.len());
+                        self.ops.push(Op::Br(0)); // placeholder
+                        // Fail jumps skip this success jump and try the next pattern.
+                        let after = self.ops.len() as u32;
+                        for jump in &fail_jumps {
+                            self.ops[*jump] = Op::BrFalse(after);
+                        }
+                        // A wildcard or binding always matches.
+                        if matches!(pattern, Pattern::Wildcard | Pattern::Binding(_)) {
+                            break; // No need to check more patterns
                         }
                     }
                     
@@ -1434,13 +1248,116 @@ impl<'a> MethodEmitter<'a> {
 
     /// Allocate a new local slot, tracking the peak local count so the frame
     /// stays sized correctly even when scoped locals are popped later.
+    /// Returns the index of the newly allocated local.
     fn push_local(&mut self, name: String) -> usize {
         self.locals.push(name);
         let len = self.locals.len();
         if len > self.max_locals {
             self.max_locals = len;
         }
-        len
+        len - 1
+    }
+
+    /// Emit a pattern test against the value in `subject_local`. On success,
+    /// pattern bindings have been created. On failure, a `BrFalse` jump is
+    /// recorded in `fail_jumps` (to be patched by the caller).
+    fn emit_pattern(
+        &mut self,
+        pattern: &Pattern,
+        subject_local: u16,
+        fail_jumps: &mut Vec<usize>,
+    ) -> Result<(), String> {
+        match pattern {
+            Pattern::Wildcard => {}
+            Pattern::Int(i) => {
+                self.ops.push(Op::Ldloc(subject_local));
+                self.ops.push(Op::LdInt(*i));
+                self.ops.push(Op::Eq);
+                fail_jumps.push(self.ops.len());
+                self.ops.push(Op::BrFalse(0));
+            }
+            Pattern::Float(f) => {
+                let idx = self.constants.len() as u32;
+                self.constants.push(f.to_string());
+                self.ops.push(Op::Ldloc(subject_local));
+                self.ops.push(Op::LdFloat(idx));
+                self.ops.push(Op::Eq);
+                fail_jumps.push(self.ops.len());
+                self.ops.push(Op::BrFalse(0));
+            }
+            Pattern::Bool(b) => {
+                self.ops.push(Op::Ldloc(subject_local));
+                self.ops.push(Op::LdBool(*b));
+                self.ops.push(Op::Eq);
+                fail_jumps.push(self.ops.len());
+                self.ops.push(Op::BrFalse(0));
+            }
+            Pattern::StringLit(s) => {
+                let idx = self.constants.len() as u32;
+                self.constants.push(s.clone());
+                self.ops.push(Op::Ldloc(subject_local));
+                self.ops.push(Op::LdStr(idx));
+                self.ops.push(Op::Eq);
+                fail_jumps.push(self.ops.len());
+                self.ops.push(Op::BrFalse(0));
+            }
+            Pattern::Null => {
+                self.ops.push(Op::Ldloc(subject_local));
+                self.ops.push(Op::LdNull);
+                self.ops.push(Op::Eq);
+                fail_jumps.push(self.ops.len());
+                self.ops.push(Op::BrFalse(0));
+            }
+            Pattern::Binding(name) => {
+                // Binding always matches: copy the subject into a new local.
+                let local_idx = self.push_local(name.clone()) as u16;
+                self.ops.push(Op::Ldloc(subject_local));
+                self.ops.push(Op::Stloc(local_idx));
+            }
+            Pattern::EnumVariant(enum_name, variant_name, sub_patterns) => {
+                let enum_def = self.program.enums.get(enum_name).ok_or_else(|| {
+                    format!("unknown enum `{}`", enum_name)
+                })?;
+                let variant_idx = enum_def.variants.iter().position(|v| v.name == *variant_name)
+                    .ok_or_else(|| format!("unknown variant `{}.{}`", enum_name, variant_name))?;
+
+                self.ops.push(Op::Ldloc(subject_local));
+                self.ops.push(Op::EnumTag);
+                self.ops.push(Op::LdInt(variant_idx as i32));
+                self.ops.push(Op::Eq);
+                fail_jumps.push(self.ops.len());
+                self.ops.push(Op::BrFalse(0));
+
+                for (i, sub) in sub_patterns.iter().enumerate() {
+                    // Load field i into a temp local, then test the sub-pattern.
+                    let field_local = self.push_local("__pattern_field".to_string()) as u16;
+                    self.ops.push(Op::Ldloc(subject_local));
+                    self.ops.push(Op::EnumField(i as u16));
+                    self.ops.push(Op::Stloc(field_local));
+                    self.emit_pattern(sub, field_local, fail_jumps)?;
+                }
+            }
+            Pattern::Range(start, end, inclusive) => {
+                // subject >= start (or > for exclusive)
+                self.ops.push(Op::Ldloc(subject_local));
+                self.emit_expr(start)?;
+                if *inclusive {
+                    self.ops.push(Op::Ge);
+                } else {
+                    self.ops.push(Op::Gt);
+                }
+                fail_jumps.push(self.ops.len());
+                self.ops.push(Op::BrFalse(0));
+
+                // subject <= end (or < for exclusive)
+                self.ops.push(Op::Ldloc(subject_local));
+                self.emit_expr(end)?;
+                self.ops.push(Op::Le);
+                fail_jumps.push(self.ops.len());
+                self.ops.push(Op::BrFalse(0));
+            }
+        }
+        Ok(())
     }
 
     /// Index of an instance field in the full (base + own) layout of the

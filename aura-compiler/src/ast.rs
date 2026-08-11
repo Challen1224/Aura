@@ -375,8 +375,8 @@ pub enum Pattern {
     Null,
     /// Wildcard pattern (matches anything).
     Wildcard,
-    /// Enum variant pattern: `Color.Red` or `Some(value)`.
-    EnumVariant(String, String, Vec<String>),
+    /// Enum variant pattern with nested sub-patterns: `Some(Point(1, 2))`.
+    EnumVariant(String, String, Vec<Pattern>),
     /// Binding pattern: bind matched value to a name.
     Binding(String),
     /// Range pattern: `1..=5` or `1..5`.

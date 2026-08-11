@@ -875,55 +875,7 @@ impl TypeChecker {
                 let subject_ty = self.infer_expr(expr, class, locals, in_instance, return_ty, generic_params)?;
 
                 // Validate the pattern against the subject type and collect bindings.
-                let mut bindings: Vec<(String, Type)> = Vec::new();
-                match pattern {
-                    Pattern::EnumVariant(enum_name, variant_name, binding_names) => {
-                        let enum_info = self.enums.get(enum_name).ok_or_else(|| {
-                            TypeError(format!("unknown enum `{}`", enum_name))
-                        })?;
-                        let variant = enum_info.variants.iter().find(|v| v.name == *variant_name)
-                            .ok_or_else(|| TypeError(format!(
-                                "unknown variant `{}.{}`", enum_name, variant_name
-                            )))?;
-                        if binding_names.len() != variant.fields.len() {
-                            return Err(TypeError(format!(
-                                "variant `{}.{}` has {} fields but pattern has {} bindings",
-                                enum_name, variant_name, variant.fields.len(), binding_names.len()
-                            )));
-                        }
-                        if let Type::Enum(ref sn) = subject_ty {
-                            if sn != enum_name {
-                                return Err(TypeError(format!(
-                                    "cannot match enum `{}` against value of type `{}`",
-                                    enum_name, subject_ty.name()
-                                )));
-                            }
-                        }
-                        for (name, (_, field_ty)) in binding_names.iter().zip(variant.fields.iter()) {
-                            bindings.push((name.clone(), field_ty.clone()));
-                        }
-                    }
-                    Pattern::Range(start, end, _) => {
-                        if subject_ty != Type::Int && subject_ty != Type::Float {
-                            return Err(TypeError(format!(
-                                "range pattern requires int or float subject, got {}",
-                                subject_ty.name()
-                            )));
-                        }
-                        let start_ty = self.infer_expr(start, class, locals, in_instance, return_ty, generic_params)?;
-                        let end_ty = self.infer_expr(end, class, locals, in_instance, return_ty, generic_params)?;
-                        if start_ty != subject_ty || end_ty != subject_ty {
-                            return Err(TypeError(format!(
-                                "range pattern bounds must match subject type {}, got {} and {}",
-                                subject_ty.name(), start_ty.name(), end_ty.name()
-                            )));
-                        }
-                    }
-                    Pattern::Binding(name) => {
-                        bindings.push((name.clone(), subject_ty.clone()));
-                    }
-                    _ => {}
-                }
+                let bindings = self.check_pattern(pattern, &subject_ty, class, locals, in_instance, return_ty, generic_params)?;
 
                 // Bind the pattern names for the then branch only.
                 let mut saved: Vec<(String, Option<Type>)> = Vec::new();
@@ -1073,6 +1025,94 @@ impl TypeChecker {
             }
         }
         Ok(())
+    }
+
+    /// Recursively validate a pattern against an expected type and collect the
+    /// names it binds (each with the type of the value it will hold).
+    fn check_pattern(
+        &self,
+        pattern: &Pattern,
+        expected_ty: &Type,
+        class: &ClassInfo,
+        locals: &HashMap<String, Type>,
+        in_instance: bool,
+        return_ty: &Type,
+        generic_params: &[GenericParam],
+    ) -> Result<Vec<(String, Type)>, TypeError> {
+        let mut bindings = Vec::new();
+        match pattern {
+            Pattern::Binding(name) => bindings.push((name.clone(), expected_ty.clone())),
+            Pattern::EnumVariant(enum_name, variant_name, sub_patterns) => {
+                let enum_info = self.enums.get(enum_name).ok_or_else(|| {
+                    TypeError(format!("unknown enum `{}`", enum_name))
+                })?;
+                let variant = enum_info.variants.iter().find(|v| v.name == *variant_name)
+                    .ok_or_else(|| TypeError(format!(
+                        "unknown variant `{}.{}`", enum_name, variant_name
+                    )))?;
+                if sub_patterns.len() != variant.fields.len() {
+                    return Err(TypeError(format!(
+                        "variant `{}.{}` has {} fields but pattern has {} sub-patterns",
+                        enum_name, variant_name, variant.fields.len(), sub_patterns.len()
+                    )));
+                }
+                if let Type::Enum(ref sn) = expected_ty {
+                    if sn != enum_name {
+                        return Err(TypeError(format!(
+                            "cannot match enum `{}` against value of type `{}`",
+                            enum_name, expected_ty.name()
+                        )));
+                    }
+                }
+                for (sub, (_, field_ty)) in sub_patterns.iter().zip(variant.fields.iter()) {
+                    bindings.extend(self.check_pattern(
+                        sub, field_ty, class, locals, in_instance, return_ty, generic_params,
+                    )?);
+                }
+            }
+            Pattern::Range(start, end, _) => {
+                if expected_ty != &Type::Int && expected_ty != &Type::Float {
+                    return Err(TypeError(format!(
+                        "range pattern requires int or float subject, got {}",
+                        expected_ty.name()
+                    )));
+                }
+                let start_ty = self.infer_expr(start, class, locals, in_instance, return_ty, generic_params)?;
+                let end_ty = self.infer_expr(end, class, locals, in_instance, return_ty, generic_params)?;
+                if start_ty != *expected_ty || end_ty != *expected_ty {
+                    return Err(TypeError(format!(
+                        "range pattern bounds must match subject type {}, got {} and {}",
+                        expected_ty.name(), start_ty.name(), end_ty.name()
+                    )));
+                }
+            }
+            Pattern::Int(_) if expected_ty != &Type::Int => {
+                return Err(TypeError(format!(
+                    "integer pattern cannot match subject of type {}",
+                    expected_ty.name()
+                )));
+            }
+            Pattern::Float(_) if expected_ty != &Type::Float => {
+                return Err(TypeError(format!(
+                    "float pattern cannot match subject of type {}",
+                    expected_ty.name()
+                )));
+            }
+            Pattern::Bool(_) if expected_ty != &Type::Bool => {
+                return Err(TypeError(format!(
+                    "bool pattern cannot match subject of type {}",
+                    expected_ty.name()
+                )));
+            }
+            Pattern::StringLit(_) if expected_ty != &Type::String => {
+                return Err(TypeError(format!(
+                    "string pattern cannot match subject of type {}",
+                    expected_ty.name()
+                )));
+            }
+            Pattern::Int(_) | Pattern::Float(_) | Pattern::Bool(_) | Pattern::StringLit(_) | Pattern::Null | Pattern::Wildcard => {}
+        }
+        Ok(bindings)
     }
 
     fn infer_expr(
@@ -1342,61 +1382,22 @@ impl TypeChecker {
                 let mut result_ty: Option<Type> = None;
                 
                 for arm in arms {
+                    let mut arm_bindings: Vec<(String, Type)> = Vec::new();
                     for pattern in &arm.patterns {
-                        match pattern {
-                            Pattern::EnumVariant(enum_name, variant_name, bindings) => {
-                                let enum_info = self.enums.get(enum_name).ok_or_else(|| {
-                                    TypeError(format!("unknown enum `{}`", enum_name))
-                                })?;
-                                let variant = enum_info.variants.iter().find(|v| v.name == *variant_name)
-                                    .ok_or_else(|| TypeError(format!(
-                                        "unknown variant `{}.{}`", enum_name, variant_name
-                                    )))?;
-                                if bindings.len() != variant.fields.len() {
-                                    return Err(TypeError(format!(
-                                        "variant `{}.{}` has {} fields but pattern has {} bindings",
-                                        enum_name, variant_name, variant.fields.len(), bindings.len()
-                                    )));
-                                }
-                                if let Type::Enum(ref sn) = subject_ty {
-                                    if sn != enum_name {
-                                        return Err(TypeError(format!(
-                                            "cannot match enum `{}` against value of type `{}`",
-                                            enum_name, subject_ty.name()
-                                        )));
-                                    }
-                                }
-                            }
-                            Pattern::Range(start, end, _inclusive) => {
-                                // Range patterns only work with numeric types
-                                if subject_ty != Type::Int && subject_ty != Type::Float {
-                                    return Err(TypeError(format!(
-                                        "range pattern requires int or float subject, got {}",
-                                        subject_ty.name()
-                                    )));
-                                }
-                                let start_ty = self.infer_expr(start, class, locals, in_instance, return_ty, generic_params)?;
-                                let end_ty = self.infer_expr(end, class, locals, in_instance, return_ty, generic_params)?;
-                                if start_ty != subject_ty {
-                                    return Err(TypeError(format!(
-                                        "range start type {} doesn't match subject type {}",
-                                        start_ty.name(), subject_ty.name()
-                                    )));
-                                }
-                                if end_ty != subject_ty {
-                                    return Err(TypeError(format!(
-                                        "range end type {} doesn't match subject type {}",
-                                        end_ty.name(), subject_ty.name()
-                                    )));
-                                }
-                            }
-                            _ => {}
-                        }
+                        arm_bindings.extend(self.check_pattern(
+                            pattern, &subject_ty, class, locals, in_instance, return_ty, generic_params,
+                        )?);
+                    }
+                    
+                    // Bind the pattern names for the arm body and guard.
+                    let mut arm_locals = locals.clone();
+                    for (name, ty) in &arm_bindings {
+                        arm_locals.insert(name.clone(), ty.clone());
                     }
                     
                     // Type check guard
                     if let Some(guard) = &arm.guard {
-                        let guard_ty = self.infer_expr(guard, class, locals, in_instance, return_ty, generic_params)?;
+                        let guard_ty = self.infer_expr(guard, class, &arm_locals, in_instance, return_ty, generic_params)?;
                         if guard_ty != Type::Bool {
                             return Err(TypeError(format!(
                                 "match guard must be bool, got {}",
@@ -1406,7 +1407,7 @@ impl TypeChecker {
                     }
                     
                     // Type check body
-                    let body_ty = self.infer_expr(&arm.body, class, locals, in_instance, return_ty, generic_params)?;
+                    let body_ty = self.infer_expr(&arm.body, class, &arm_locals, in_instance, return_ty, generic_params)?;
                     
                     // Check that all arms have compatible types
                     if let Some(ref expected) = result_ty {
