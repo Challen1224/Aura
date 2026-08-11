@@ -384,19 +384,9 @@
 
 ### 1.5 Error Handling
 
-#### ⏳ Planned
-
-**P0 - Critical**
-- [ ] **Exception system**
+#### ✅ Completed
+- [x] **Exception system**
   ```aura
-  class Exception {
-      string message;
-      Exception? cause;
-  }
-  
-  class IOException : Exception { }
-  class FileNotFoundException : IOException { }
-  
   try {
       readFile("data.txt");
   } catch (FileNotFoundException e) {
@@ -407,7 +397,33 @@
       cleanup();
   }
   ```
+- [x] **Custom exception classes**
+  ```aura
+  class Exception {
+      string message;
+      string stackTrace;
+  }
+  
+  class MyError : Exception { }
+  ```
+- [x] **Stack traces**
+  ```aura
+  try {
+      throw new MyError();
+  } catch (MyError e) {
+      print(e.stackTrace);  // "at Program.Main\n..."
+  }
+  ```
+- [x] **Resource management with `using`**
+  ```aura
+  using (resource) {
+      resource.Use();
+  }  // resource.Dispose() called automatically
+  ```
 
+#### ⏳ Planned
+
+**P0 - Critical**
 - [ ] **Checked exceptions** (optional)
   ```aura
   void readFile(string path) throws IOException { }
@@ -422,15 +438,7 @@
   ```
 
 **P1 - High Priority**
-- [ ] **Custom exception classes**
 - [ ] **Exception chaining**
-- [ ] **Stack traces**
-- [ ] **Resource management with `using`**
-  ```aura
-  using (var file = File.open("data.txt")) {
-      // file is automatically closed
-  }
-  ```
 
 **P2 - Medium Priority**
 - [ ] **Typed throws**

@@ -602,6 +602,41 @@ impl<'a> MethodEmitter<'a> {
                 }
                 self.handlers.extend(handler_entries);
             }
+            Stmt::Using {
+                resource_ty: _,
+                name,
+                expr,
+                body,
+            } => {
+                // Lower `using (expr) { body }` to `try { body } finally { resource.Dispose(); }`
+                self.emit_expr(expr)?;
+                self.locals.push(name.clone().unwrap_or_else(|| "__using_temp".to_string()));
+                let resource_local = (self.locals.len() - 1) as u16;
+                self.ops.push(Op::Stloc(resource_local));
+
+                let try_start = self.ops.len() as u32;
+                for s in body {
+                    self.emit_stmt(s)?;
+                }
+                let try_end = self.ops.len() as u32;
+                let normal_jump = self.ops.len();
+                self.ops.push(Op::Br(0));
+
+                let finally_entry = self.ops.len() as u32;
+                self.ops.push(Op::Ldloc(resource_local));
+                self.ops.push(Op::CallVirt("Dispose".to_string()));
+                self.ops.push(Op::Pop);
+                self.ops.push(Op::EndFinally);
+
+                self.ops[normal_jump] = Op::Br(finally_entry);
+                self.handlers.push(ExceptionHandler {
+                    start: try_start,
+                    end: try_end,
+                    catch_type: None,
+                    handler_pc: finally_entry,
+                    catch_local: 0,
+                });
+            }
         }
         Ok(())
     }

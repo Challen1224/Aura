@@ -221,6 +221,19 @@ pub enum Stmt {
         /// Optional finally body.
         finally_body: Option<Vec<Stmt>>,
     },
+    /// Resource acquisition statement: `using (Type name = expr) { body }` or
+    /// `using (expr) { body }`. Disposes the resource (calls `Dispose`) on both
+    /// normal exit and when an exception propagates.
+    Using {
+        /// Declared resource type, if `using (Type name = expr)`.
+        resource_ty: Option<Type>,
+        /// Resource variable name, if `using (Type name = expr)`.
+        name: Option<String>,
+        /// Expression producing the resource.
+        expr: Box<Expr>,
+        /// Body guarded by the resource.
+        body: Vec<Stmt>,
+    },
 }
 
 /// A single `catch (Type name) { body }` clause.

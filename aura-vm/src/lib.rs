@@ -208,7 +208,7 @@ impl Vm {
             FrameResult::Normal(v) => Ok(v),
             FrameResult::Exception(e) => Err(VmError::Runtime(format!(
                 "uncaught exception: {}",
-                describe_value(&self, &e)
+                self.describe_exception(&e)
             ))),
         }
     }
@@ -571,6 +571,7 @@ impl Vm {
                 Op::Break | Op::Continue => unreachable!("Break/Continue should be resolved by emitter"),
                 Op::Throw => {
                     let exc = self.pop()?;
+                    self.attach_stack_trace(&exc);
                     after_finally = None;
                     pending = Some(exc);
                 }
@@ -811,6 +812,113 @@ impl Vm {
         };
         self.push(res);
         Ok(())
+    }
+
+    /// The id of the standard `Exception` class, if present in the module.
+    fn exception_class_id(&self) -> Option<ClassId> {
+        self.module
+            .classes
+            .iter()
+            .find(|(_, c)| c.name == "Exception")
+            .map(|(id, _)| *id)
+    }
+
+    /// Multi-line stack trace of the current call stack, innermost frame last.
+    fn capture_stack_trace(&self) -> String {
+        let mut lines = Vec::new();
+        for frame in self.call_stack.iter().rev() {
+            let label = self.frame_label(frame.method_id);
+            lines.push(format!("  at {}", label));
+        }
+        if lines.is_empty() {
+            lines.push("  at <entrypoint>".to_string());
+        }
+        lines.join("\n")
+    }
+
+    /// `ClassName.Method` label for a method id.
+    fn frame_label(&self, method_id: MethodId) -> String {
+        for (_, class) in &self.module.classes {
+            if let Some(m) = class.methods.get(&method_id).or_else(|| class.static_methods.get(&method_id)) {
+                return format!("{}.{}", class.name, m.name);
+            }
+        }
+        format!("{:?}", method_id)
+    }
+
+    /// If `exc` is an instance of the standard `Exception` class, record the
+    /// current stack trace into its `stackTrace` field.
+    fn attach_stack_trace(&mut self, exc: &Value) {
+        let Value::Object(handle) = exc else { return };
+        let Ok(obj) = self.heap.get(*handle) else { return };
+        let AuraObject::Instance { class_id, .. } = obj else { return };
+        let Some(exception_id) = self.exception_class_id() else { return };
+        if !self.is_instance_of(*class_id, exception_id) {
+            return;
+        }
+        let Some(class) = self.module.classes.get(class_id) else { return };
+        let Some(idx) = class.fields.iter().position(|f| f.name == "stackTrace") else {
+            return;
+        };
+        let trace = self.capture_stack_trace();
+        let trace_handle = self.heap.allocate(AuraObject::String(trace));
+        if let Ok(AuraObject::Instance { fields, .. }) = self.heap.get_mut(*handle) {
+            if let Some(slot) = fields.get_mut(idx) {
+                *slot = Value::String(trace_handle);
+            }
+        }
+    }
+
+    /// Format a thrown value for the uncaught-exception error message. Exception
+    /// instances render as `Class: message` followed by their stack trace.
+    fn describe_exception(&self, e: &Value) -> String {
+        let Value::Object(handle) = e else {
+            return describe_value(self, e);
+        };
+        let Ok(obj) = self.heap.get(*handle) else {
+            return describe_value(self, e);
+        };
+        let AuraObject::Instance { class_id, fields } = obj else {
+            return describe_value(self, e);
+        };
+        let Some(exception_id) = self.exception_class_id() else {
+            return describe_value(self, e);
+        };
+        if !self.is_instance_of(*class_id, exception_id) {
+            return describe_value(self, e);
+        }
+        let Some(class) = self.module.classes.get(class_id) else {
+            return describe_value(self, e);
+        };
+        let field = |name: &str| {
+            class
+                .fields
+                .iter()
+                .position(|f| f.name == name)
+                .and_then(|idx| fields.get(idx))
+                .map(|v| self.value_as_string(v))
+                .unwrap_or_default()
+        };
+        let mut out = class.name.clone();
+        let message = field("message");
+        if !message.is_empty() {
+            out.push_str(": ");
+            out.push_str(&message);
+        }
+        let trace = field("stackTrace");
+        if !trace.is_empty() {
+            out.push('\n');
+            out.push_str(&trace);
+        }
+        out
+    }
+
+    /// Render a value as text, reading strings out of the heap.
+    fn value_as_string(&self, v: &Value) -> String {
+        match v {
+            Value::String(handle) => self.heap.get_string(*handle).unwrap_or("").to_string(),
+            other => describe_value(self, other),
+        }
     }
 }
 

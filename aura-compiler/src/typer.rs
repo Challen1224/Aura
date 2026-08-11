@@ -551,6 +551,33 @@ impl TypeChecker {
         None
     }
 
+    /// Require that a value of `ty` is disposable: its class (or a base class /
+    /// implemented interface) declares an instance `Dispose()` method returning void.
+    fn require_disposable(&self, ty: &Type) -> Result<(), TypeError> {
+        let class_name = match ty {
+            Type::Class(name, _) => name.clone(),
+            _ => {
+                return Err(TypeError(format!(
+                    "`using` requires a class resource, got {}",
+                    ty.name()
+                )))
+            }
+        };
+        let (_, method) = self.find_method(&class_name, "Dispose").ok_or_else(|| {
+            TypeError(format!(
+                "`using` resource type `{}` has no `Dispose()` method",
+                class_name
+            ))
+        })?;
+        if !method.params.is_empty() || method.return_ty != Type::Unit {
+            return Err(TypeError(format!(
+                "`Dispose()` on `{}` must take no parameters and return void",
+                class_name
+            )));
+        }
+        Ok(())
+    }
+
     /// Look up a static method starting at `class_name`, walking the super chain.
     fn find_static_method(&self, class_name: &str, method: &str) -> Option<(String, MethodInfo)> {
         let mut cur = Some(class_name);
@@ -907,6 +934,36 @@ impl TypeChecker {
                     for s in finally_body {
                         self.check_stmt(s, class, locals, return_ty, in_instance, generic_params)?;
                     }
+                }
+            }
+            Stmt::Using {
+                resource_ty,
+                name,
+                expr,
+                body,
+            } => {
+                let expr_ty = self.infer_expr(expr, class, locals, in_instance)?;
+                match (resource_ty, name) {
+                    (Some(decl_ty), Some(n)) => {
+                        self.validate_type_with_generics(decl_ty, generic_params)?;
+                        if !self.is_assignable(decl_ty, &expr_ty) {
+                            return Err(TypeError(format!(
+                                "cannot use value of type {} as `using` resource of type {}",
+                                expr_ty.name(),
+                                decl_ty.name()
+                            )));
+                        }
+                        locals.insert(n.clone(), decl_ty.clone());
+                    }
+                    (None, Some(n)) => {
+                        locals.insert(n.clone(), expr_ty.clone());
+                    }
+                    (None, None) => {}
+                    (Some(_), None) => unreachable!("parser always pairs resource type with name"),
+                }
+                self.require_disposable(&expr_ty)?;
+                for s in body {
+                    self.check_stmt(s, class, locals, return_ty, in_instance, generic_params)?;
                 }
             }
             Stmt::Block(stmts) => {

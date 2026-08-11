@@ -141,6 +141,8 @@ pub enum Token {
     Catch,
     /// `finally`
     Finally,
+    /// `using`
+    Using,
 }
 
 impl fmt::Display for Token {
@@ -213,6 +215,7 @@ impl fmt::Display for Token {
             Token::Try => "`try`",
             Token::Catch => "`catch`",
             Token::Finally => "`finally`",
+            Token::Using => "`using`",
         };
         write!(f, "{}", s)
     }
@@ -722,6 +725,7 @@ impl<'a> Lexer<'a> {
             "try" => Token::Try,
             "catch" => Token::Catch,
             "finally" => Token::Finally,
+            "using" => Token::Using,
             _ => Token::Ident(word.to_string()),
         })
     }

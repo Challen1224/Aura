@@ -1,0 +1,83 @@
+class MyError : Exception { }
+
+class Resource {
+    string name;
+
+    void Init(string n) {
+        this.name = n;
+    }
+
+    void Dispose() {
+        print("disposing ");
+        print(this.name);
+        println();
+    }
+
+    void Use() {
+        print("using ");
+        print(this.name);
+        println();
+    }
+}
+
+class Program {
+    static void Main() {
+        // --- Exception base class + stack traces ---
+        print("=== Exception base class ===");
+        println();
+
+        try {
+            throw new Exception();
+        } catch (Exception e) {
+            print("caught Exception");
+            println();
+            print("message: [");
+            print(e.message);
+            print("]");
+            println();
+            print("stackTrace:");
+            println();
+            print(e.stackTrace);
+            println();
+        }
+
+        // User-defined subclass inherits message + stackTrace.
+        MyError err = new MyError();
+        err.message = "something went wrong";
+        try {
+            throw err;
+        } catch (MyError e2) {
+            print("caught MyError: ");
+            print(e2.message);
+            println();
+            print(e2.stackTrace);
+            println();
+        }
+
+        // --- using statement ---
+        print("=== using statement ===");
+        println();
+
+        Resource r = new Resource();
+        r.Init("my_resource");
+        using (r) {
+            r.Use();
+        }
+        print("after using block");
+        println();
+
+        // using runs Dispose even when the body throws.
+        Resource r2 = new Resource();
+        r2.Init("risky_resource");
+        try {
+            using (r2) {
+                print("before throw inside using");
+                println();
+                throw new Exception();
+            }
+        } catch (Exception e3) {
+            print("caught after using");
+            println();
+        }
+    }
+}

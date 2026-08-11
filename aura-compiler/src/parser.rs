@@ -40,6 +40,30 @@ impl<'a> Parser<'a> {
                 decls.push(Decl::Class(self.parse_class(false, false, false)?));
             }
         }
+        // Inject the standard `Exception` base class so it is always available
+        // (fields `message` and `stackTrace`, populated by the VM on throw).
+        decls.insert(0, Decl::Class(ClassDecl {
+            name: "Exception".to_string(),
+            generic_params: vec![],
+            bases: vec![],
+            is_interface: false,
+            is_abstract: false,
+            is_sealed: false,
+            members: vec![
+                Member::Field(FieldDecl {
+                    is_static: false,
+                    visibility: Visibility::Public,
+                    ty: Type::String,
+                    name: "message".to_string(),
+                }),
+                Member::Field(FieldDecl {
+                    is_static: false,
+                    visibility: Visibility::Public,
+                    ty: Type::String,
+                    name: "stackTrace".to_string(),
+                }),
+            ],
+        }));
         Ok(Program { decls })
     }
 
@@ -285,6 +309,8 @@ impl<'a> Parser<'a> {
             self.parse_throw()
         } else if self.match_token(Token::Try) {
             self.parse_try()
+        } else if self.match_token(Token::Using) {
+            self.parse_using()
         } else if self.check(Token::LParen) && self.peek_ahead_is_tuple_decl() {
             self.parse_tuple_decl()
         } else if self.check_type() && self.peek_ahead_is_ident_after_type() {
@@ -547,6 +573,28 @@ impl<'a> Parser<'a> {
             try_body,
             catches,
             finally_body,
+        })
+    }
+
+    fn parse_using(&mut self) -> Result<Stmt, String> {
+        self.consume(Token::LParen, "expected `(` after `using`")?;
+        let (resource_ty, name, expr) = if self.check_type() && self.peek_ahead_is_ident_after_type() {
+            let ty = self.parse_type()?;
+            let n = self.consume_ident("expected resource variable name")?;
+            self.consume(Token::Assign, "expected `=` in `using` declaration")?;
+            let e = self.parse_expr()?;
+            (Some(ty), Some(n), e)
+        } else {
+            let e = self.parse_expr()?;
+            (None, None, e)
+        };
+        self.consume(Token::RParen, "expected `)` after `using` resource")?;
+        let body = self.parse_stmt_body()?;
+        Ok(Stmt::Using {
+            resource_ty,
+            name,
+            expr: Box::new(expr),
+            body,
         })
     }
 
