@@ -30,6 +30,7 @@ struct MethodEmitter<'a> {
     field_layout: &'a HashMap<String, Vec<(String, Type)>>,
     ops: Vec<Op>,
     locals: Vec<String>,
+    max_locals: usize,
     params: Vec<String>,
     local_types: HashMap<String, Type>,
     constants: Vec<String>,
@@ -194,7 +195,7 @@ impl Emitter {
                             body: me.ops,
                             handlers: me.handlers,
                             max_stack: 8,
-                            locals: me.locals.len() as u16,
+                            locals: me.max_locals as u16,
                         };
 
                         let constant_offset = module.constant_pool.len() as u32;
@@ -283,6 +284,7 @@ impl<'a> MethodEmitter<'a> {
             locals.push(p.name.clone());
             local_types.insert(p.name.clone(), p.ty.clone());
         }
+        let init_locals = locals.len();
         Self {
             class_id,
             class_name,
@@ -294,6 +296,7 @@ impl<'a> MethodEmitter<'a> {
             field_layout,
             ops: Vec::new(),
             locals,
+            max_locals: init_locals,
             params,
             local_types,
             constants: Vec::new(),
@@ -323,19 +326,19 @@ impl<'a> MethodEmitter<'a> {
                 } else {
                     self.ops.push(Op::LdNull);
                 }
-                self.locals.push(name.clone());
+                self.push_local(name.clone());
                 self.local_types.insert(name.clone(), ty.clone());
                 self.ops.push(Op::Stloc((self.locals.len() - 1) as u16));
             }
             Stmt::TupleDecl(names, expr) => {
                 self.emit_expr(expr)?;
                 let tuple_local = self.locals.len() as u16;
-                self.locals.push("__tuple_temp".to_string());
+                self.push_local("__tuple_temp".to_string());
                 self.ops.push(Op::Stloc(tuple_local));
                 for (i, name) in names.iter().enumerate() {
                     self.ops.push(Op::Ldloc(tuple_local));
                     self.ops.push(Op::TupleField(i as u16));
-                    self.locals.push(name.clone());
+                    self.push_local(name.clone());
                     self.ops.push(Op::Stloc((self.locals.len() - 1) as u16));
                 }
             }
@@ -424,7 +427,7 @@ impl<'a> MethodEmitter<'a> {
                 // Evaluate the subject into a temporary local.
                 self.emit_expr(expr)?;
                 let subject_local = self.locals.len() as u16;
-                self.locals.push("__iflet_subject".to_string());
+                self.push_local("__iflet_subject".to_string());
                 self.ops.push(Op::Stloc(subject_local));
 
                 // Emit pattern test; failures jump over the then-branch.
@@ -470,7 +473,7 @@ impl<'a> MethodEmitter<'a> {
                     Pattern::Binding(name) => {
                         // Binding always matches: copy the subject into a new local.
                         let local_idx = self.locals.len() as u16;
-                        self.locals.push(name.clone());
+                        self.push_local(name.clone());
                         self.ops.push(Op::Ldloc(subject_local));
                         self.ops.push(Op::Stloc(local_idx));
                     }
@@ -489,7 +492,7 @@ impl<'a> MethodEmitter<'a> {
 
                         for (i, binding) in bindings.iter().enumerate() {
                             let local_idx = self.locals.len() as u16;
-                            self.locals.push(binding.clone());
+                            self.push_local(binding.clone());
                             self.ops.push(Op::Ldloc(subject_local));
                             self.ops.push(Op::EnumField(i as u16));
                             self.ops.push(Op::Stloc(local_idx));
@@ -626,7 +629,7 @@ impl<'a> MethodEmitter<'a> {
                 
                 // Emit: int var_name = start;
                 self.emit_expr(start)?;
-                self.locals.push(var_name.clone());
+                self.push_local(var_name.clone());
                 let var_idx = (self.locals.len() - 1) as u16;
                 self.ops.push(Op::Stloc(var_idx));
                 
@@ -778,7 +781,7 @@ impl<'a> MethodEmitter<'a> {
                 let mut handler_entries = Vec::new();
                 for catch in catches {
                     let handler_pc = self.ops.len() as u32;
-                    self.locals.push(catch.name.clone());
+                    self.push_local(catch.name.clone());
                     let catch_local = (self.locals.len() - 1) as u16;
                     self.local_types
                         .insert(catch.name.clone(), catch.ty.clone());
@@ -834,7 +837,7 @@ impl<'a> MethodEmitter<'a> {
             } => {
                 // Lower `using (expr) { body }` to `try { body } finally { resource.Dispose(); }`
                 self.emit_expr(expr)?;
-                self.locals.push(name.clone().unwrap_or_else(|| "__using_temp".to_string()));
+                self.push_local(name.clone().unwrap_or_else(|| "__using_temp".to_string()));
                 let resource_local = (self.locals.len() - 1) as u16;
                 self.ops.push(Op::Stloc(resource_local));
 
@@ -1125,7 +1128,7 @@ impl<'a> MethodEmitter<'a> {
                 self.emit_expr(left)?;
                 // Duplicate it for the null check
                 let temp_local = self.locals.len() as u16;
-                self.locals.push("__null_coalesce_temp".to_string());
+                self.push_local("__null_coalesce_temp".to_string());
                 self.ops.push(Op::Stloc(temp_local));
                 self.ops.push(Op::Ldloc(temp_local));
                 // Check if null
@@ -1149,7 +1152,7 @@ impl<'a> MethodEmitter<'a> {
                 self.emit_expr(obj)?;
                 // Store in temp and duplicate for null check
                 let temp_local = self.locals.len() as u16;
-                self.locals.push("__null_cond_temp".to_string());
+                self.push_local("__null_cond_temp".to_string());
                 self.ops.push(Op::Stloc(temp_local));
                 self.ops.push(Op::Ldloc(temp_local));
                 // Check if null
@@ -1181,7 +1184,7 @@ impl<'a> MethodEmitter<'a> {
                     self.emit_expr(target)?;
                     // Store in temp and duplicate for null check
                     let temp_local = self.locals.len() as u16;
-                    self.locals.push("__null_call_temp".to_string());
+                    self.push_local("__null_call_temp".to_string());
                     self.ops.push(Op::Stloc(temp_local));
                     self.ops.push(Op::Ldloc(temp_local));
                     // Check if null
@@ -1214,7 +1217,7 @@ impl<'a> MethodEmitter<'a> {
                 self.emit_expr(subject)?;
                 // Store subject in a temporary local
                 let subject_local = self.locals.len() as u16;
-                self.locals.push("__match_subject".to_string());
+                self.push_local("__match_subject".to_string());
                 self.ops.push(Op::Stloc(subject_local));
                 
                 let mut end_jumps = Vec::new();
@@ -1271,7 +1274,7 @@ impl<'a> MethodEmitter<'a> {
                             Pattern::Binding(name) => {
                                 // Bind the subject to a new local
                                 let local_idx = self.locals.len() as u16;
-                                self.locals.push(name.clone());
+                                self.push_local(name.clone());
                                 self.ops.push(Op::Ldloc(subject_local));
                                 self.ops.push(Op::Stloc(local_idx));
                                 // Binding always succeeds
@@ -1297,7 +1300,7 @@ impl<'a> MethodEmitter<'a> {
 
                                 for (i, binding) in bindings.iter().enumerate() {
                                     let local_idx = self.locals.len() as u16;
-                                    self.locals.push(binding.clone());
+                                    self.push_local(binding.clone());
                                     self.ops.push(Op::Ldloc(subject_local));
                                     self.ops.push(Op::EnumField(i as u16));
                                     self.ops.push(Op::Stloc(local_idx));
@@ -1394,6 +1397,29 @@ impl<'a> MethodEmitter<'a> {
                 // Pop the temporary local
                 self.locals.pop();
             }
+            Expr::Block(stmts) => {
+                let start_locals = self.locals.len();
+                let mut iter = stmts.iter().peekable();
+                while let Some(s) = iter.next() {
+                    if iter.peek().is_none() {
+                        // Last statement: an expression leaves its value on the
+                        // stack (no trailing Pop like a normal expression stmt).
+                        if let Stmt::Expr(e) = s {
+                            self.emit_expr(e)?;
+                            break;
+                        }
+                    }
+                    self.emit_stmt(s)?;
+                }
+                // Non-expression-ending (or empty) blocks evaluate to void.
+                if !matches!(stmts.last(), Some(Stmt::Expr(_))) {
+                    self.ops.push(Op::LdNull);
+                }
+                // Block locals are scoped to the block.
+                while self.locals.len() > start_locals {
+                    self.locals.pop();
+                }
+            }
         }
         Ok(())
     }
@@ -1404,6 +1430,17 @@ impl<'a> MethodEmitter<'a> {
             .rposition(|n| n == name)
             .map(|i| i as u16)
             .ok_or_else(|| format!("unknown local `{}`", name))
+    }
+
+    /// Allocate a new local slot, tracking the peak local count so the frame
+    /// stays sized correctly even when scoped locals are popped later.
+    fn push_local(&mut self, name: String) -> usize {
+        self.locals.push(name);
+        let len = self.locals.len();
+        if len > self.max_locals {
+            self.max_locals = len;
+        }
+        len
     }
 
     /// Index of an instance field in the full (base + own) layout of the

@@ -1,0 +1,76 @@
+class Program {
+    static int computeX() {
+        return 3;
+    }
+
+    static int computeY() {
+        return 4;
+    }
+
+    static void Main() {
+        print("=== block expression value ===");
+        println();
+
+        int result = {
+            int x = Program.computeX();
+            int y = Program.computeY();
+            x + y
+        };
+        print("result = ");
+        print(result);
+        println();
+
+        print("=== block with nested computation ===");
+        println();
+
+        int product = {
+            int a = 10;
+            int b = 20;
+            a * b
+        };
+        print("product = {product}");
+        println();
+
+        print("=== block with match expression ===");
+        println();
+
+        int score = 75;
+        string grade = {
+            match (score) {
+                90 => "A"
+                80 => "B"
+                70 => "C"
+                * => "F"
+            }
+        };
+        print("grade = ");
+        print(grade);
+        println();
+
+        print("=== block local scoping ===");
+        println();
+
+        int outer = 5;
+        int doubled = {
+            int outer = outer + 1;
+            outer * 2
+        };
+        print("doubled = ");
+        print(doubled);
+        println();
+        print("outer still = ");
+        print(outer);
+        println();
+
+        print("=== empty-ish block (void value) ===");
+        println();
+
+        int loopSum = 0;
+        for (int i = 1; i <= 5; i = i + 1) {
+            loopSum = loopSum + i;
+        }
+        print("loopSum = ");
+        print(loopSum);
+        println();
+    }
+}

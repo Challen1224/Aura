@@ -790,7 +790,7 @@ impl TypeChecker {
             Stmt::VarDecl(ty, name, init) => {
                 self.validate_type_with_generics(ty, generic_params)?;
                 if let Some(init) = init {
-                    let init_ty = self.infer_expr(init, class, locals, in_instance)?;
+                    let init_ty = self.infer_expr(init, class, locals, in_instance, return_ty, generic_params)?;
                     if !self.is_assignable(ty, &init_ty) {
                         return Err(TypeError(format!(
                             "cannot assign {} to variable `{}` of type {}",
@@ -803,7 +803,7 @@ impl TypeChecker {
                 locals.insert(name.clone(), ty.clone());
             }
             Stmt::TupleDecl(names, expr) => {
-                let expr_ty = self.infer_expr(expr, class, locals, in_instance)?;
+                let expr_ty = self.infer_expr(expr, class, locals, in_instance, return_ty, generic_params)?;
                 if let Type::Tuple(tuple_types) = &expr_ty {
                     if names.len() != tuple_types.len() {
                         return Err(TypeError(format!(
@@ -823,11 +823,11 @@ impl TypeChecker {
                 }
             }
             Stmt::Expr(e) => {
-                let _ = self.infer_expr(e, class, locals, in_instance)?;
+                let _ = self.infer_expr(e, class, locals, in_instance, return_ty, generic_params)?;
             }
             Stmt::Assign(target, value) => {
-                let target_ty = self.infer_assign_target(target, class, locals, in_instance)?;
-                let value_ty = self.infer_expr(value, class, locals, in_instance)?;
+                let target_ty = self.infer_assign_target(target, class, locals, in_instance, return_ty, generic_params)?;
+                let value_ty = self.infer_expr(value, class, locals, in_instance, return_ty, generic_params)?;
                 if !self.is_assignable(&target_ty, &value_ty) {
                     return Err(TypeError(format!(
                         "cannot assign {} to {}",
@@ -837,7 +837,7 @@ impl TypeChecker {
                 }
             }
             Stmt::Return(Some(e)) => {
-                let ty = self.infer_expr(e, class, locals, in_instance)?;
+                let ty = self.infer_expr(e, class, locals, in_instance, return_ty, generic_params)?;
                 if !self.is_assignable(return_ty, &ty) {
                     return Err(TypeError(format!(
                         "return type mismatch: expected {}, got {}",
@@ -855,7 +855,7 @@ impl TypeChecker {
                 }
             }
             Stmt::If(cond, then_branch, else_branch) => {
-                let cond_ty = self.infer_expr(cond, class, locals, in_instance)?;
+                let cond_ty = self.infer_expr(cond, class, locals, in_instance, return_ty, generic_params)?;
                 if cond_ty != Type::Bool {
                     return Err(TypeError(format!(
                         "if condition must be bool, got {}",
@@ -872,7 +872,7 @@ impl TypeChecker {
                 }
             }
             Stmt::IfLet(pattern, expr, then_branch, else_branch) => {
-                let subject_ty = self.infer_expr(expr, class, locals, in_instance)?;
+                let subject_ty = self.infer_expr(expr, class, locals, in_instance, return_ty, generic_params)?;
 
                 // Validate the pattern against the subject type and collect bindings.
                 let mut bindings: Vec<(String, Type)> = Vec::new();
@@ -910,8 +910,8 @@ impl TypeChecker {
                                 subject_ty.name()
                             )));
                         }
-                        let start_ty = self.infer_expr(start, class, locals, in_instance)?;
-                        let end_ty = self.infer_expr(end, class, locals, in_instance)?;
+                        let start_ty = self.infer_expr(start, class, locals, in_instance, return_ty, generic_params)?;
+                        let end_ty = self.infer_expr(end, class, locals, in_instance, return_ty, generic_params)?;
                         if start_ty != subject_ty || end_ty != subject_ty {
                             return Err(TypeError(format!(
                                 "range pattern bounds must match subject type {}, got {} and {}",
@@ -950,7 +950,7 @@ impl TypeChecker {
                 }
             }
             Stmt::While { label: _, condition, body } => {
-                let cond_ty = self.infer_expr(condition, class, locals, in_instance)?;
+                let cond_ty = self.infer_expr(condition, class, locals, in_instance, return_ty, generic_params)?;
                 if cond_ty != Type::Bool {
                     return Err(TypeError(format!(
                         "while condition must be bool, got {}",
@@ -963,7 +963,7 @@ impl TypeChecker {
             }
             Stmt::For { label: _, init, condition, update, body } => {
                 self.check_stmt(init, class, locals, return_ty, in_instance, generic_params)?;
-                let cond_ty = self.infer_expr(condition, class, locals, in_instance)?;
+                let cond_ty = self.infer_expr(condition, class, locals, in_instance, return_ty, generic_params)?;
                 if cond_ty != Type::Bool {
                     return Err(TypeError(format!(
                         "for condition must be bool, got {}",
@@ -977,7 +977,7 @@ impl TypeChecker {
             }
             Stmt::ForIn { label: _, var_type, var_name, iterable, body } => {
                 self.validate_type_with_generics(var_type, generic_params)?;
-                let range_ty = self.infer_expr(iterable, class, locals, in_instance)?;
+                let range_ty = self.infer_expr(iterable, class, locals, in_instance, return_ty, generic_params)?;
                 // For now, only support Range type
                 if range_ty != Type::Class("Range".to_string(), vec![]) {
                     return Err(TypeError(format!(
@@ -1001,7 +1001,7 @@ impl TypeChecker {
                 for s in body {
                     self.check_stmt(s, class, locals, return_ty, in_instance, generic_params)?;
                 }
-                let cond_ty = self.infer_expr(condition, class, locals, in_instance)?;
+                let cond_ty = self.infer_expr(condition, class, locals, in_instance, return_ty, generic_params)?;
                 if cond_ty != Type::Bool {
                     return Err(TypeError(format!(
                         "do-while condition must be bool, got {}",
@@ -1013,7 +1013,7 @@ impl TypeChecker {
                 // These are valid inside loops, checked by the emitter
             }
             Stmt::Throw(e) => {
-                let _ = self.infer_expr(e, class, locals, in_instance)?;
+                let _ = self.infer_expr(e, class, locals, in_instance, return_ty, generic_params)?;
             }
             Stmt::Try {
                 try_body,
@@ -1042,7 +1042,7 @@ impl TypeChecker {
                 expr,
                 body,
             } => {
-                let expr_ty = self.infer_expr(expr, class, locals, in_instance)?;
+                let expr_ty = self.infer_expr(expr, class, locals, in_instance, return_ty, generic_params)?;
                 match (resource_ty, name) {
                     (Some(decl_ty), Some(n)) => {
                         self.validate_type_with_generics(decl_ty, generic_params)?;
@@ -1081,6 +1081,8 @@ impl TypeChecker {
         class: &ClassInfo,
         locals: &HashMap<String, Type>,
         in_instance: bool,
+        return_ty: &Type,
+        generic_params: &[GenericParam],
     ) -> Result<Type, TypeError> {
         match expr {
             Expr::Int(_) => Ok(Type::Int),
@@ -1091,7 +1093,7 @@ impl TypeChecker {
                 // Type check all expressions in the interpolation
                 for part in parts {
                     if let InterpPart::Expr(expr) = part {
-                        self.infer_expr(expr, class, locals, in_instance)?;
+                        self.infer_expr(expr, class, locals, in_instance, return_ty, generic_params)?;
                     }
                 }
                 Ok(Type::String)
@@ -1141,7 +1143,7 @@ impl TypeChecker {
                 }
             }
             Expr::Field(obj, name) => {
-                let obj_ty = self.infer_expr(obj, class, locals, in_instance)?;
+                let obj_ty = self.infer_expr(obj, class, locals, in_instance, return_ty, generic_params)?;
                 let (class_name, type_args) = if let Type::Class(name, args) = &obj_ty {
                     (name.clone(), args.clone())
                 } else if in_instance && matches!(obj.as_ref(), Expr::Var(n) if n == "this") {
@@ -1210,8 +1212,8 @@ impl TypeChecker {
                 Ok(ty)
             }
             Expr::Binary(op, left, right) => {
-                let lt = self.infer_expr(left, class, locals, in_instance)?;
-                let rt = self.infer_expr(right, class, locals, in_instance)?;
+                let lt = self.infer_expr(left, class, locals, in_instance, return_ty, generic_params)?;
+                let rt = self.infer_expr(right, class, locals, in_instance, return_ty, generic_params)?;
                 if op.is_comparison() {
                     let lt_is_null = matches!(&lt, Type::Class(n, _) if n == "null");
                     let rt_is_null = matches!(&rt, Type::Class(n, _) if n == "null");
@@ -1237,7 +1239,7 @@ impl TypeChecker {
                 }
             }
             Expr::Unary(op, operand) => {
-                let ty = self.infer_expr(operand, class, locals, in_instance)?;
+                let ty = self.infer_expr(operand, class, locals, in_instance, return_ty, generic_params)?;
                 match op {
                     UnaryOp::Neg => {
                         if !self.is_numeric(&ty) {
@@ -1253,7 +1255,7 @@ impl TypeChecker {
                     }
                 }
             }
-            Expr::Call(call) => self.check_call(call, class, locals, in_instance),
+            Expr::Call(call) => self.check_call(call, class, locals, in_instance, return_ty, generic_params),
             Expr::New(class_name, type_args) => {
                 if self.classes.contains_key(class_name) {
                     let class_info = self.classes.get(class_name).unwrap();
@@ -1272,15 +1274,15 @@ impl TypeChecker {
                 }
             }
             Expr::Ternary(cond, then_expr, else_expr) => {
-                let cond_ty = self.infer_expr(cond, class, locals, in_instance)?;
+                let cond_ty = self.infer_expr(cond, class, locals, in_instance, return_ty, generic_params)?;
                 if cond_ty != Type::Bool {
                     return Err(TypeError(format!(
                         "ternary condition must be bool, got {}",
                         cond_ty.name()
                     )));
                 }
-                let then_ty = self.infer_expr(then_expr, class, locals, in_instance)?;
-                let else_ty = self.infer_expr(else_expr, class, locals, in_instance)?;
+                let then_ty = self.infer_expr(then_expr, class, locals, in_instance, return_ty, generic_params)?;
+                let else_ty = self.infer_expr(else_expr, class, locals, in_instance, return_ty, generic_params)?;
                 if !self.is_assignable(&then_ty, &else_ty) {
                     return Err(TypeError(format!(
                         "ternary branches must have compatible types, got {} and {}",
@@ -1291,8 +1293,8 @@ impl TypeChecker {
                 Ok(then_ty)
             }
             Expr::NullCoalesce(left, right) => {
-                let left_ty = self.infer_expr(left, class, locals, in_instance)?;
-                let right_ty = self.infer_expr(right, class, locals, in_instance)?;
+                let left_ty = self.infer_expr(left, class, locals, in_instance, return_ty, generic_params)?;
+                let right_ty = self.infer_expr(right, class, locals, in_instance, return_ty, generic_params)?;
                 // The result type is the left type (which should be nullable)
                 // For now, we just check that the types are compatible
                 if !self.is_assignable(&left_ty, &right_ty) && !self.is_assignable(&right_ty, &left_ty) {
@@ -1305,7 +1307,7 @@ impl TypeChecker {
                 Ok(left_ty)
             }
             Expr::NullConditionalField(obj, field_name) => {
-                let obj_ty = self.infer_expr(obj, class, locals, in_instance)?;
+                let obj_ty = self.infer_expr(obj, class, locals, in_instance, return_ty, generic_params)?;
                 let class_name = if let Type::Class(name, _) = &obj_ty {
                     name.clone()
                 } else {
@@ -1332,10 +1334,10 @@ impl TypeChecker {
             }
             Expr::NullConditionalCall(call) => {
                 // Similar to regular call, but the result is nullable
-                self.check_call(call, class, locals, in_instance)
+                self.check_call(call, class, locals, in_instance, return_ty, generic_params)
             }
             Expr::Match(subject, arms) => {
-                let subject_ty = self.infer_expr(subject, class, locals, in_instance)?;
+                let subject_ty = self.infer_expr(subject, class, locals, in_instance, return_ty, generic_params)?;
                 
                 let mut result_ty: Option<Type> = None;
                 
@@ -1373,8 +1375,8 @@ impl TypeChecker {
                                         subject_ty.name()
                                     )));
                                 }
-                                let start_ty = self.infer_expr(start, class, locals, in_instance)?;
-                                let end_ty = self.infer_expr(end, class, locals, in_instance)?;
+                                let start_ty = self.infer_expr(start, class, locals, in_instance, return_ty, generic_params)?;
+                                let end_ty = self.infer_expr(end, class, locals, in_instance, return_ty, generic_params)?;
                                 if start_ty != subject_ty {
                                     return Err(TypeError(format!(
                                         "range start type {} doesn't match subject type {}",
@@ -1394,7 +1396,7 @@ impl TypeChecker {
                     
                     // Type check guard
                     if let Some(guard) = &arm.guard {
-                        let guard_ty = self.infer_expr(guard, class, locals, in_instance)?;
+                        let guard_ty = self.infer_expr(guard, class, locals, in_instance, return_ty, generic_params)?;
                         if guard_ty != Type::Bool {
                             return Err(TypeError(format!(
                                 "match guard must be bool, got {}",
@@ -1404,7 +1406,7 @@ impl TypeChecker {
                     }
                     
                     // Type check body
-                    let body_ty = self.infer_expr(&arm.body, class, locals, in_instance)?;
+                    let body_ty = self.infer_expr(&arm.body, class, locals, in_instance, return_ty, generic_params)?;
                     
                     // Check that all arms have compatible types
                     if let Some(ref expected) = result_ty {
@@ -1437,7 +1439,7 @@ impl TypeChecker {
                     )));
                 }
                 for (arg, (_, expected_ty)) in args.iter().zip(variant.fields.iter()) {
-                    let arg_ty = self.infer_expr(arg, class, locals, in_instance)?;
+                    let arg_ty = self.infer_expr(arg, class, locals, in_instance, return_ty, generic_params)?;
                     if !self.is_assignable(expected_ty, &arg_ty) {
                         return Err(TypeError(format!(
                             "argument type mismatch in `{}.{}`: expected {}, got {}",
@@ -1450,12 +1452,12 @@ impl TypeChecker {
             Expr::Tuple(elements) => {
                 let mut types = Vec::new();
                 for elem in elements {
-                    types.push(self.infer_expr(elem, class, locals, in_instance)?);
+                    types.push(self.infer_expr(elem, class, locals, in_instance, return_ty, generic_params)?);
                 }
                 Ok(Type::Tuple(types))
             }
             Expr::TupleIndex(tuple, idx) => {
-                let tuple_ty = self.infer_expr(tuple, class, locals, in_instance)?;
+                let tuple_ty = self.infer_expr(tuple, class, locals, in_instance, return_ty, generic_params)?;
                 if let Type::Tuple(types) = &tuple_ty {
                     if *idx >= types.len() {
                         return Err(TypeError(format!(
@@ -1473,8 +1475,8 @@ impl TypeChecker {
                 }
             }
             Expr::Range(start, end, _inclusive) => {
-                let start_ty = self.infer_expr(start, class, locals, in_instance)?;
-                let end_ty = self.infer_expr(end, class, locals, in_instance)?;
+                let start_ty = self.infer_expr(start, class, locals, in_instance, return_ty, generic_params)?;
+                let end_ty = self.infer_expr(end, class, locals, in_instance, return_ty, generic_params)?;
                 if start_ty != Type::Int {
                     return Err(TypeError(format!(
                         "range start must be an integer, got {}",
@@ -1520,7 +1522,7 @@ impl TypeChecker {
                     )));
                 }
                 for (arg, expected) in args.iter().zip(method_info.params.iter()) {
-                    let arg_ty = self.infer_expr(arg, class, locals, in_instance)?;
+                    let arg_ty = self.infer_expr(arg, class, locals, in_instance, return_ty, generic_params)?;
                     if !self.is_assignable(expected, &arg_ty) {
                         return Err(TypeError(format!(
                             "argument type mismatch in `{}`: expected {}, got {}",
@@ -1552,6 +1554,24 @@ impl TypeChecker {
                 }
                 Ok(ty)
             }
+            Expr::Block(stmts) => {
+                // Block locals are scoped to the block and do not leak out.
+                let mut block_locals = locals.clone();
+                let mut result_ty = Type::Unit;
+                for (i, s) in stmts.iter().enumerate() {
+                    let is_last = i + 1 == stmts.len();
+                    if is_last {
+                        if let Stmt::Expr(e) = s {
+                            result_ty = self.infer_expr(e, class, &block_locals, in_instance, return_ty, generic_params)?;
+                        } else {
+                            self.check_stmt(s, class, &mut block_locals, return_ty, in_instance, generic_params)?;
+                        }
+                    } else {
+                        self.check_stmt(s, class, &mut block_locals, return_ty, in_instance, generic_params)?;
+                    }
+                }
+                Ok(result_ty)
+            }
         }
     }
 
@@ -1568,6 +1588,8 @@ impl TypeChecker {
         class: &ClassInfo,
         locals: &HashMap<String, Type>,
         in_instance: bool,
+        return_ty: &Type,
+        generic_params: &[GenericParam],
     ) -> Result<Type, TypeError> {
         match target {
             AssignTarget::Local(name) => locals
@@ -1575,7 +1597,7 @@ impl TypeChecker {
                 .cloned()
                 .ok_or_else(|| TypeError(format!("unknown variable `{}`", name))),
             AssignTarget::Field(obj, name) => {
-                let obj_ty = self.infer_expr(obj, class, locals, in_instance)?;
+                let obj_ty = self.infer_expr(obj, class, locals, in_instance, return_ty, generic_params)?;
                 let class_name = if let Type::Class(name, _) = &obj_ty {
                     name.clone()
                 } else if in_instance && matches!(obj.as_ref(), Expr::Var(n) if n == "this") {
@@ -1647,13 +1669,15 @@ impl TypeChecker {
         class: &ClassInfo,
         locals: &HashMap<String, Type>,
         in_instance: bool,
+        return_ty: &Type,
+        generic_params: &[GenericParam],
     ) -> Result<Type, TypeError> {
         if call.class_or_target == "__intrinsics" {
             if call.method == "print" {
                 if call.args.len() != 1 {
                     return Err(TypeError("print expects 1 argument".to_string()));
                 }
-                let _ = self.infer_expr(&call.args[0], class, locals, in_instance)?;
+                let _ = self.infer_expr(&call.args[0], class, locals, in_instance, return_ty, generic_params)?;
                 return Ok(Type::Unit);
             }
             if call.method == "println" {
@@ -1689,7 +1713,7 @@ impl TypeChecker {
                             call.method, declared_in, visibility_name(method_info.visibility)
                         )));
                     }
-                    return self.check_call_args(call, &method_info, class, locals, in_instance);
+                    return self.check_call_args(call, &method_info, class, locals, in_instance, return_ty, generic_params);
                 }
                 if self.classes.contains_key(class_name) {
                     let (declared_in, method_info) = self
@@ -1706,10 +1730,10 @@ impl TypeChecker {
                             call.method, declared_in, visibility_name(method_info.visibility)
                         )));
                     }
-                    return self.check_call_args(call, &method_info, class, locals, in_instance);
+                    return self.check_call_args(call, &method_info, class, locals, in_instance, return_ty, generic_params);
                 }
             }
-            let target_ty = self.infer_expr(target, class, locals, in_instance)?;
+            let target_ty = self.infer_expr(target, class, locals, in_instance, return_ty, generic_params)?;
             let (name, type_args) = if let Type::Class(name, args) = &target_ty {
                 (name.clone(), args.clone())
             } else if in_instance && matches!(target.as_ref(), Expr::Var(n) if n == "this") {
@@ -1740,7 +1764,7 @@ impl TypeChecker {
             let subst = build_subst(&target_class.generic_params, &type_args);
             
             // Check arguments with substituted types
-            return self.check_call_args_with_subst(call, &method_info, &subst, class, locals, in_instance);
+            return self.check_call_args_with_subst(call, &method_info, &subst, class, locals, in_instance, return_ty, generic_params);
         } else {
             // static call: ClassName.Method(args) or EnumName.Variant(args)
             let class_name = call.class_or_target.clone();
@@ -1756,7 +1780,7 @@ impl TypeChecker {
                             )));
                         }
                         for (arg, (_, expected_ty)) in call.args.iter().zip(v.fields.iter()) {
-                            let arg_ty = self.infer_expr(arg, class, locals, in_instance)?;
+                            let arg_ty = self.infer_expr(arg, class, locals, in_instance, return_ty, generic_params)?;
                             if !self.is_assignable(expected_ty, &arg_ty) {
                                 return Err(TypeError(format!(
                                     "argument type mismatch in `{}.{}`: expected {}, got {}",
@@ -1792,7 +1816,7 @@ impl TypeChecker {
                     call.method, declared_in, visibility_name(method_info.visibility)
                 )));
             }
-            return self.check_call_args(call, &method_info, class, locals, in_instance);
+            return self.check_call_args(call, &method_info, class, locals, in_instance, return_ty, generic_params);
         }
     }
 
@@ -1803,6 +1827,8 @@ impl TypeChecker {
         class: &ClassInfo,
         locals: &HashMap<String, Type>,
         in_instance: bool,
+        return_ty: &Type,
+        generic_params: &[GenericParam],
     ) -> Result<Type, TypeError> {
         if call.args.len() != method_info.params.len() {
             return Err(TypeError(format!(
@@ -1813,7 +1839,7 @@ impl TypeChecker {
             )));
         }
         for (arg, expected) in call.args.iter().zip(method_info.params.iter()) {
-            let arg_ty = self.infer_expr(arg, class, locals, in_instance)?;
+            let arg_ty = self.infer_expr(arg, class, locals, in_instance, return_ty, generic_params)?;
             if !self.is_assignable(expected, &arg_ty) {
                 return Err(TypeError(format!(
                     "argument type mismatch in `{}`: expected {}, got {}",
@@ -1834,6 +1860,8 @@ impl TypeChecker {
         class: &ClassInfo,
         locals: &HashMap<String, Type>,
         in_instance: bool,
+        return_ty: &Type,
+        generic_params: &[GenericParam],
     ) -> Result<Type, TypeError> {
         // Substitute generic parameters in method signature
         let substituted_params: Vec<Type> = method_info.params.iter()
@@ -1850,7 +1878,7 @@ impl TypeChecker {
             )));
         }
         for (arg, expected) in call.args.iter().zip(substituted_params.iter()) {
-            let arg_ty = self.infer_expr(arg, class, locals, in_instance)?;
+            let arg_ty = self.infer_expr(arg, class, locals, in_instance, return_ty, generic_params)?;
             if !self.is_assignable(expected, &arg_ty) {
                 return Err(TypeError(format!(
                     "argument type mismatch in `{}`: expected {}, got {}",

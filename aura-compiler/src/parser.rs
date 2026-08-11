@@ -1067,6 +1067,11 @@ impl<'a> Parser<'a> {
             self.consume(Token::RParen, "expected `)`")?;
             return Ok(Expr::New(name, type_args));
         }
+        if self.check(Token::LBrace) {
+            self.advance();
+            let stmts = self.parse_block()?;
+            return Ok(Expr::Block(stmts));
+        }
 
         match self.peek() {
             Some(Token::IntLit(i)) => {

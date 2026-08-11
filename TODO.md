@@ -304,14 +304,15 @@
   ```
   Supports enum variant, range, constant, and binding patterns with optional else.
 
-- [ ] **Expression blocks**
+- [x] **Expression blocks**
   ```aura
-  let result = {
-      let x = computeX();
-      let y = computeY();
+  int result = {
+      int x = computeX();
+      int y = computeY();
       x + y
   };
   ```
+  A block evaluates to its last expression's value; block locals are scoped to the block.
 
 **P3 - Nice to Have**
 - [ ] **Coroutines / generators**

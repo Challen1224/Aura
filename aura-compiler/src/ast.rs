@@ -336,6 +336,8 @@ pub enum Expr {
     SuperCall(String, Vec<Expr>),
     /// Base class field access from a subclass method: `super.field`.
     SuperField(String),
+    /// Block expression: `{ stmts }` evaluates to the last expression's value.
+    Block(Vec<Stmt>),
 }
 
 /// A part of an interpolated string.
