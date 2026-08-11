@@ -871,8 +871,8 @@ impl TypeChecker {
                     }
                 }
             }
-            Stmt::While(cond, body) => {
-                let cond_ty = self.infer_expr(cond, class, locals, in_instance)?;
+            Stmt::While { label: _, condition, body } => {
+                let cond_ty = self.infer_expr(condition, class, locals, in_instance)?;
                 if cond_ty != Type::Bool {
                     return Err(TypeError(format!(
                         "while condition must be bool, got {}",
@@ -883,9 +883,9 @@ impl TypeChecker {
                     self.check_stmt(s, class, locals, return_ty, in_instance, generic_params)?;
                 }
             }
-            Stmt::For(init, cond, update, body) => {
+            Stmt::For { label: _, init, condition, update, body } => {
                 self.check_stmt(init, class, locals, return_ty, in_instance, generic_params)?;
-                let cond_ty = self.infer_expr(cond, class, locals, in_instance)?;
+                let cond_ty = self.infer_expr(condition, class, locals, in_instance)?;
                 if cond_ty != Type::Bool {
                     return Err(TypeError(format!(
                         "for condition must be bool, got {}",
@@ -897,9 +897,9 @@ impl TypeChecker {
                     self.check_stmt(s, class, locals, return_ty, in_instance, generic_params)?;
                 }
             }
-            Stmt::ForIn(ty, var_name, range_expr, body) => {
-                self.validate_type_with_generics(ty, generic_params)?;
-                let range_ty = self.infer_expr(range_expr, class, locals, in_instance)?;
+            Stmt::ForIn { label: _, var_type, var_name, iterable, body } => {
+                self.validate_type_with_generics(var_type, generic_params)?;
+                let range_ty = self.infer_expr(iterable, class, locals, in_instance)?;
                 // For now, only support Range type
                 if range_ty != Type::Class("Range".to_string(), vec![]) {
                     return Err(TypeError(format!(
@@ -908,22 +908,22 @@ impl TypeChecker {
                     )));
                 }
                 // The loop variable must match the range element type (int for now)
-                if *ty != Type::Int {
+                if *var_type != Type::Int {
                     return Err(TypeError(format!(
                         "for-in loop variable must be int, got {}",
-                        ty.name()
+                        var_type.name()
                     )));
                 }
-                locals.insert(var_name.clone(), ty.clone());
+                locals.insert(var_name.clone(), var_type.clone());
                 for s in body {
                     self.check_stmt(s, class, locals, return_ty, in_instance, generic_params)?;
                 }
             }
-            Stmt::DoWhile(body, cond) => {
+            Stmt::DoWhile { label: _, body, condition } => {
                 for s in body {
                     self.check_stmt(s, class, locals, return_ty, in_instance, generic_params)?;
                 }
-                let cond_ty = self.infer_expr(cond, class, locals, in_instance)?;
+                let cond_ty = self.infer_expr(condition, class, locals, in_instance)?;
                 if cond_ty != Type::Bool {
                     return Err(TypeError(format!(
                         "do-while condition must be bool, got {}",
@@ -931,7 +931,7 @@ impl TypeChecker {
                     )));
                 }
             }
-            Stmt::Break | Stmt::Continue => {
+            Stmt::Break(_) | Stmt::Continue(_) => {
                 // These are valid inside loops, checked by the emitter
             }
             Stmt::Throw(e) => {

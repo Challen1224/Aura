@@ -34,8 +34,8 @@ struct MethodEmitter<'a> {
     local_types: HashMap<String, Type>,
     constants: Vec<String>,
     method_ids: &'a HashMap<(String, String, bool), MethodId>,
-    break_targets: Vec<Vec<usize>>,
-    continue_targets: Vec<Vec<usize>>,
+    break_targets: Vec<(Option<String>, Vec<usize>)>,
+    continue_targets: Vec<(Option<String>, Vec<usize>)>,
     handlers: Vec<ExceptionHandler>,
 }
 
@@ -420,12 +420,12 @@ impl<'a> MethodEmitter<'a> {
                     self.ops[false_jump] = Op::BrFalse(end);
                 }
             }
-            Stmt::While(cond, body) => {
+            Stmt::While { label, condition, body } => {
                 let loop_start = self.ops.len() as u32;
-                self.continue_targets.push(Vec::new());
-                self.break_targets.push(Vec::new());
+                self.continue_targets.push((label.clone(), Vec::new()));
+                self.break_targets.push((label.clone(), Vec::new()));
                 
-                self.emit_expr(cond)?;
+                self.emit_expr(condition)?;
                 let exit_jump = self.ops.len();
                 self.ops.push(Op::BrFalse(0));
                 for s in body {
@@ -436,26 +436,26 @@ impl<'a> MethodEmitter<'a> {
                 self.ops[exit_jump] = Op::BrFalse(end);
                 
                 // Patch break jumps
-                let breaks = self.break_targets.pop().unwrap();
+                let (_, breaks) = self.break_targets.pop().unwrap();
                 for jump in breaks {
                     self.ops[jump] = Op::Br(end);
                 }
                 // Patch continue jumps
-                let continues = self.continue_targets.pop().unwrap();
+                let (_, continues) = self.continue_targets.pop().unwrap();
                 for jump in continues {
                     self.ops[jump] = Op::Br(loop_start);
                 }
             }
-            Stmt::For(init, cond, update, body) => {
+            Stmt::For { label, init, condition, update, body } => {
                 // Emit init
                 self.emit_stmt(init)?;
                 
                 let loop_start = self.ops.len() as u32;
-                self.break_targets.push(Vec::new());
-                self.continue_targets.push(Vec::new());
+                self.break_targets.push((label.clone(), Vec::new()));
+                self.continue_targets.push((label.clone(), Vec::new()));
                 
                 // Emit condition
-                self.emit_expr(cond)?;
+                self.emit_expr(condition)?;
                 let exit_jump = self.ops.len();
                 self.ops.push(Op::BrFalse(0));
                 
@@ -475,24 +475,24 @@ impl<'a> MethodEmitter<'a> {
                 self.ops[exit_jump] = Op::BrFalse(end);
                 
                 // Patch break jumps
-                let breaks = self.break_targets.pop().unwrap();
+                let (_, breaks) = self.break_targets.pop().unwrap();
                 for jump in breaks {
                     self.ops[jump] = Op::Br(end);
                 }
                 // Patch continue jumps
-                let continues = self.continue_targets.pop().unwrap();
+                let (_, continues) = self.continue_targets.pop().unwrap();
                 for jump in continues {
                     self.ops[jump] = Op::Br(update_start);
                 }
             }
-            Stmt::ForIn(ty, var_name, range_expr, body) => {
+            Stmt::ForIn { label, var_type: _, var_name, iterable, body } => {
                 // Desugar `for (int i in start..end)` to:
                 // int i = start;
                 // while (i < end) { body; i = i + 1; }
                 // or for inclusive: while (i <= end)
                 
                 // Extract start and end from the range expression
-                let (start, end, inclusive) = match range_expr {
+                let (start, end, inclusive) = match iterable {
                     Expr::Range(start, end, inclusive) => (start, end, *inclusive),
                     _ => return Err("for-in requires a range expression".to_string()),
                 };
@@ -504,8 +504,8 @@ impl<'a> MethodEmitter<'a> {
                 self.ops.push(Op::Stloc(var_idx));
                 
                 let loop_start = self.ops.len() as u32;
-                self.break_targets.push(Vec::new());
-                self.continue_targets.push(Vec::new());
+                self.break_targets.push((label.clone(), Vec::new()));
+                self.continue_targets.push((label.clone(), Vec::new()));
                 
                 // Emit: var_name < end (or <= for inclusive)
                 self.ops.push(Op::Ldloc(var_idx));
@@ -538,20 +538,20 @@ impl<'a> MethodEmitter<'a> {
                 self.ops[exit_jump] = Op::BrFalse(end_pos);
                 
                 // Patch break jumps
-                let breaks = self.break_targets.pop().unwrap();
+                let (_, breaks) = self.break_targets.pop().unwrap();
                 for jump in breaks {
                     self.ops[jump] = Op::Br(end_pos);
                 }
                 // Patch continue jumps
-                let continues = self.continue_targets.pop().unwrap();
+                let (_, continues) = self.continue_targets.pop().unwrap();
                 for jump in continues {
                     self.ops[jump] = Op::Br(update_start);
                 }
             }
-            Stmt::DoWhile(body, cond) => {
+            Stmt::DoWhile { label, body, condition } => {
                 let loop_start = self.ops.len() as u32;
-                self.break_targets.push(Vec::new());
-                self.continue_targets.push(Vec::new());
+                self.break_targets.push((label.clone(), Vec::new()));
+                self.continue_targets.push((label.clone(), Vec::new()));
                 
                 for s in body {
                     self.emit_stmt(s)?;
@@ -559,37 +559,71 @@ impl<'a> MethodEmitter<'a> {
                 
                 let continue_target = self.ops.len() as u32;
                 
-                self.emit_expr(cond)?;
+                self.emit_expr(condition)?;
                 self.ops.push(Op::BrTrue(loop_start));
                 
                 let end = self.ops.len() as u32;
                 
                 // Patch break jumps
-                let breaks = self.break_targets.pop().unwrap();
+                let (_, breaks) = self.break_targets.pop().unwrap();
                 for jump in breaks {
                     self.ops[jump] = Op::Br(end);
                 }
                 // Patch continue jumps
-                let continues = self.continue_targets.pop().unwrap();
+                let (_, continues) = self.continue_targets.pop().unwrap();
                 for jump in continues {
                     self.ops[jump] = Op::Br(continue_target);
                 }
             }
-            Stmt::Break => {
+            Stmt::Break(label) => {
                 if self.break_targets.is_empty() {
                     return Err("break outside of loop".to_string());
                 }
                 let jump = self.ops.len();
                 self.ops.push(Op::Br(0)); // placeholder
-                self.break_targets.last_mut().unwrap().push(jump);
+                
+                if let Some(target_label) = label {
+                    // Find the loop with matching label
+                    let mut found = false;
+                    for (loop_label, jumps) in self.break_targets.iter_mut().rev() {
+                        if loop_label.as_ref() == Some(&target_label) {
+                            jumps.push(jump);
+                            found = true;
+                            break;
+                        }
+                    }
+                    if !found {
+                        return Err(format!("no loop with label `{}` found", target_label));
+                    }
+                } else {
+                    // Unlabeled break - use innermost loop
+                    self.break_targets.last_mut().unwrap().1.push(jump);
+                }
             }
-            Stmt::Continue => {
+            Stmt::Continue(label) => {
                 if self.continue_targets.is_empty() {
                     return Err("continue outside of loop".to_string());
                 }
                 let jump = self.ops.len();
                 self.ops.push(Op::Br(0)); // placeholder
-                self.continue_targets.last_mut().unwrap().push(jump);
+                
+                if let Some(target_label) = label {
+                    // Find the loop with matching label
+                    let mut found = false;
+                    for (loop_label, jumps) in self.continue_targets.iter_mut().rev() {
+                        if loop_label.as_ref() == Some(&target_label) {
+                            jumps.push(jump);
+                            found = true;
+                            break;
+                        }
+                    }
+                    if !found {
+                        return Err(format!("no loop with label `{}` found", target_label));
+                    }
+                } else {
+                    // Unlabeled continue - use innermost loop
+                    self.continue_targets.last_mut().unwrap().1.push(jump);
+                }
             }
             Stmt::Block(stmts) => {
                 for s in stmts {

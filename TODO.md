@@ -281,16 +281,16 @@
 - [ ] **Pattern matching enhancements**
   - [x] Enum variant patterns
   - [x] Range patterns
+  - [x] Pattern guards with complex expressions
   - [ ] Nested patterns
-  - [ ] Pattern guards with complex expressions
 
 - [ ] **Null conditional**
 
 **P2 - Medium Priority**
-- [ ] **Labeled break/continue**
+- [x] **Labeled break/continue**
   ```aura
-  outer: for (int i = 0; i < 10; i++) {
-      for (int j = 0; j < 10; j++) {
+  outer: for (int i = 0; i < 10; i = i + 1) {
+      for (int j = 0; j < 10; j = j + 1) {
           if (condition) break outer;
       }
   }

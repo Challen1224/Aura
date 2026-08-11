@@ -198,18 +198,38 @@ pub enum Stmt {
     Return(Option<Expr>),
     /// If statement with optional else.
     If(Expr, Vec<Stmt>, Option<Vec<Stmt>>),
-    /// While loop.
-    While(Expr, Vec<Stmt>),
-    /// For loop: for (init; cond; update) { body }
-    For(Box<Stmt>, Expr, Box<Stmt>, Vec<Stmt>),
-    /// For-in loop: for (Type var in range) { body }
-    ForIn(Type, String, Expr, Vec<Stmt>),
-    /// Do-while loop: do { body } while (cond);
-    DoWhile(Vec<Stmt>, Expr),
-    /// Break statement.
-    Break,
-    /// Continue statement.
-    Continue,
+    /// While loop with optional label.
+    While {
+        label: Option<String>,
+        condition: Expr,
+        body: Vec<Stmt>,
+    },
+    /// For loop: for (init; cond; update) { body } with optional label.
+    For {
+        label: Option<String>,
+        init: Box<Stmt>,
+        condition: Expr,
+        update: Box<Stmt>,
+        body: Vec<Stmt>,
+    },
+    /// For-in loop: for (Type var in range) { body } with optional label.
+    ForIn {
+        label: Option<String>,
+        var_type: Type,
+        var_name: String,
+        iterable: Expr,
+        body: Vec<Stmt>,
+    },
+    /// Do-while loop: do { body } while (cond); with optional label.
+    DoWhile {
+        label: Option<String>,
+        body: Vec<Stmt>,
+        condition: Expr,
+    },
+    /// Break statement with optional label.
+    Break(Option<String>),
+    /// Continue statement with optional label.
+    Continue(Option<String>),
     /// Block of statements.
     Block(Vec<Stmt>),
     /// Throw an exception: `throw expr;`.

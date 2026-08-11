@@ -289,36 +289,98 @@ impl<'a> Parser<'a> {
 
     fn parse_stmt(&mut self) -> Result<Stmt, String> {
         self.skip_newlines();
+        
+        // Check for labeled statement: identifier followed by colon
+        let label = if let Some(Token::Ident(name)) = self.peek() {
+            let name = name.clone();
+            // Look ahead to see if next token is colon
+            if self.pos + 1 < self.tokens.len() {
+                if matches!(self.tokens.get(self.pos + 1), Some(Token::Colon)) {
+                    self.advance(); // consume identifier
+                    self.advance(); // consume colon
+                    self.skip_newlines(); // skip newlines after label
+                    Some(name)
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+        
         if self.match_token(Token::If) {
+            if label.is_some() {
+                return Err("labels can only be applied to loops".to_string());
+            }
             self.parse_if()
         } else if self.match_token(Token::While) {
-            self.parse_while()
+            self.parse_while(label)
         } else if self.match_token(Token::For) {
-            self.parse_for()
+            self.parse_for(label)
         } else if self.match_token(Token::Do) {
-            self.parse_do_while()
+            self.parse_do_while(label)
         } else if self.match_token(Token::Break) {
+            let break_label = if let Some(Token::Ident(name)) = self.peek() {
+                let name = name.clone();
+                self.advance();
+                Some(name)
+            } else {
+                None
+            };
             self.consume_semi()?;
-            Ok(Stmt::Break)
+            Ok(Stmt::Break(break_label))
         } else if self.match_token(Token::Continue) {
+            let continue_label = if let Some(Token::Ident(name)) = self.peek() {
+                let name = name.clone();
+                self.advance();
+                Some(name)
+            } else {
+                None
+            };
             self.consume_semi()?;
-            Ok(Stmt::Continue)
+            Ok(Stmt::Continue(continue_label))
         } else if self.match_token(Token::Return) {
+            if label.is_some() {
+                return Err("labels can only be applied to loops".to_string());
+            }
             self.parse_return()
         } else if self.match_token(Token::Throw) {
+            if label.is_some() {
+                return Err("labels can only be applied to loops".to_string());
+            }
             self.parse_throw()
         } else if self.match_token(Token::Try) {
+            if label.is_some() {
+                return Err("labels can only be applied to loops".to_string());
+            }
             self.parse_try()
         } else if self.match_token(Token::Using) {
+            if label.is_some() {
+                return Err("labels can only be applied to loops".to_string());
+            }
             self.parse_using()
         } else if self.check(Token::LParen) && self.peek_ahead_is_tuple_decl() {
+            if label.is_some() {
+                return Err("labels can only be applied to loops".to_string());
+            }
             self.parse_tuple_decl()
         } else if self.check_type() && self.peek_ahead_is_ident_after_type() {
+            if label.is_some() {
+                return Err("labels can only be applied to loops".to_string());
+            }
             self.parse_var_decl()
         } else if self.check(Token::LBrace) {
+            if label.is_some() {
+                return Err("labels can only be applied to loops".to_string());
+            }
             self.advance();
             Ok(Stmt::Block(self.parse_block()?))
         } else {
+            if label.is_some() {
+                return Err("labels can only be applied to loops".to_string());
+            }
             let expr = self.parse_expr()?;
             if self.match_token(Token::Assign) {
                 let target = expr_to_assign_target(expr)?;
@@ -459,15 +521,19 @@ impl<'a> Parser<'a> {
         Ok(Stmt::If(cond, then_branch, else_branch))
     }
 
-    fn parse_while(&mut self) -> Result<Stmt, String> {
+    fn parse_while(&mut self, label: Option<String>) -> Result<Stmt, String> {
         self.consume(Token::LParen, "expected `(` after `while`")?;
         let cond = self.parse_expr()?;
         self.consume(Token::RParen, "expected `)`")?;
         let body = self.parse_stmt_body()?;
-        Ok(Stmt::While(cond, body))
+        Ok(Stmt::While {
+            label,
+            condition: cond,
+            body,
+        })
     }
 
-    fn parse_for(&mut self) -> Result<Stmt, String> {
+    fn parse_for(&mut self, label: Option<String>) -> Result<Stmt, String> {
         self.consume(Token::LParen, "expected `(` after `for`")?;
         
         // Check for `for (Type var in expr)` syntax
@@ -482,7 +548,13 @@ impl<'a> Parser<'a> {
             let range_expr = self.parse_expr()?;
             self.consume(Token::RParen, "expected `)` after for-in range")?;
             let body = self.parse_stmt_body()?;
-            return Ok(Stmt::ForIn(ty, var_name, range_expr, body));
+            return Ok(Stmt::ForIn {
+                label,
+                var_type: ty,
+                var_name,
+                iterable: range_expr,
+                body,
+            });
         }
         
         // Parse init statement (can be var decl, expr, or empty)
@@ -530,7 +602,13 @@ impl<'a> Parser<'a> {
         self.consume(Token::RParen, "expected `)`")?;
         let body = self.parse_stmt_body()?;
         
-        Ok(Stmt::For(Box::new(init), cond, Box::new(update), body))
+        Ok(Stmt::For {
+            label,
+            init: Box::new(init),
+            condition: cond,
+            update: Box::new(update),
+            body,
+        })
     }
     
     /// Check if we're at the start of a `for (Type var in ...)` pattern
@@ -568,14 +646,18 @@ impl<'a> Parser<'a> {
         matches!(self.tokens.get(pos), Some(Token::In))
     }
 
-    fn parse_do_while(&mut self) -> Result<Stmt, String> {
+    fn parse_do_while(&mut self, label: Option<String>) -> Result<Stmt, String> {
         let body = self.parse_stmt_body()?;
         self.consume(Token::While, "expected `while` after `do` body")?;
         self.consume(Token::LParen, "expected `(` after `while`")?;
         let cond = self.parse_expr()?;
         self.consume(Token::RParen, "expected `)`")?;
         self.consume_semi()?;
-        Ok(Stmt::DoWhile(body, cond))
+        Ok(Stmt::DoWhile {
+            label,
+            body,
+            condition: cond,
+        })
     }
 
     fn parse_return(&mut self) -> Result<Stmt, String> {
