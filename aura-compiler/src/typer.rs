@@ -897,6 +897,28 @@ impl TypeChecker {
                     self.check_stmt(s, class, locals, return_ty, in_instance, generic_params)?;
                 }
             }
+            Stmt::ForIn(ty, var_name, range_expr, body) => {
+                self.validate_type_with_generics(ty, generic_params)?;
+                let range_ty = self.infer_expr(range_expr, class, locals, in_instance)?;
+                // For now, only support Range type
+                if range_ty != Type::Class("Range".to_string(), vec![]) {
+                    return Err(TypeError(format!(
+                        "for-in requires a range expression, got {}",
+                        range_ty.name()
+                    )));
+                }
+                // The loop variable must match the range element type (int for now)
+                if *ty != Type::Int {
+                    return Err(TypeError(format!(
+                        "for-in loop variable must be int, got {}",
+                        ty.name()
+                    )));
+                }
+                locals.insert(var_name.clone(), ty.clone());
+                for s in body {
+                    self.check_stmt(s, class, locals, return_ty, in_instance, generic_params)?;
+                }
+            }
             Stmt::DoWhile(body, cond) => {
                 for s in body {
                     self.check_stmt(s, class, locals, return_ty, in_instance, generic_params)?;
@@ -1304,6 +1326,24 @@ impl TypeChecker {
                         tuple_ty.name()
                     )));
                 }
+            }
+            Expr::Range(start, end, _inclusive) => {
+                let start_ty = self.infer_expr(start, class, locals, in_instance)?;
+                let end_ty = self.infer_expr(end, class, locals, in_instance)?;
+                if start_ty != Type::Int {
+                    return Err(TypeError(format!(
+                        "range start must be an integer, got {}",
+                        start_ty.name()
+                    )));
+                }
+                if end_ty != Type::Int {
+                    return Err(TypeError(format!(
+                        "range end must be an integer, got {}",
+                        end_ty.name()
+                    )));
+                }
+                // Return a special Range type for now
+                Ok(Type::Class("Range".to_string(), vec![]))
             }
             Expr::SuperCall(method_name, args) => {
                 if !in_instance {

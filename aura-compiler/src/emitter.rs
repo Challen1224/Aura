@@ -485,6 +485,69 @@ impl<'a> MethodEmitter<'a> {
                     self.ops[jump] = Op::Br(update_start);
                 }
             }
+            Stmt::ForIn(ty, var_name, range_expr, body) => {
+                // Desugar `for (int i in start..end)` to:
+                // int i = start;
+                // while (i < end) { body; i = i + 1; }
+                // or for inclusive: while (i <= end)
+                
+                // Extract start and end from the range expression
+                let (start, end, inclusive) = match range_expr {
+                    Expr::Range(start, end, inclusive) => (start, end, *inclusive),
+                    _ => return Err("for-in requires a range expression".to_string()),
+                };
+                
+                // Emit: int var_name = start;
+                self.emit_expr(start)?;
+                self.locals.push(var_name.clone());
+                let var_idx = (self.locals.len() - 1) as u16;
+                self.ops.push(Op::Stloc(var_idx));
+                
+                let loop_start = self.ops.len() as u32;
+                self.break_targets.push(Vec::new());
+                self.continue_targets.push(Vec::new());
+                
+                // Emit: var_name < end (or <= for inclusive)
+                self.ops.push(Op::Ldloc(var_idx));
+                self.emit_expr(end)?;
+                if inclusive {
+                    self.ops.push(Op::Le);
+                } else {
+                    self.ops.push(Op::Lt);
+                }
+                let exit_jump = self.ops.len();
+                self.ops.push(Op::BrFalse(0));
+                
+                // Emit body
+                for s in body {
+                    self.emit_stmt(s)?;
+                }
+                
+                // Continue target is the increment
+                let update_start = self.ops.len() as u32;
+                
+                // Emit: var_name = var_name + 1
+                self.ops.push(Op::Ldloc(var_idx));
+                self.ops.push(Op::LdInt(1));
+                self.ops.push(Op::Add);
+                self.ops.push(Op::Stloc(var_idx));
+                
+                self.ops.push(Op::Br(loop_start));
+                
+                let end_pos = self.ops.len() as u32;
+                self.ops[exit_jump] = Op::BrFalse(end_pos);
+                
+                // Patch break jumps
+                let breaks = self.break_targets.pop().unwrap();
+                for jump in breaks {
+                    self.ops[jump] = Op::Br(end_pos);
+                }
+                // Patch continue jumps
+                let continues = self.continue_targets.pop().unwrap();
+                for jump in continues {
+                    self.ops[jump] = Op::Br(update_start);
+                }
+            }
             Stmt::DoWhile(body, cond) => {
                 let loop_start = self.ops.len() as u32;
                 self.break_targets.push(Vec::new());
@@ -874,6 +937,14 @@ impl<'a> MethodEmitter<'a> {
             Expr::TupleIndex(tuple, idx) => {
                 self.emit_expr(tuple)?;
                 self.ops.push(Op::TupleField(*idx as u16));
+            }
+            Expr::Range(start, end, _inclusive) => {
+                // For now, ranges are only used in for-in loops, which are desugared.
+                // If used as a standalone expression, we emit start and end as a tuple.
+                // This is a placeholder; proper range objects would need a Range class.
+                self.emit_expr(start)?;
+                self.emit_expr(end)?;
+                self.ops.push(Op::NewTuple(2));
             }
             Expr::Ternary(cond, then_expr, else_expr) => {
                 self.emit_expr(cond)?;

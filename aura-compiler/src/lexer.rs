@@ -67,6 +67,10 @@ pub enum Token {
     And,
     /// `||`
     Or,
+    /// `..`
+    DotDot,
+    /// `..=`
+    DotDotEq,
 
     // Keywords
     /// `class`
@@ -143,6 +147,8 @@ pub enum Token {
     Finally,
     /// `using`
     Using,
+    /// `in`
+    In,
 }
 
 impl fmt::Display for Token {
@@ -179,6 +185,8 @@ impl fmt::Display for Token {
             Token::Bang => "`!`",
             Token::And => "`&&`",
             Token::Or => "`||`",
+            Token::DotDot => "`..`",
+            Token::DotDotEq => "`..=`",
             Token::Class => "`class`",
             Token::Static => "`static`",
             Token::Void => "`void`",
@@ -216,6 +224,7 @@ impl fmt::Display for Token {
             Token::Catch => "`catch`",
             Token::Finally => "`finally`",
             Token::Using => "`using`",
+            Token::In => "`in`",
         };
         write!(f, "{}", s)
     }
@@ -334,7 +343,15 @@ impl<'a> Lexer<'a> {
             }
             Some('.') => {
                 self.advance();
-                Ok(Token::Dot)
+                if self.match_char('.') {
+                    if self.match_char('=') {
+                        Ok(Token::DotDotEq)
+                    } else {
+                        Ok(Token::DotDot)
+                    }
+                } else {
+                    Ok(Token::Dot)
+                }
             }
             Some(':') => {
                 self.advance();
@@ -540,7 +557,18 @@ impl<'a> Lexer<'a> {
                         Some(')') => { self.advance(); Token::RParen }
                         Some(';') => { self.advance(); Token::Semi }
                         Some(',') => { self.advance(); Token::Comma }
-                        Some('.') => { self.advance(); Token::Dot }
+                        Some('.') => {
+                            self.advance();
+                            if self.match_char('.') {
+                                if self.match_char('=') {
+                                    Token::DotDotEq
+                                } else {
+                                    Token::DotDot
+                                }
+                            } else {
+                                Token::Dot
+                            }
+                        }
                         Some(':') => { self.advance(); Token::Colon }
                         Some('?') => { self.advance(); Token::Question }
                         Some('=') => {
@@ -726,6 +754,7 @@ impl<'a> Lexer<'a> {
             "catch" => Token::Catch,
             "finally" => Token::Finally,
             "using" => Token::Using,
+            "in" => Token::In,
             _ => Token::Ident(word.to_string()),
         })
     }

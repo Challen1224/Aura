@@ -202,6 +202,8 @@ pub enum Stmt {
     While(Expr, Vec<Stmt>),
     /// For loop: for (init; cond; update) { body }
     For(Box<Stmt>, Expr, Box<Stmt>, Vec<Stmt>),
+    /// For-in loop: for (Type var in range) { body }
+    ForIn(Type, String, Expr, Vec<Stmt>),
     /// Do-while loop: do { body } while (cond);
     DoWhile(Vec<Stmt>, Expr),
     /// Break statement.
@@ -299,6 +301,8 @@ pub enum Expr {
     Tuple(Vec<Expr>),
     /// Tuple index access: `tuple.0`, `tuple.1`.
     TupleIndex(Box<Expr>, usize),
+    /// Range expression: `start..end` (exclusive) or `start..=end` (inclusive).
+    Range(Box<Expr>, Box<Expr>, bool),
     /// Base class method call from a subclass method: `super.Method(args)`.
     SuperCall(String, Vec<Expr>),
     /// Base class field access from a subclass method: `super.field`.

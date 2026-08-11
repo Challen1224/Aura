@@ -247,6 +247,14 @@
 - [x] Assignment expressions
 - [x] Variable shadowing (proper scoping)
 
+#### ✅ Completed
+- [x] **Range expressions**
+  ```aura
+  for (int i in 1..10) { }      // exclusive: 1 to 9
+  for (int i in 1..=10) { }     // inclusive: 1 to 10
+  for (int i in 2+1..2*3) { }   // expressions allowed
+  ```
+
 #### ⏳ Planned
 
 **P1 - High Priority**
@@ -254,12 +262,6 @@
   - [ ] Enum variant patterns
   - [ ] Nested patterns
   - [ ] Pattern guards with complex expressions
-
-- [ ] **Range expressions**
-  ```aura
-  let range = 1..10;
-  let inclusive = 1..=10;
-  ```
 
 - [ ] **Null coalescing**
   ```aura

@@ -470,6 +470,21 @@ impl<'a> Parser<'a> {
     fn parse_for(&mut self) -> Result<Stmt, String> {
         self.consume(Token::LParen, "expected `(` after `for`")?;
         
+        // Check for `for (Type var in expr)` syntax
+        // We need to look ahead past the type and identifier to see if 'in' follows
+        let is_for_in = self.peek_for_in_pattern();
+        
+        if is_for_in {
+            // Parse for-in loop
+            let ty = self.parse_type()?;
+            let var_name = self.consume_ident("expected variable name")?;
+            self.consume(Token::In, "expected `in`")?;
+            let range_expr = self.parse_expr()?;
+            self.consume(Token::RParen, "expected `)` after for-in range")?;
+            let body = self.parse_stmt_body()?;
+            return Ok(Stmt::ForIn(ty, var_name, range_expr, body));
+        }
+        
         // Parse init statement (can be var decl, expr, or empty)
         let init = if self.check(Token::Semi) {
             self.advance(); // consume ;
@@ -516,6 +531,41 @@ impl<'a> Parser<'a> {
         let body = self.parse_stmt_body()?;
         
         Ok(Stmt::For(Box::new(init), cond, Box::new(update), body))
+    }
+    
+    /// Check if we're at the start of a `for (Type var in ...)` pattern
+    fn peek_for_in_pattern(&self) -> bool {
+        let mut pos = self.pos;
+        
+        // Check for type
+        if pos >= self.tokens.len() || !self.check_type_token(&self.tokens[pos]) {
+            return false;
+        }
+        pos += 1;
+        
+        // Skip generic type arguments if present
+        if pos < self.tokens.len() && matches!(self.tokens.get(pos), Some(Token::Lt)) {
+            let mut depth = 1;
+            pos += 1;
+            while pos < self.tokens.len() && depth > 0 {
+                match self.tokens.get(pos) {
+                    Some(Token::Lt) => depth += 1,
+                    Some(Token::Gt) => depth -= 1,
+                    None => return false,
+                    _ => {}
+                }
+                pos += 1;
+            }
+        }
+        
+        // Check for identifier
+        if pos >= self.tokens.len() || !matches!(self.tokens.get(pos), Some(Token::Ident(_))) {
+            return false;
+        }
+        pos += 1;
+        
+        // Check for 'in'
+        matches!(self.tokens.get(pos), Some(Token::In))
     }
 
     fn parse_do_while(&mut self) -> Result<Stmt, String> {
@@ -666,25 +716,38 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_relational(&mut self) -> Result<Expr, String> {
-        let mut left = self.parse_additive()?;
+        let mut left = self.parse_range()?;
         loop {
             if self.match_token(Token::Lt) {
-                let right = self.parse_additive()?;
+                let right = self.parse_range()?;
                 left = Expr::Binary(BinOp::Lt, Box::new(left), Box::new(right));
             } else if self.match_token(Token::Le) {
-                let right = self.parse_additive()?;
+                let right = self.parse_range()?;
                 left = Expr::Binary(BinOp::Le, Box::new(left), Box::new(right));
             } else if self.match_token(Token::Gt) {
-                let right = self.parse_additive()?;
+                let right = self.parse_range()?;
                 left = Expr::Binary(BinOp::Gt, Box::new(left), Box::new(right));
             } else if self.match_token(Token::Ge) {
-                let right = self.parse_additive()?;
+                let right = self.parse_range()?;
                 left = Expr::Binary(BinOp::Ge, Box::new(left), Box::new(right));
             } else {
                 break;
             }
         }
         Ok(left)
+    }
+
+    fn parse_range(&mut self) -> Result<Expr, String> {
+        let start = self.parse_additive()?;
+        if self.match_token(Token::DotDot) {
+            let end = self.parse_additive()?;
+            Ok(Expr::Range(Box::new(start), Box::new(end), false))
+        } else if self.match_token(Token::DotDotEq) {
+            let end = self.parse_additive()?;
+            Ok(Expr::Range(Box::new(start), Box::new(end), true))
+        } else {
+            Ok(start)
+        }
     }
 
     fn parse_additive(&mut self) -> Result<Expr, String> {
