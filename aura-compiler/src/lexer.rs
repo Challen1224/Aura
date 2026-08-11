@@ -149,6 +149,10 @@ pub enum Token {
     Using,
     /// `in`
     In,
+    /// `??`
+    NullCoalesce,
+    /// `?.`
+    NullConditional,
 }
 
 impl fmt::Display for Token {
@@ -225,6 +229,8 @@ impl fmt::Display for Token {
             Token::Finally => "`finally`",
             Token::Using => "`using`",
             Token::In => "`in`",
+            Token::NullCoalesce => "`??`",
+            Token::NullConditional => "`?.`",
         };
         write!(f, "{}", s)
     }
@@ -359,7 +365,13 @@ impl<'a> Lexer<'a> {
             }
             Some('?') => {
                 self.advance();
-                Ok(Token::Question)
+                if self.match_char('?') {
+                    Ok(Token::NullCoalesce)
+                } else if self.match_char('.') {
+                    Ok(Token::NullConditional)
+                } else {
+                    Ok(Token::Question)
+                }
             }
             Some('=') => {
                 self.advance();
@@ -570,7 +582,16 @@ impl<'a> Lexer<'a> {
                             }
                         }
                         Some(':') => { self.advance(); Token::Colon }
-                        Some('?') => { self.advance(); Token::Question }
+                        Some('?') => {
+                            self.advance();
+                            if self.match_char('?') {
+                                Token::NullCoalesce
+                            } else if self.match_char('.') {
+                                Token::NullConditional
+                            } else {
+                                Token::Question
+                            }
+                        }
                         Some('=') => {
                             self.advance();
                             if self.match_char('=') {

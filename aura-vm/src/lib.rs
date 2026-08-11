@@ -776,6 +776,7 @@ impl Vm {
             (Value::Bool(a), Value::Bool(b)) => Value::Bool(a == b),
             (Value::Null, Value::Null) => Value::Bool(true),
             (Value::Null, Value::Object(_)) | (Value::Object(_), Value::Null) => Value::Bool(false),
+            (Value::Null, Value::String(_)) | (Value::String(_), Value::Null) => Value::Bool(false),
             (Value::Object(a), Value::Object(b)) => Value::Bool(a == b),
             (Value::Enum(eid_a, vid_a, ref fields_a), Value::Enum(eid_b, vid_b, ref fields_b)) => {
                 Value::Bool(eid_a == eid_b && vid_a == vid_b && fields_a == fields_b)

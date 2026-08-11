@@ -264,6 +264,17 @@
   }
   ```
 
+- [x] **Null coalescing operator**
+  ```aura
+  string result = nullableValue ?? "default";
+  ```
+
+- [x] **Null conditional operator**
+  ```aura
+  string name = person?.name;
+  string result = obj?.method();
+  ```
+
 #### ⏳ Planned
 
 **P1 - High Priority**
@@ -273,15 +284,7 @@
   - [ ] Nested patterns
   - [ ] Pattern guards with complex expressions
 
-- [ ] **Null coalescing**
-  ```aura
-  let value = optional ?? defaultValue;
-  ```
-
 - [ ] **Null conditional**
-  ```aura
-  let length = str?.length;
-  ```
 
 **P2 - Medium Priority**
 - [ ] **Labeled break/continue**

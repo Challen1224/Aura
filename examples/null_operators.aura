@@ -1,0 +1,96 @@
+class Person {
+    string name;
+    string email;
+
+    void Init(string n, string e) {
+        this.name = n;
+        this.email = e;
+    }
+
+    string GetName() {
+        return this.name;
+    }
+}
+
+class Program {
+    static void Main() {
+        // Test null coalescing operator
+        print("=== Null Coalescing ===");
+        println();
+
+        string a = "hello";
+        string b = null;
+        string c = "world";
+
+        // a ?? b should return "hello"
+        string result1 = a ?? b;
+        print("a ?? b = ");
+        print(result1);
+        println();
+
+        // b ?? c should return "world"
+        string result2 = b ?? c;
+        print("b ?? c = ");
+        print(result2);
+        println();
+
+        // Nested: b ?? a ?? c should return "hello"
+        string result3 = b ?? a ?? c;
+        print("b ?? a ?? c = ");
+        print(result3);
+        println();
+
+        println();
+
+        // Test null conditional operator
+        print("=== Null Conditional ===");
+        println();
+
+        Person p1 = new Person();
+        p1.Init("Alice", "alice@example.com");
+
+        Person p2 = null;
+
+        // p1?.name should return "Alice"
+        string name1 = p1?.name;
+        print("p1?.name = ");
+        print(name1);
+        println();
+
+        // p2?.name should return null
+        string name2 = p2?.name;
+        print("p2?.name = ");
+        print(name2);
+        println();
+
+        // p1?.GetName() should return "Alice"
+        string name3 = p1?.GetName();
+        print("p1?.GetName() = ");
+        print(name3);
+        println();
+
+        // p2?.GetName() should return null
+        string name4 = p2?.GetName();
+        print("p2?.GetName() = ");
+        print(name4);
+        println();
+
+        println();
+
+        // Combined: null conditional with null coalescing
+        print("=== Combined ===");
+        println();
+
+        // p2?.name ?? "Unknown" should return "Unknown"
+        string name5 = p2?.name ?? "Unknown";
+        print("p2?.name ?? \"Unknown\" = ");
+        print(name5);
+        println();
+
+        // p1?.name ?? "Unknown" should return "Alice"
+        string name6 = p1?.name ?? "Unknown";
+        print("p1?.name ?? \"Unknown\" = ");
+        print(name6);
+        println();
+    }
+}

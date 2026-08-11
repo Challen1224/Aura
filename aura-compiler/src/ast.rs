@@ -303,6 +303,12 @@ pub enum Expr {
     TupleIndex(Box<Expr>, usize),
     /// Range expression: `start..end` (exclusive) or `start..=end` (inclusive).
     Range(Box<Expr>, Box<Expr>, bool),
+    /// Null coalescing: `a ?? b` returns `a` if not null, else `b`.
+    NullCoalesce(Box<Expr>, Box<Expr>),
+    /// Null conditional field access: `a?.field` returns null if `a` is null.
+    NullConditionalField(Box<Expr>, String),
+    /// Null conditional method call: `a?.method()` returns null if `a` is null.
+    NullConditionalCall(CallExpr),
     /// Base class method call from a subclass method: `super.Method(args)`.
     SuperCall(String, Vec<Expr>),
     /// Base class field access from a subclass method: `super.field`.

@@ -1212,6 +1212,50 @@ impl TypeChecker {
                 }
                 Ok(then_ty)
             }
+            Expr::NullCoalesce(left, right) => {
+                let left_ty = self.infer_expr(left, class, locals, in_instance)?;
+                let right_ty = self.infer_expr(right, class, locals, in_instance)?;
+                // The result type is the left type (which should be nullable)
+                // For now, we just check that the types are compatible
+                if !self.is_assignable(&left_ty, &right_ty) && !self.is_assignable(&right_ty, &left_ty) {
+                    return Err(TypeError(format!(
+                        "null coalescing operands must have compatible types, got {} and {}",
+                        left_ty.name(),
+                        right_ty.name()
+                    )));
+                }
+                Ok(left_ty)
+            }
+            Expr::NullConditionalField(obj, field_name) => {
+                let obj_ty = self.infer_expr(obj, class, locals, in_instance)?;
+                let class_name = if let Type::Class(name, _) = &obj_ty {
+                    name.clone()
+                } else {
+                    return Err(TypeError(format!(
+                        "null conditional field access requires class type, got {}",
+                        obj_ty.name()
+                    )));
+                };
+                if !self.classes.contains_key(&class_name) {
+                    return Err(TypeError(format!("unknown class `{}`", class_name)));
+                }
+                let (declared_in, ty, visibility) =
+                    self.find_instance_field(&class_name, field_name).ok_or_else(|| {
+                        TypeError(format!("unknown field `{}` on `{}`", field_name, class_name))
+                    })?;
+                if !self.can_access(&class.name, &declared_in, visibility) {
+                    return Err(TypeError(format!(
+                        "field `{}` on `{}` is {}",
+                        field_name, declared_in, visibility_name(visibility)
+                    )));
+                }
+                // Result is nullable version of the field type
+                Ok(ty)
+            }
+            Expr::NullConditionalCall(call) => {
+                // Similar to regular call, but the result is nullable
+                self.check_call(call, class, locals, in_instance)
+            }
             Expr::Match(subject, arms) => {
                 let subject_ty = self.infer_expr(subject, class, locals, in_instance)?;
                 
@@ -1774,6 +1818,8 @@ impl TypeChecker {
                 // Upcast: a subclass instance is assignable to its base type.
                 self.is_subclass_of(source_name, target_name)
             }
+            // Null is assignable to string (reference type).
+            (Type::String, Type::Class(source_name, _)) if source_name == "null" => true,
             (Type::Enum(a), Type::Enum(b)) => a == b,
             (Type::Class(name, _), Type::Enum(enum_name)) => name == enum_name,
             (Type::Enum(enum_name), Type::Class(name, _)) => name == enum_name,

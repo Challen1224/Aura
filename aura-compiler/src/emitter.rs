@@ -959,6 +959,95 @@ impl<'a> MethodEmitter<'a> {
                 self.ops[false_jump] = Op::BrFalse(else_start);
                 self.ops[end_jump] = Op::Br(end);
             }
+            Expr::NullCoalesce(left, right) => {
+                // Evaluate left operand
+                self.emit_expr(left)?;
+                // Duplicate it for the null check
+                let temp_local = self.locals.len() as u16;
+                self.locals.push("__null_coalesce_temp".to_string());
+                self.ops.push(Op::Stloc(temp_local));
+                self.ops.push(Op::Ldloc(temp_local));
+                // Check if null
+                self.ops.push(Op::LdNull);
+                self.ops.push(Op::Eq);
+                let not_null_jump = self.ops.len();
+                self.ops.push(Op::BrFalse(0));
+                // If null, evaluate right operand
+                self.emit_expr(right)?;
+                let end_jump = self.ops.len();
+                self.ops.push(Op::Br(0));
+                // If not null, use left operand
+                let left_value = self.ops.len() as u32;
+                self.ops.push(Op::Ldloc(temp_local));
+                let end = self.ops.len() as u32;
+                self.ops[not_null_jump] = Op::BrFalse(left_value);
+                self.ops[end_jump] = Op::Br(end);
+            }
+            Expr::NullConditionalField(obj, field_name) => {
+                // Evaluate object
+                self.emit_expr(obj)?;
+                // Store in temp and duplicate for null check
+                let temp_local = self.locals.len() as u16;
+                self.locals.push("__null_cond_temp".to_string());
+                self.ops.push(Op::Stloc(temp_local));
+                self.ops.push(Op::Ldloc(temp_local));
+                // Check if null
+                self.ops.push(Op::LdNull);
+                self.ops.push(Op::Eq);
+                let not_null_jump = self.ops.len();
+                self.ops.push(Op::BrFalse(0));
+                // If null, leave null on stack
+                self.ops.push(Op::LdNull);
+                let end_jump = self.ops.len();
+                self.ops.push(Op::Br(0));
+                // If not null, access field
+                let field_access = self.ops.len() as u32;
+                self.ops.push(Op::Ldloc(temp_local));
+                // Get field index
+                let obj_class = self.expr_class(obj).ok_or_else(|| {
+                    format!("cannot determine type of field target `{}`", field_name)
+                })?;
+                let idx = self.field_index_for(&obj_class, field_name)?;
+                self.ops.push(Op::Ldfld(idx));
+                let end = self.ops.len() as u32;
+                self.ops[not_null_jump] = Op::BrFalse(field_access);
+                self.ops[end_jump] = Op::Br(end);
+            }
+            Expr::NullConditionalCall(call) => {
+                // Similar to regular call but with null check
+                if let Some(target) = &call.target {
+                    // Evaluate target
+                    self.emit_expr(target)?;
+                    // Store in temp and duplicate for null check
+                    let temp_local = self.locals.len() as u16;
+                    self.locals.push("__null_call_temp".to_string());
+                    self.ops.push(Op::Stloc(temp_local));
+                    self.ops.push(Op::Ldloc(temp_local));
+                    // Check if null
+                    self.ops.push(Op::LdNull);
+                    self.ops.push(Op::Eq);
+                    let not_null_jump = self.ops.len();
+                    self.ops.push(Op::BrFalse(0));
+                    // If null, leave null on stack
+                    self.ops.push(Op::LdNull);
+                    let end_jump = self.ops.len();
+                    self.ops.push(Op::Br(0));
+                    // If not null, call method
+                    let call_start = self.ops.len() as u32;
+                    self.ops.push(Op::Ldloc(temp_local));
+                    // Emit arguments
+                    for arg in &call.args {
+                        self.emit_expr(arg)?;
+                    }
+                    // Call method
+                    self.ops.push(Op::CallVirt(call.method.clone()));
+                    let end = self.ops.len() as u32;
+                    self.ops[not_null_jump] = Op::BrFalse(call_start);
+                    self.ops[end_jump] = Op::Br(end);
+                } else {
+                    return Err("null conditional call requires target".to_string());
+                }
+            }
             Expr::Match(subject, arms) => {
                 // Emit subject
                 self.emit_expr(subject)?;

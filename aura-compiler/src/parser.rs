@@ -670,7 +670,7 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_expr(&mut self) -> Result<Expr, String> {
-        let expr = self.parse_or()?;
+        let expr = self.parse_null_coalesce()?;
         if self.match_token(Token::Question) {
             let then_expr = self.parse_expr()?;
             self.consume(Token::Colon, "expected `:` in ternary expression")?;
@@ -679,6 +679,15 @@ impl<'a> Parser<'a> {
         } else {
             Ok(expr)
         }
+    }
+
+    fn parse_null_coalesce(&mut self) -> Result<Expr, String> {
+        let mut left = self.parse_or()?;
+        while self.match_token(Token::NullCoalesce) {
+            let right = self.parse_or()?;
+            left = Expr::NullCoalesce(Box::new(left), Box::new(right));
+        }
+        Ok(left)
     }
 
     fn parse_or(&mut self) -> Result<Expr, String> {
@@ -871,6 +880,21 @@ impl<'a> Parser<'a> {
                     });
                 } else {
                     expr = Expr::Field(Box::new(expr), name);
+                }
+            } else if self.match_token(Token::NullConditional) {
+                // Null conditional access: ?.field or ?.method()
+                let name = self.consume_ident("expected member name after `?.`")?;
+                if self.check(Token::LParen) {
+                    let args = self.parse_args()?;
+                    expr = Expr::NullConditionalCall(CallExpr {
+                        target: Some(Box::new(expr.clone())),
+                        class_or_target: name.clone(),
+                        method: name,
+                        type_args: Vec::new(),
+                        args,
+                    });
+                } else {
+                    expr = Expr::NullConditionalField(Box::new(expr), name);
                 }
             } else {
                 break;
