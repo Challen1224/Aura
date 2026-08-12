@@ -16,13 +16,16 @@ pub mod encode;
 /// An Aura primitive value.
 ///
 /// Reference types (`AuraObject`) live behind `GcRef` handles into the VM heap.
+/// All integer types (int8..int64, uint8..uint64) are stored in the single
+/// `Int(i64)` slot; width is carried by static types and conversions.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Value {
     /// Unit / void result.
     Unit,
-    /// 32-bit signed integer.
-    Int(i32),
-    /// 64-bit floating point number.
+    /// Signed or unsigned integer value of any width.
+    Int(i64),
+    /// 64-bit floating point number (float32 values are rounded to f32
+    /// precision on conversion but stored in the same slot).
     Float(f64),
     /// Boolean.
     Bool(bool),
@@ -290,10 +293,26 @@ pub struct EnumDef {
 pub enum TypeDesc {
     /// Unit / void.
     Unit,
+    /// 8-bit signed integer.
+    Int8,
+    /// 16-bit signed integer.
+    Int16,
     /// 32-bit signed integer.
-    Int,
+    Int32,
+    /// 64-bit signed integer.
+    Int64,
+    /// 8-bit unsigned integer.
+    UInt8,
+    /// 16-bit unsigned integer.
+    UInt16,
+    /// 32-bit unsigned integer.
+    UInt32,
+    /// 64-bit unsigned integer.
+    UInt64,
+    /// 32-bit float.
+    Float32,
     /// 64-bit float.
-    Float,
+    Float64,
     /// Boolean.
     Bool,
     /// String reference type.
@@ -310,12 +329,42 @@ pub enum TypeDesc {
     Null,
 }
 
+impl TypeDesc {
+    /// True if this is an integer type.
+    pub fn is_int(&self) -> bool {
+        matches!(
+            self,
+            TypeDesc::Int8
+                | TypeDesc::Int16
+                | TypeDesc::Int32
+                | TypeDesc::Int64
+                | TypeDesc::UInt8
+                | TypeDesc::UInt16
+                | TypeDesc::UInt32
+                | TypeDesc::UInt64
+        )
+    }
+
+    /// True if this is a floating point type.
+    pub fn is_float(&self) -> bool {
+        matches!(self, TypeDesc::Float32 | TypeDesc::Float64)
+    }
+}
+
 impl fmt::Display for TypeDesc {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             TypeDesc::Unit => write!(f, "void"),
-            TypeDesc::Int => write!(f, "int"),
-            TypeDesc::Float => write!(f, "float"),
+            TypeDesc::Int8 => write!(f, "int8"),
+            TypeDesc::Int16 => write!(f, "int16"),
+            TypeDesc::Int32 => write!(f, "int32"),
+            TypeDesc::Int64 => write!(f, "int64"),
+            TypeDesc::UInt8 => write!(f, "uint8"),
+            TypeDesc::UInt16 => write!(f, "uint16"),
+            TypeDesc::UInt32 => write!(f, "uint32"),
+            TypeDesc::UInt64 => write!(f, "uint64"),
+            TypeDesc::Float32 => write!(f, "float32"),
+            TypeDesc::Float64 => write!(f, "float64"),
             TypeDesc::Bool => write!(f, "bool"),
             TypeDesc::String => write!(f, "string"),
             TypeDesc::Class(ClassId(id), args) => {
@@ -390,10 +439,15 @@ pub enum Op {
     Nop,
 
     // Stack manipulation
-    /// Push a constant integer.
+    /// Push a constant 32-bit integer.
     LdInt(i32),
+    /// Push a constant 64-bit integer (used for literals outside the int32 range).
+    LdInt64(i64),
     /// Push a constant float (index into constant pool).
     LdFloat(u32),
+    /// Convert the value on top of the stack to the given numeric type,
+    /// applying width truncation and float32 precision rounding.
+    Conv(TypeDesc),
     /// Push a constant boolean.
     LdBool(bool),
     /// Push a string constant (index into constant pool).

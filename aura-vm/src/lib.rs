@@ -26,8 +26,15 @@ fn fnv_hash(s: &str) -> i32 {
 /// Default (zero) value for a field of the given type.
 fn default_value(ty: &TypeDesc) -> Value {
     match ty {
-        TypeDesc::Int => Value::Int(0),
-        TypeDesc::Float => Value::Float(0.0),
+        TypeDesc::Int8
+        | TypeDesc::Int16
+        | TypeDesc::Int32
+        | TypeDesc::Int64
+        | TypeDesc::UInt8
+        | TypeDesc::UInt16
+        | TypeDesc::UInt32
+        | TypeDesc::UInt64 => Value::Int(0),
+        TypeDesc::Float32 | TypeDesc::Float64 => Value::Float(0.0),
         TypeDesc::Bool => Value::Bool(false),
         _ => Value::Null,
     }
@@ -135,6 +142,9 @@ pub enum VmError {
     /// Generic runtime error.
     #[error("runtime error: {0}")]
     Runtime(String),
+    /// Integer overflow detected (only when overflow checking is enabled).
+    #[error("integer overflow")]
+    Overflow,
 }
 
 /// The outcome of executing a frame.
@@ -186,6 +196,9 @@ pub struct Vm {
     heap: Heap,
     call_stack: Vec<Frame>,
     static_fields: HashMap<ClassId, Vec<Value>>,
+    /// When true, integer arithmetic and narrowing conversions detect overflow
+    /// and raise a runtime error; when false they wrap (unchecked semantics).
+    overflow_checks: bool,
 }
 
 impl Vm {
@@ -203,7 +216,15 @@ impl Vm {
             heap: Heap::new(),
             call_stack: Vec::new(),
             static_fields,
+            overflow_checks: false,
         }
+    }
+
+    /// Enable or disable runtime overflow checking. When enabled, integer
+    /// overflow in arithmetic and narrowing conversions raise
+    /// [`VmError::Overflow`]; when disabled, results wrap around.
+    pub fn set_overflow_checks(&mut self, enabled: bool) {
+        self.overflow_checks = enabled;
     }
 
     /// Run the module entrypoint and return the resulting value.
@@ -245,6 +266,8 @@ impl Vm {
 
     fn execute_frame(&mut self, method: MethodDef) -> Result<FrameResult, VmError> {
         let mut pending: Option<Value> = None;
+        // Captured once: overflow_checks only changes between runs.
+        let overflow_checks = self.overflow_checks;
         let mut after_finally: Option<Value> = None;
         loop {
             if let Some(exc) = pending.take() {
@@ -290,7 +313,12 @@ impl Vm {
             match op {
                 Op::Nop => {}
 
-                Op::LdInt(i) => self.push(Value::Int(i)),
+                Op::LdInt(i) => self.push(Value::Int(i as i64)),
+                Op::LdInt64(i) => self.push(Value::Int(i)),
+                Op::Conv(ty) => {
+                    let v = self.pop()?;
+                    self.push(self.convert(v, &ty)?);
+                }
                 Op::LdFloat(idx) => {
                     let s = self
                         .module
@@ -333,21 +361,68 @@ impl Vm {
                     self.pop()?;
                 }
 
-                Op::Add => self.binary_int_float(|a, b| Ok(a + b), |a, b| Ok(a + b))?,
-                Op::Sub => self.binary_int_float(|a, b| Ok(a - b), |a, b| Ok(a - b))?,
-                Op::Mul => self.binary_int_float(|a, b| Ok(a * b), |a, b| Ok(a * b))?,
+                Op::Add => self.binary_int_float(
+                    |a, b| {
+                        if overflow_checks {
+                            a.checked_add(b).ok_or(VmError::Overflow)
+                        } else {
+                            Ok(a.wrapping_add(b))
+                        }
+                    },
+                    |a, b| Ok(a + b),
+                )?,
+                Op::Sub => self.binary_int_float(
+                    |a, b| {
+                        if overflow_checks {
+                            a.checked_sub(b).ok_or(VmError::Overflow)
+                        } else {
+                            Ok(a.wrapping_sub(b))
+                        }
+                    },
+                    |a, b| Ok(a - b),
+                )?,
+                Op::Mul => self.binary_int_float(
+                    |a, b| {
+                        if overflow_checks {
+                            a.checked_mul(b).ok_or(VmError::Overflow)
+                        } else {
+                            Ok(a.wrapping_mul(b))
+                        }
+                    },
+                    |a, b| Ok(a * b),
+                )?,
                 Op::Div => self.binary_int_float(
-                    |a, b| if b == 0 { Err(VmError::DivideByZero) } else { Ok(a / b) },
+                    |a, b| {
+                        if b == 0 {
+                            Err(VmError::DivideByZero)
+                        } else if overflow_checks {
+                            a.checked_div(b).ok_or(VmError::Overflow)
+                        } else {
+                            Ok(a.wrapping_div(b))
+                        }
+                    },
                     |a, b| if b == 0.0 { Err(VmError::DivideByZero) } else { Ok(a / b) },
                 )?,
                 Op::Rem => self.binary_int_float(
-                    |a, b| if b == 0 { Err(VmError::DivideByZero) } else { Ok(a % b) },
+                    |a, b| {
+                        if b == 0 {
+                            Err(VmError::DivideByZero)
+                        } else if overflow_checks {
+                            a.checked_rem(b).ok_or(VmError::Overflow)
+                        } else {
+                            Ok(a.wrapping_rem(b))
+                        }
+                    },
                     |a, b| if b == 0.0 { Err(VmError::DivideByZero) } else { Ok(a % b) },
                 )?,
                 Op::Neg => {
                     let v = self.pop()?;
                     let res = match v {
-                        Value::Int(i) => Value::Int(-i),
+                        Value::Int(i) => Value::Int(if overflow_checks {
+                            i.checked_neg().ok_or(VmError::Overflow)?
+                        } else {
+                            i.wrapping_neg()
+                        }),
                         Value::Float(f) => Value::Float(-f),
                         _ => return Err(VmError::TypeMismatch { expected: "int or float", got: v.type_name().into() }),
                     };
@@ -364,7 +439,7 @@ impl Vm {
                 Op::Hash => {
                     let v = self.pop()?;
                     let h = self.value_hash(&v);
-                    self.push(Value::Int(h));
+                    self.push(Value::Int(h as i64));
                 }
                 Op::Lt => self.compare_int_float(|a, b| a < b, |a, b| a < b)?,
                 Op::Le => self.compare_int_float(|a, b| a <= b, |a, b| a <= b)?,
@@ -510,7 +585,7 @@ impl Vm {
                 Op::EnumTag => {
                     let v = self.pop()?;
                     match v {
-                        Value::Enum(_, variant_idx, _) => self.push(Value::Int(variant_idx as i32)),
+                        Value::Enum(_, variant_idx, _) => self.push(Value::Int(variant_idx as i64)),
                         _ => return Err(VmError::TypeMismatch {
                             expected: "enum",
                             got: v.type_name().into(),
@@ -721,8 +796,15 @@ impl Vm {
     fn value_matches(&self, ty: &TypeDesc, exc: &Value) -> bool {
         match (ty, exc) {
             (TypeDesc::String, Value::String(_)) => true,
-            (TypeDesc::Int, Value::Int(_)) => true,
-            (TypeDesc::Float, Value::Float(_)) => true,
+            (TypeDesc::Int8
+            | TypeDesc::Int16
+            | TypeDesc::Int32
+            | TypeDesc::Int64
+            | TypeDesc::UInt8
+            | TypeDesc::UInt16
+            | TypeDesc::UInt32
+            | TypeDesc::UInt64, Value::Int(_)) => true,
+            (TypeDesc::Float32 | TypeDesc::Float64, Value::Float(_)) => true,
             (TypeDesc::Bool, Value::Bool(_)) => true,
             (TypeDesc::Null, Value::Null) => true,
             (TypeDesc::Tuple(_), Value::Tuple(_)) => true,
@@ -767,7 +849,7 @@ impl Vm {
 
     fn binary_int_float<FI, FF>(&mut self, int_op: FI, float_op: FF) -> Result<(), VmError>
     where
-        FI: FnOnce(i32, i32) -> Result<i32, VmError>,
+        FI: FnOnce(i64, i64) -> Result<i64, VmError>,
         FF: FnOnce(f64, f64) -> Result<f64, VmError>,
     {
         let b = self.pop()?;
@@ -880,7 +962,7 @@ impl Vm {
     /// strings hash by content; non-record objects hash by identity.
     fn value_hash(&self, v: &Value) -> i32 {
         match v {
-            Value::Int(i) => *i,
+            Value::Int(i) => *i as i32,
             Value::Float(f) => f.to_bits() as i32,
             Value::Bool(b) => *b as i32,
             Value::Null | Value::Unit => 0,
@@ -931,7 +1013,7 @@ impl Vm {
 
     fn compare_int_float<FI, FF>(&mut self, int_op: FI, float_op: FF) -> Result<(), VmError>
     where
-        FI: FnOnce(i32, i32) -> bool,
+        FI: FnOnce(i64, i64) -> bool,
         FF: FnOnce(f64, f64) -> bool,
     {
         let b = self.pop()?;
@@ -950,6 +1032,78 @@ impl Vm {
         };
         self.push(res);
         Ok(())
+    }
+
+    /// Inclusive integer range of a concrete integer TypeDesc, as i64 values.
+    fn int_range(ty: &TypeDesc) -> (i64, i64) {
+        match ty {
+            TypeDesc::Int8 => (i8::MIN as i64, i8::MAX as i64),
+            TypeDesc::Int16 => (i16::MIN as i64, i16::MAX as i64),
+            TypeDesc::Int32 => (i32::MIN as i64, i32::MAX as i64),
+            TypeDesc::Int64 => (i64::MIN, i64::MAX),
+            TypeDesc::UInt8 => (0, u8::MAX as i64),
+            TypeDesc::UInt16 => (0, u16::MAX as i64),
+            TypeDesc::UInt32 => (0, u32::MAX as i64),
+            TypeDesc::UInt64 => (0, i64::MAX),
+            _ => (i64::MIN, i64::MAX),
+        }
+    }
+
+    /// Convert a value to the given numeric type. Narrowing truncates; with
+    /// overflow checking enabled, a value that does not fit the target width
+    /// raises [`VmError::Overflow`] instead of wrapping.
+    fn convert(&self, v: Value, ty: &TypeDesc) -> Result<Value, VmError> {
+        if ty.is_float() {
+            let f = match v {
+                Value::Int(i) => i as f64,
+                Value::Float(f) => f,
+                _ => {
+                    return Err(VmError::TypeMismatch {
+                        expected: "int or float",
+                        got: v.type_name().into(),
+                    })
+                }
+            };
+            return Ok(Value::Float(if *ty == TypeDesc::Float32 {
+                f as f32 as f64
+            } else {
+                f
+            }));
+        }
+        if ty.is_int() {
+            let raw = match v {
+                Value::Int(i) => i,
+                Value::Float(f) => f.trunc() as i64,
+                _ => {
+                    return Err(VmError::TypeMismatch {
+                        expected: "int or float",
+                        got: v.type_name().into(),
+                    })
+                }
+            };
+            if self.overflow_checks {
+                let (min, max) = Self::int_range(ty);
+                if raw < min || raw > max {
+                    return Err(VmError::Overflow);
+                }
+            }
+            let narrowed = match ty {
+                TypeDesc::Int8 => raw as i8 as i64,
+                TypeDesc::Int16 => raw as i16 as i64,
+                TypeDesc::Int32 => raw as i32 as i64,
+                TypeDesc::Int64 => raw,
+                TypeDesc::UInt8 => raw as u8 as i64,
+                TypeDesc::UInt16 => raw as u16 as i64,
+                TypeDesc::UInt32 => raw as u32 as i64,
+                TypeDesc::UInt64 => raw as u64 as i64,
+                _ => raw,
+            };
+            return Ok(Value::Int(narrowed));
+        }
+        Err(VmError::TypeMismatch {
+            expected: "numeric type",
+            got: v.type_name().into(),
+        })
     }
 
     /// The id of the standard `Exception` class, if present in the module.

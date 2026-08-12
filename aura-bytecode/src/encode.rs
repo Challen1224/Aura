@@ -240,15 +240,23 @@ fn read_handler<R: Read>(r: &mut R) -> io::Result<ExceptionHandler> {
 fn write_type<W: Write>(w: &mut W, t: &TypeDesc) -> io::Result<()> {
     let tag: u8 = match t {
         TypeDesc::Unit => 0,
-        TypeDesc::Int => 1,
-        TypeDesc::Float => 2,
-        TypeDesc::Bool => 3,
-        TypeDesc::String => 4,
-        TypeDesc::Class(_, _) => 5,
-        TypeDesc::Null => 6,
-        TypeDesc::GenericParam(_) => 7,
-        TypeDesc::Enum(_) => 8,
-        TypeDesc::Tuple(_) => 9,
+        TypeDesc::Int8 => 1,
+        TypeDesc::Int16 => 2,
+        TypeDesc::Int32 => 3,
+        TypeDesc::Int64 => 4,
+        TypeDesc::UInt8 => 5,
+        TypeDesc::UInt16 => 6,
+        TypeDesc::UInt32 => 7,
+        TypeDesc::UInt64 => 8,
+        TypeDesc::Float32 => 9,
+        TypeDesc::Float64 => 10,
+        TypeDesc::Bool => 11,
+        TypeDesc::String => 12,
+        TypeDesc::Class(_, _) => 13,
+        TypeDesc::Null => 14,
+        TypeDesc::GenericParam(_) => 15,
+        TypeDesc::Enum(_) => 16,
+        TypeDesc::Tuple(_) => 17,
     };
     write_u8(w, tag)?;
     match t {
@@ -274,19 +282,27 @@ fn read_type<R: Read>(r: &mut R) -> io::Result<TypeDesc> {
     let tag = read_u8(r)?;
     Ok(match tag {
         0 => TypeDesc::Unit,
-        1 => TypeDesc::Int,
-        2 => TypeDesc::Float,
-        3 => TypeDesc::Bool,
-        4 => TypeDesc::String,
-        5 => {
+        1 => TypeDesc::Int8,
+        2 => TypeDesc::Int16,
+        3 => TypeDesc::Int32,
+        4 => TypeDesc::Int64,
+        5 => TypeDesc::UInt8,
+        6 => TypeDesc::UInt16,
+        7 => TypeDesc::UInt32,
+        8 => TypeDesc::UInt64,
+        9 => TypeDesc::Float32,
+        10 => TypeDesc::Float64,
+        11 => TypeDesc::Bool,
+        12 => TypeDesc::String,
+        13 => {
             let id = ClassId(read_u32(r)?);
             let args = read_vec(r, |r| read_type(r))?;
             TypeDesc::Class(id, args)
         }
-        6 => TypeDesc::Null,
-        7 => TypeDesc::GenericParam(read_u32(r)?),
-        8 => TypeDesc::Enum(EnumId(read_u32(r)?)),
-        9 => TypeDesc::Tuple(read_vec(r, |r| read_type(r))?),
+        14 => TypeDesc::Null,
+        15 => TypeDesc::GenericParam(read_u32(r)?),
+        16 => TypeDesc::Enum(EnumId(read_u32(r)?)),
+        17 => TypeDesc::Tuple(read_vec(r, |r| read_type(r))?),
         _ => return Err(io::Error::new(io::ErrorKind::InvalidData, "bad type tag")),
     })
 }
@@ -333,15 +349,21 @@ fn write_op<W: Write>(w: &mut W, op: &Op) -> io::Result<()> {
     let (code, extra): (u8, Vec<u8>) = match op {
         Op::Nop => (0, vec![]),
         Op::LdInt(i) => (1, i.to_le_bytes().to_vec()),
-        Op::LdFloat(idx) => (2, idx.to_le_bytes().to_vec()),
-        Op::LdBool(b) => (3, vec![*b as u8]),
-        Op::LdStr(idx) => (4, idx.to_le_bytes().to_vec()),
-        Op::LdNull => (5, vec![]),
-        Op::Ldloc(idx) => (6, idx.to_le_bytes().to_vec()),
-        Op::Stloc(idx) => (7, idx.to_le_bytes().to_vec()),
-        Op::Ldarg(idx) => (8, idx.to_le_bytes().to_vec()),
-        Op::Dup => (9, vec![]),
-        Op::Pop => (10, vec![]),
+        Op::LdInt64(i) => (2, i.to_le_bytes().to_vec()),
+        Op::LdFloat(idx) => (3, idx.to_le_bytes().to_vec()),
+        Op::LdBool(b) => (4, vec![*b as u8]),
+        Op::LdStr(idx) => (5, idx.to_le_bytes().to_vec()),
+        Op::LdNull => (6, vec![]),
+        Op::Ldloc(idx) => (7, idx.to_le_bytes().to_vec()),
+        Op::Stloc(idx) => (8, idx.to_le_bytes().to_vec()),
+        Op::Ldarg(idx) => (9, idx.to_le_bytes().to_vec()),
+        Op::Dup => (10, vec![]),
+        Op::Pop => (11, vec![]),
+        Op::Conv(ty) => {
+            let mut v = Vec::new();
+            write_type(&mut v, ty)?;
+            (12, v)
+        }
         Op::Add => (20, vec![]),
         Op::Sub => (21, vec![]),
         Op::Mul => (22, vec![]),
@@ -410,15 +432,17 @@ fn read_op<R: Read>(r: &mut R) -> io::Result<Op> {
     Ok(match code {
         0 => Op::Nop,
         1 => Op::LdInt(read_i32(r)?),
-        2 => Op::LdFloat(read_u32(r)?),
-        3 => Op::LdBool(read_u8(r)? != 0),
-        4 => Op::LdStr(read_u32(r)?),
-        5 => Op::LdNull,
-        6 => Op::Ldloc(read_u16(r)?),
-        7 => Op::Stloc(read_u16(r)?),
-        8 => Op::Ldarg(read_u16(r)?),
-        9 => Op::Dup,
-        10 => Op::Pop,
+        2 => Op::LdInt64(read_i64(r)?),
+        3 => Op::LdFloat(read_u32(r)?),
+        4 => Op::LdBool(read_u8(r)? != 0),
+        5 => Op::LdStr(read_u32(r)?),
+        6 => Op::LdNull,
+        7 => Op::Ldloc(read_u16(r)?),
+        8 => Op::Stloc(read_u16(r)?),
+        9 => Op::Ldarg(read_u16(r)?),
+        10 => Op::Dup,
+        11 => Op::Pop,
+        12 => Op::Conv(read_type(r)?),
         20 => Op::Add,
         21 => Op::Sub,
         22 => Op::Mul,
@@ -547,33 +571,47 @@ fn read_i32<R: Read>(r: &mut R) -> io::Result<i32> {
     Ok(i32::from_le_bytes(b))
 }
 
+fn read_i64<R: Read>(r: &mut R) -> io::Result<i64> {
+    let mut b = [0u8; 8];
+    r.read_exact(&mut b)?;
+    Ok(i64::from_le_bytes(b))
+}
+
 fn encode_type_args(type_args: &[TypeDesc]) -> Vec<u8> {
     let mut v = Vec::new();
     v.extend((type_args.len() as u32).to_le_bytes());
     for arg in type_args {
         let tag: u8 = match arg {
             TypeDesc::Unit => 0,
-            TypeDesc::Int => 1,
-            TypeDesc::Float => 2,
-            TypeDesc::Bool => 3,
-            TypeDesc::String => 4,
+            TypeDesc::Int8 => 1,
+            TypeDesc::Int16 => 2,
+            TypeDesc::Int32 => 3,
+            TypeDesc::Int64 => 4,
+            TypeDesc::UInt8 => 5,
+            TypeDesc::UInt16 => 6,
+            TypeDesc::UInt32 => 7,
+            TypeDesc::UInt64 => 8,
+            TypeDesc::Float32 => 9,
+            TypeDesc::Float64 => 10,
+            TypeDesc::Bool => 11,
+            TypeDesc::String => 12,
             TypeDesc::Class(id, _) => {
                 v.extend(id.0.to_le_bytes());
-                5
+                13
             }
+            TypeDesc::Null => 14,
             TypeDesc::GenericParam(idx) => {
                 v.extend(idx.to_le_bytes());
-                7
+                15
             }
-            TypeDesc::Null => 6,
             TypeDesc::Enum(id) => {
                 v.extend(id.0.to_le_bytes());
-                8
+                16
             }
             TypeDesc::Tuple(_) => {
                 // For now, we don't support nested tuples in type args
                 // This could be extended in the future
-                9
+                17
             }
         };
         v.push(tag);
@@ -588,18 +626,26 @@ fn decode_type_args<R: Read>(r: &mut R) -> io::Result<Vec<TypeDesc>> {
         let tag = read_u8(r)?;
         let arg = match tag {
             0 => TypeDesc::Unit,
-            1 => TypeDesc::Int,
-            2 => TypeDesc::Float,
-            3 => TypeDesc::Bool,
-            4 => TypeDesc::String,
-            5 => {
+            1 => TypeDesc::Int8,
+            2 => TypeDesc::Int16,
+            3 => TypeDesc::Int32,
+            4 => TypeDesc::Int64,
+            5 => TypeDesc::UInt8,
+            6 => TypeDesc::UInt16,
+            7 => TypeDesc::UInt32,
+            8 => TypeDesc::UInt64,
+            9 => TypeDesc::Float32,
+            10 => TypeDesc::Float64,
+            11 => TypeDesc::Bool,
+            12 => TypeDesc::String,
+            13 => {
                 let id = ClassId(read_u32(r)?);
                 TypeDesc::Class(id, vec![])
             }
-            6 => TypeDesc::Null,
-            7 => TypeDesc::GenericParam(read_u32(r)?),
-            8 => TypeDesc::Enum(EnumId(read_u32(r)?)),
-            9 => TypeDesc::Tuple(vec![]), // Simplified: empty tuple for now
+            14 => TypeDesc::Null,
+            15 => TypeDesc::GenericParam(read_u32(r)?),
+            16 => TypeDesc::Enum(EnumId(read_u32(r)?)),
+            17 => TypeDesc::Tuple(vec![]), // Simplified: empty tuple for now
             _ => return Err(io::Error::new(io::ErrorKind::InvalidData, "bad type tag")),
         };
         args.push(arg);

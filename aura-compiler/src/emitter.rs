@@ -3,7 +3,7 @@
 //! Translates the typed AST into an Aura [`Module`].
 
 use crate::ast::*;
-use crate::typer::{ClassInfo, TypedProgram};
+use crate::typer::{promote, ClassInfo, TypedProgram};
 use aura_bytecode::{ClassDef, ClassId, EnumDef, EnumId, ExceptionHandler, FieldDef, MethodDef, MethodId, Module, Op, TypeDesc, VariantDef};
 use std::collections::HashMap;
 
@@ -1070,11 +1070,18 @@ impl<'a> MethodEmitter<'a> {
 
     fn emit_expr(&mut self, expr: &Expr) -> Result<(), String> {
         match expr {
-            Expr::Int(i) => self.ops.push(Op::LdInt(*i)),
-            Expr::Float(f) => {
+            Expr::IntLit(i, _) => self.emit_int_const(*i),
+            Expr::FloatLit(f, suffix) => {
                 let idx = self.constants.len() as u32;
                 self.constants.push(f.to_string());
                 self.ops.push(Op::LdFloat(idx));
+                if *suffix == FloatSuffix::F32 {
+                    self.ops.push(Op::Conv(TypeDesc::Float32));
+                }
+            }
+            Expr::Cast(inner, ty) => {
+                self.emit_expr(inner)?;
+                self.ops.push(Op::Conv(map_type(ty, self.class_ids, self.enum_ids, &[])));
             }
             Expr::Bool(b) => self.ops.push(Op::LdBool(*b)),
             Expr::String(s) => {
@@ -1254,6 +1261,17 @@ impl<'a> MethodEmitter<'a> {
                     BinOp::Or => Op::Or,
                 };
                 self.ops.push(emit_op);
+                // Arithmetic must re-narrow to the static result width: float32
+                // is re-rounded to single precision, and narrow ints wrap to
+                // their bit width (and are range-checked when overflow checking
+                // is enabled).
+                if matches!(op, BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Rem) {
+                    if let Ok(ty) = self.expr_ty(expr) {
+                        if let Some(td) = arith_conv(&ty) {
+                            self.ops.push(Op::Conv(td));
+                        }
+                    }
+                }
             }
             Expr::Unary(op, operand) => {
                 self.emit_expr(operand)?;
@@ -1261,6 +1279,13 @@ impl<'a> MethodEmitter<'a> {
                     UnaryOp::Neg => Op::Neg,
                     UnaryOp::Not => Op::Not,
                 });
+                if matches!(op, UnaryOp::Neg) {
+                    if let Ok(ty) = self.expr_ty(expr) {
+                        if let Some(td) = arith_conv(&ty) {
+                            self.ops.push(Op::Conv(td));
+                        }
+                    }
+                }
             }
             Expr::Call(call) => {
                 if call.class_or_target == "__intrinsics" {
@@ -1629,6 +1654,16 @@ impl<'a> MethodEmitter<'a> {
         Ok(())
     }
 
+    /// Push an integer constant, choosing the compact `LdInt` form for values
+    /// that fit in 32 bits and `LdInt64` otherwise.
+    fn emit_int_const(&mut self, v: i64) {
+        if v >= i32::MIN as i64 && v <= i32::MAX as i64 {
+            self.ops.push(Op::LdInt(v as i32));
+        } else {
+            self.ops.push(Op::LdInt64(v));
+        }
+    }
+
     fn local_index(&self, name: &str) -> Result<u16, String> {
         self.locals
             .iter()
@@ -1662,7 +1697,7 @@ impl<'a> MethodEmitter<'a> {
             Pattern::Wildcard => {}
             Pattern::Int(i) => {
                 self.ops.push(Op::Ldloc(subject_local));
-                self.ops.push(Op::LdInt(*i));
+                self.emit_int_const(*i);
                 self.ops.push(Op::Eq);
                 fail_jumps.push(self.ops.len());
                 self.ops.push(Op::BrFalse(0));
@@ -1878,8 +1913,29 @@ impl<'a> MethodEmitter<'a> {
     /// to be accurate enough to disambiguate overloads.
     fn expr_ty(&self, expr: &Expr) -> Result<Type, String> {
         let ty = match expr {
-            Expr::Int(_) => Type::Int,
-            Expr::Float(_) => Type::Float,
+            Expr::IntLit(v, suffix) => match suffix {
+                IntSuffix::None => {
+                    if *v >= i32::MIN as i64 && *v <= i32::MAX as i64 {
+                        Type::Int32
+                    } else {
+                        Type::Int64
+                    }
+                }
+                IntSuffix::I8 => Type::Int8,
+                IntSuffix::I16 => Type::Int16,
+                IntSuffix::I32 => Type::Int32,
+                IntSuffix::I64 => Type::Int64,
+                IntSuffix::U8 => Type::UInt8,
+                IntSuffix::U16 => Type::UInt16,
+                IntSuffix::U32 => Type::UInt32,
+                IntSuffix::U64 => Type::UInt64,
+            },
+            Expr::FloatLit(_, suffix) => match suffix {
+                FloatSuffix::None => Type::Float64,
+                FloatSuffix::F32 => Type::Float32,
+                FloatSuffix::F64 => Type::Float64,
+            },
+            Expr::Cast(_, ty) => ty.clone(),
             Expr::Bool(_) => Type::Bool,
             Expr::String(_) | Expr::InterpolatedString(_) => Type::String,
             Expr::Null => Type::Class("null".to_string(), Vec::new()),
@@ -1926,17 +1982,21 @@ impl<'a> MethodEmitter<'a> {
                     .collect::<Result<Vec<_>, _>>()?;
                 Type::Tuple(tys)
             }
-            Expr::Binary(op, _, _) => {
+            Expr::Binary(op, left, right) => {
                 match op {
                     BinOp::Eq | BinOp::Ne | BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge
                     | BinOp::And | BinOp::Or => Type::Bool,
-                    _ => Type::Int,
+                    _ => {
+                        let lt = self.expr_ty(left).unwrap_or(Type::Int32);
+                        let rt = self.expr_ty(right).unwrap_or(Type::Int32);
+                        promote(&lt, &rt).unwrap_or(Type::Int32)
+                    }
                 }
             }
-            Expr::Unary(op, _) => {
+            Expr::Unary(op, operand) => {
                 match op {
                     UnaryOp::Not => Type::Bool,
-                    UnaryOp::Neg => Type::Int,
+                    UnaryOp::Neg => self.expr_ty(operand).unwrap_or(Type::Int32),
                 }
             }
             Expr::Call(call) => {
@@ -1976,8 +2036,8 @@ impl<'a> MethodEmitter<'a> {
             method_name = call.method.clone();
         } else if call.class_or_target == "__intrinsics" {
             return match call.method.as_str() {
-                "int" => Ok(Type::Int),
-                "float" => Ok(Type::Float),
+                "int" => Ok(Type::Int32),
+                "float" => Ok(Type::Float64),
                 "string" => Ok(Type::String),
                 _ => Ok(Type::Unit),
             };
@@ -2009,8 +2069,8 @@ impl<'a> MethodEmitter<'a> {
         if target == source {
             return true;
         }
-        if matches!(target, Type::Int | Type::Float) && matches!(source, Type::Int | Type::Float) {
-            return true;
+        if target.is_numeric() && source.is_numeric() {
+            return self.numeric_widening(target, source);
         }
         match (target, source) {
             (Type::Class(name, _), Type::Class(source_name, _)) => {
@@ -2023,6 +2083,32 @@ impl<'a> MethodEmitter<'a> {
             (Type::Enum(a), Type::Enum(b)) => a == b,
             (Type::Class(name, _), Type::Enum(enum_name)) => name == enum_name,
             (Type::Enum(enum_name), Type::Class(name, _)) => name == enum_name,
+            _ => false,
+        }
+    }
+
+    /// Mirror of the type checker's implicit numeric widening rules.
+    fn numeric_widening(&self, target: &Type, source: &Type) -> bool {
+        use Type::*;
+        let bits = |t: &Type| match t {
+            Int8 | UInt8 => 8,
+            Int16 | UInt16 => 16,
+            Int32 | UInt32 | Float32 => 32,
+            Int64 | UInt64 | Float64 => 64,
+            _ => 0,
+        };
+        match (target, source) {
+            (Int8 | Int16 | Int32 | Int64, Int8 | Int16 | Int32 | Int64)
+            | (UInt8 | UInt16 | UInt32 | UInt64, UInt8 | UInt16 | UInt32 | UInt64) => {
+                bits(target) >= bits(source)
+            }
+            (Int8 | Int16 | Int32 | Int64, UInt8 | UInt16 | UInt32 | UInt64) => {
+                bits(target) > bits(source)
+            }
+            (UInt8 | UInt16 | UInt32 | UInt64, Int8 | Int16 | Int32 | Int64) => false,
+            (Float32 | Float64, Int8 | Int16 | Int32 | Int64)
+            | (Float32 | Float64, UInt8 | UInt16 | UInt32 | UInt64) => true,
+            (Float64, Float32) => true,
             _ => false,
         }
     }
@@ -2133,11 +2219,37 @@ impl<'a> MethodEmitter<'a> {
     }
 }
 
+/// The `Conv` target needed to re-narrow an arithmetic result to its static
+/// type. Native-width types (int64, uint64, float64) need no narrowing.
+fn arith_conv(ty: &Type) -> Option<TypeDesc> {
+    match ty {
+        Type::Int8 => Some(TypeDesc::Int8),
+        Type::Int16 => Some(TypeDesc::Int16),
+        Type::Int32 => Some(TypeDesc::Int32),
+        Type::UInt8 => Some(TypeDesc::UInt8),
+        Type::UInt16 => Some(TypeDesc::UInt16),
+        Type::UInt32 => Some(TypeDesc::UInt32),
+        Type::Float32 => Some(TypeDesc::Float32),
+        _ => None,
+    }
+}
+
 fn map_type(ty: &Type, class_ids: &HashMap<String, ClassId>, enum_ids: &HashMap<String, EnumId>, generic_params: &[aura_bytecode::GenericParam]) -> TypeDesc {
     match ty {
         Type::Unit => TypeDesc::Unit,
-        Type::Int => TypeDesc::Int,
-        Type::Float => TypeDesc::Float,
+        // Literal marker types only exist transiently during type checking and
+        // never reach code emission.
+        Type::IntLit(_) | Type::FloatLit(_) => TypeDesc::Int32,
+        Type::Int8 => TypeDesc::Int8,
+        Type::Int16 => TypeDesc::Int16,
+        Type::Int32 => TypeDesc::Int32,
+        Type::Int64 => TypeDesc::Int64,
+        Type::UInt8 => TypeDesc::UInt8,
+        Type::UInt16 => TypeDesc::UInt16,
+        Type::UInt32 => TypeDesc::UInt32,
+        Type::UInt64 => TypeDesc::UInt64,
+        Type::Float32 => TypeDesc::Float32,
+        Type::Float64 => TypeDesc::Float64,
         Type::Bool => TypeDesc::Bool,
         Type::String => TypeDesc::String,
         Type::Enum(name) => {

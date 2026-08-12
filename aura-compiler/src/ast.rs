@@ -206,15 +206,66 @@ pub struct Param {
     pub name: String,
 }
 
+/// Suffix applied to an integer literal, e.g. `42i8`, `5u32`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum IntSuffix {
+    /// No suffix: the literal type is inferred from its value (int if it fits
+    /// 32 bits, otherwise int64).
+    None,
+    /// `i8`
+    I8,
+    /// `i16`
+    I16,
+    /// `i32`
+    I32,
+    /// `i64`
+    I64,
+    /// `u8`
+    U8,
+    /// `u16`
+    U16,
+    /// `u32`
+    U32,
+    /// `u64`
+    U64,
+}
+
+/// Suffix applied to a float literal, e.g. `1.5f32`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum FloatSuffix {
+    /// No suffix: `float64`.
+    None,
+    /// `f32`
+    F32,
+    /// `f64`
+    F64,
+}
+
 /// Type annotation.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum Type {
     /// Unit / void.
     Unit,
-    /// 32-bit integer.
-    Int,
-    /// 64-bit float.
-    Float,
+    /// 8-bit signed integer.
+    Int8,
+    /// 16-bit signed integer.
+    Int16,
+    /// 32-bit signed integer.
+    Int32,
+    /// 64-bit signed integer.
+    Int64,
+    /// 8-bit unsigned integer.
+    UInt8,
+    /// 16-bit unsigned integer.
+    UInt16,
+    /// 32-bit unsigned integer.
+    UInt32,
+    /// 64-bit unsigned integer.
+    UInt64,
+    /// 32-bit floating point number.
+    Float32,
+    /// 64-bit floating point number.
+    Float64,
     /// Boolean.
     Bool,
     /// String.
@@ -227,6 +278,12 @@ pub enum Type {
     GenericParam(String),
     /// Tuple type (e.g., `(int, string)`).
     Tuple(Vec<Type>),
+    /// Untyped integer literal carrying its value. Only ever inferred; never
+    /// written in source. Used to allow literals to coerce to any integer type
+    /// whose range fits the value.
+    IntLit(i64),
+    /// Untyped float literal carrying its value. Only ever inferred.
+    FloatLit(f64),
 }
 
 impl Type {
@@ -234,8 +291,16 @@ impl Type {
     pub fn name(&self) -> String {
         match self {
             Type::Unit => "void".to_string(),
-            Type::Int => "int".to_string(),
-            Type::Float => "float".to_string(),
+            Type::Int8 => "int8".to_string(),
+            Type::Int16 => "int16".to_string(),
+            Type::Int32 => "int32".to_string(),
+            Type::Int64 => "int64".to_string(),
+            Type::UInt8 => "uint8".to_string(),
+            Type::UInt16 => "uint16".to_string(),
+            Type::UInt32 => "uint32".to_string(),
+            Type::UInt64 => "uint64".to_string(),
+            Type::Float32 => "float32".to_string(),
+            Type::Float64 => "float64".to_string(),
             Type::Bool => "bool".to_string(),
             Type::String => "string".to_string(),
             Type::Class(name, args) => {
@@ -250,7 +315,40 @@ impl Type {
             Type::Tuple(types) => {
                 format!("({})", types.iter().map(|t| t.name()).collect::<Vec<_>>().join(", "))
             }
+            Type::IntLit(v) => format!("int literal {}", v),
+            Type::FloatLit(_) => "float literal".to_string(),
         }
+    }
+
+    /// True if this is a signed integer type (not a literal marker).
+    pub fn is_signed_int(&self) -> bool {
+        matches!(
+            self,
+            Type::Int8 | Type::Int16 | Type::Int32 | Type::Int64
+        )
+    }
+
+    /// True if this is an unsigned integer type (not a literal marker).
+    pub fn is_unsigned_int(&self) -> bool {
+        matches!(
+            self,
+            Type::UInt8 | Type::UInt16 | Type::UInt32 | Type::UInt64
+        )
+    }
+
+    /// True if this is any integer type (not a literal marker).
+    pub fn is_int(&self) -> bool {
+        self.is_signed_int() || self.is_unsigned_int()
+    }
+
+    /// True if this is a floating point type (not a literal marker).
+    pub fn is_float(&self) -> bool {
+        matches!(self, Type::Float32 | Type::Float64)
+    }
+
+    /// True if this is any numeric type (not a literal marker).
+    pub fn is_numeric(&self) -> bool {
+        self.is_int() || self.is_float()
     }
 }
 
@@ -359,10 +457,12 @@ pub enum AssignTarget {
 /// Expression.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Expr {
-    /// Integer literal.
-    Int(i32),
-    /// Float literal.
-    Float(f64),
+    /// Integer literal with optional type suffix (e.g. `42`, `5u8`, `10i64`).
+    IntLit(i64, IntSuffix),
+    /// Float literal with optional type suffix (e.g. `1.5`, `1.5f32`).
+    FloatLit(f64, FloatSuffix),
+    /// Explicit numeric cast: `(int8)x` or `x as int8`.
+    Cast(Box<Expr>, Type),
     /// Boolean literal.
     Bool(bool),
     /// String literal.
@@ -438,7 +538,7 @@ pub struct MatchArm {
 #[derive(Debug, Clone, PartialEq)]
 pub enum Pattern {
     /// Integer literal pattern.
-    Int(i32),
+    Int(i64),
     /// Float literal pattern.
     Float(f64),
     /// Boolean literal pattern.

@@ -1,0 +1,79 @@
+class Program {
+    static void Main() {
+        // Implicit literal coercion into any fitting width.
+        int8 a = 5;
+        uint16 b = 300;
+        int64 big = 3000000000;
+        print(a);
+        println();
+        print(b);
+        println();
+        print(big);
+        println();
+
+        // Implicit widening between integer types.
+        int16 w = 300;
+        int32 x = w;
+        uint64 u = b;
+        print(x);
+        println();
+        print(u);
+        println();
+
+        // C-style cast: narrowing wraps.
+        int8 wrapped = (int8)(300);
+        print(wrapped);
+        println();
+
+        // Rust-style cast.
+        int8 asWrapped = 300 as int8;
+        print(asWrapped);
+        println();
+
+        // Suffixed literals.
+        int64 li = 10i64;
+        uint8 lu = 5u8;
+        int16 ls = -7i16;
+        print(li);
+        println();
+        print(lu);
+        println();
+        print(ls);
+        println();
+
+        // Float32 rounds to single precision.
+        float32 f = 0.1f32;
+        print(f);
+        println();
+
+        // Implicit int -> float widening.
+        float ff = 3;
+        print(ff);
+        println();
+
+        // int + float mixing promotes to float.
+        float mixed = 1 + 0.5;
+        print(mixed);
+        println();
+
+        // Mixed-width int promotion: int32 + uint32 -> int64.
+        int32 i32v = 1000000;
+        uint32 u32v = 2000000000;
+        int64 promoted = i32v + u32v;
+        print(promoted);
+        println();
+
+        // Casts between int and float.
+        int fromFloat = (int)(3.99);
+        print(fromFloat);
+        println();
+        float fromInt = 7 as float;
+        print(fromInt);
+        println();
+
+        // int8 arithmetic uses i8 semantics after narrowing via cast.
+        int8 n = 100 as int8 + 28 as int8;
+        print(n);
+        println();
+    }
+}

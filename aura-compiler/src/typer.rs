@@ -1321,10 +1321,10 @@ impl TypeChecker {
                         range_ty.name()
                     )));
                 }
-                // The loop variable must match the range element type (int for now)
-                if *var_type != Type::Int {
+                // The loop variable must be an integer type.
+                if !var_type.is_int() {
                     return Err(TypeError(format!(
-                        "for-in loop variable must be int, got {}",
+                        "for-in loop variable must be an integer, got {}",
                         var_type.name()
                     )));
                 }
@@ -1493,7 +1493,7 @@ impl TypeChecker {
                 }
             }
             Pattern::Range(start, end, _) => {
-                if expected_ty != &Type::Int && expected_ty != &Type::Float {
+                if !expected_ty.is_int() && !expected_ty.is_float() {
                     return Err(TypeError(format!(
                         "range pattern requires int or float subject, got {}",
                         expected_ty.name()
@@ -1501,20 +1501,27 @@ impl TypeChecker {
                 }
                 let start_ty = self.infer_expr(start, class, locals, in_instance, return_ty, generic_params)?;
                 let end_ty = self.infer_expr(end, class, locals, in_instance, return_ty, generic_params)?;
-                if start_ty != *expected_ty || end_ty != *expected_ty {
+                if !self.is_assignable(expected_ty, &start_ty) || !self.is_assignable(expected_ty, &end_ty) {
                     return Err(TypeError(format!(
                         "range pattern bounds must match subject type {}, got {} and {}",
                         expected_ty.name(), start_ty.name(), end_ty.name()
                     )));
                 }
             }
-            Pattern::Int(_) if expected_ty != &Type::Int => {
+            Pattern::Int(v) if !expected_ty.is_int() => {
                 return Err(TypeError(format!(
                     "integer pattern cannot match subject of type {}",
                     expected_ty.name()
                 )));
             }
-            Pattern::Float(_) if expected_ty != &Type::Float => {
+            Pattern::Int(v) if expected_ty.is_int() && !self.int_target_fits(expected_ty, *v) => {
+                return Err(TypeError(format!(
+                    "integer pattern {} does not fit subject type {}",
+                    v,
+                    expected_ty.name()
+                )));
+            }
+            Pattern::Float(_) if !expected_ty.is_float() => {
                 return Err(TypeError(format!(
                     "float pattern cannot match subject of type {}",
                     expected_ty.name()
@@ -1547,8 +1554,32 @@ impl TypeChecker {
         generic_params: &[GenericParam],
     ) -> Result<Type, TypeError> {
         match expr {
-            Expr::Int(_) => Ok(Type::Int),
-            Expr::Float(_) => Ok(Type::Float),
+            Expr::IntLit(v, suffix) => match suffix {
+                IntSuffix::None => Ok(Type::IntLit(*v)),
+                _ => self.suffixed_int_type(*suffix, *v),
+            },
+            Expr::FloatLit(v, suffix) => Ok(match suffix {
+                FloatSuffix::None => Type::FloatLit(*v),
+                FloatSuffix::F32 => Type::Float32,
+                FloatSuffix::F64 => Type::Float64,
+            }),
+            Expr::Cast(inner, ty) => {
+                let inner_ty = self.infer_expr(inner, class, locals, in_instance, return_ty, generic_params)?;
+                if !self.is_numeric(ty) {
+                    return Err(TypeError(format!(
+                        "cannot cast to non-numeric type {}",
+                        ty.name()
+                    )));
+                }
+                if !self.is_numeric(&inner_ty) {
+                    return Err(TypeError(format!(
+                        "cannot cast {} to {}",
+                        inner_ty.name(),
+                        ty.name()
+                    )));
+                }
+                Ok(ty.clone())
+            }
             Expr::Bool(_) => Ok(Type::Bool),
             Expr::String(_) => Ok(Type::String),
             Expr::InterpolatedString(parts) => {
@@ -1733,15 +1764,32 @@ impl TypeChecker {
                 }
             }
             Expr::Unary(op, operand) => {
-                let ty = self.infer_expr(operand, class, locals, in_instance, return_ty, generic_params)?;
                 match op {
                     UnaryOp::Neg => {
+                        // Fold negation into literals so `-128` can coerce to
+                        // int8 and negative suffixed literals are range-checked
+                        // against their folded value.
+                        if let Expr::IntLit(v, suffix) = operand.as_ref() {
+                            let neg = v.checked_neg().ok_or_else(|| {
+                                TypeError(format!("integer literal {} is too small to negate", v))
+                            })?;
+                            return self.suffixed_int_type(*suffix, neg);
+                        }
+                        if let Expr::FloatLit(f, suffix) = operand.as_ref() {
+                            return Ok(match suffix {
+                                FloatSuffix::None => Type::FloatLit(-f),
+                                FloatSuffix::F32 => Type::Float32,
+                                FloatSuffix::F64 => Type::Float64,
+                            });
+                        }
+                        let ty = self.infer_expr(operand, class, locals, in_instance, return_ty, generic_params)?;
                         if !self.is_numeric(&ty) {
                             return Err(TypeError(format!("cannot negate {}", ty.name())));
                         }
                         Ok(ty)
                     }
                     UnaryOp::Not => {
+                        let ty = self.infer_expr(operand, class, locals, in_instance, return_ty, generic_params)?;
                         if ty != Type::Bool {
                             return Err(TypeError("`!` requires bool".to_string()));
                         }
@@ -1986,13 +2034,13 @@ impl TypeChecker {
             Expr::Range(start, end, _inclusive) => {
                 let start_ty = self.infer_expr(start, class, locals, in_instance, return_ty, generic_params)?;
                 let end_ty = self.infer_expr(end, class, locals, in_instance, return_ty, generic_params)?;
-                if start_ty != Type::Int {
+                if !self.resolve_literal(&start_ty).is_int() {
                     return Err(TypeError(format!(
                         "range start must be an integer, got {}",
                         start_ty.name()
                     )));
                 }
-                if end_ty != Type::Int {
+                if !self.resolve_literal(&end_ty).is_int() {
                     return Err(TypeError(format!(
                         "range end must be an integer, got {}",
                         end_ty.name()
@@ -2502,28 +2550,98 @@ impl TypeChecker {
     }
 
     fn arithmetic_type(&self, a: &Type, b: &Type) -> Result<Type, TypeError> {
-        match (a, b) {
-            (Type::Int, Type::Int) => Ok(Type::Int),
-            (Type::Float, Type::Float) => Ok(Type::Float),
-            (Type::Int, Type::Float) | (Type::Float, Type::Int) => Ok(Type::Float),
-            _ => Err(TypeError(format!(
+        let a = self.resolve_literal(a);
+        let b = self.resolve_literal(b);
+        if !a.is_numeric() || !b.is_numeric() {
+            return Err(TypeError(format!(
                 "cannot operate on {} and {}",
                 a.name(),
                 b.name()
-            ))),
+            )));
+        }
+        Ok(promote(&a, &b).ok_or_else(|| {
+            TypeError(format!(
+                "cannot promote {} and {} to a common type",
+                a.name(),
+                b.name()
+            ))
+        })?)
+    }
+
+    /// True if this is any numeric type, including untyped literal markers.
+    fn is_numeric(&self, ty: &Type) -> bool {
+        matches!(
+            ty,
+            Type::Int8
+                | Type::Int16
+                | Type::Int32
+                | Type::Int64
+                | Type::UInt8
+                | Type::UInt16
+                | Type::UInt32
+                | Type::UInt64
+                | Type::Float32
+                | Type::Float64
+                | Type::IntLit(_)
+                | Type::FloatLit(_)
+        )
+    }
+
+    /// Map an untyped literal marker to its natural concrete type.
+    fn resolve_literal(&self, ty: &Type) -> Type {
+        match ty {
+            Type::IntLit(v) => {
+                if *v >= i32::MIN as i64 && *v <= i32::MAX as i64 {
+                    Type::Int32
+                } else {
+                    Type::Int64
+                }
+            }
+            Type::FloatLit(_) => Type::Float64,
+            _ => ty.clone(),
         }
     }
 
-    fn is_numeric(&self, ty: &Type) -> bool {
-        matches!(ty, Type::Int | Type::Float)
+    /// The concrete type of a suffixed integer literal, checking the value fits.
+    fn suffixed_int_type(&self, suffix: IntSuffix, value: i64) -> Result<Type, TypeError> {
+        let (ty, min, max) = match suffix {
+            IntSuffix::None => return Ok(Type::IntLit(value)),
+            IntSuffix::I8 => (Type::Int8, i8::MIN as i64, i8::MAX as i64),
+            IntSuffix::I16 => (Type::Int16, i16::MIN as i64, i16::MAX as i64),
+            IntSuffix::I32 => (Type::Int32, i32::MIN as i64, i32::MAX as i64),
+            IntSuffix::I64 => (Type::Int64, i64::MIN, i64::MAX),
+            IntSuffix::U8 => (Type::UInt8, 0, u8::MAX as i64),
+            IntSuffix::U16 => (Type::UInt16, 0, u16::MAX as i64),
+            IntSuffix::U32 => (Type::UInt32, 0, u32::MAX as i64),
+            IntSuffix::U64 => (Type::UInt64, 0, i64::MAX),
+        };
+        if value < min || value > max {
+            return Err(TypeError(format!(
+                "integer literal {} does not fit in {}",
+                value,
+                ty.name()
+            )));
+        }
+        Ok(ty)
     }
 
+    /// True if `source` can be implicitly converted to `target`. Numeric
+    /// conversions are widening-only; narrowing and float-to-int require an
+    /// explicit cast.
     fn is_assignable(&self, target: &Type, source: &Type) -> bool {
         if target == source {
             return true;
         }
+        // Untyped literals coerce to any numeric type whose range fits.
+        match (target, source) {
+            (target, Type::IntLit(v)) => {
+                return self.int_target_fits(target, *v);
+            }
+            (Type::Float32 | Type::Float64, Type::FloatLit(_)) => return true,
+            _ => {}
+        }
         if self.is_numeric(target) && self.is_numeric(source) {
-            return true;
+            return self.numeric_widening(target, source);
         }
         match (target, source) {
             (Type::Class(target_name, _), Type::Class(source_name, _)) => {
@@ -2539,6 +2657,60 @@ impl TypeChecker {
             (Type::Enum(a), Type::Enum(b)) => a == b,
             (Type::Class(name, _), Type::Enum(enum_name)) => name == enum_name,
             (Type::Enum(enum_name), Type::Class(name, _)) => name == enum_name,
+            (Type::Tuple(t_target), Type::Tuple(t_source)) => {
+                t_target.len() == t_source.len()
+                    && t_target
+                        .iter()
+                        .zip(t_source)
+                        .all(|(t, s)| self.is_assignable(t, s))
+            }
+            _ => false,
+        }
+    }
+
+    /// Whether an integer literal value fits in the target numeric type.
+    fn int_target_fits(&self, target: &Type, v: i64) -> bool {
+        match target {
+            Type::Int8 => v >= i8::MIN as i64 && v <= i8::MAX as i64,
+            Type::Int16 => v >= i16::MIN as i64 && v <= i16::MAX as i64,
+            Type::Int32 => v >= i32::MIN as i64 && v <= i32::MAX as i64,
+            Type::Int64 => true,
+            Type::UInt8 => v >= 0 && v <= u8::MAX as i64,
+            Type::UInt16 => v >= 0 && v <= u16::MAX as i64,
+            Type::UInt32 => v >= 0 && v <= u32::MAX as i64,
+            Type::UInt64 => v >= 0,
+            Type::Float32 | Type::Float64 => true,
+            _ => false,
+        }
+    }
+
+    /// Implicit widening rules for two concrete numeric types.
+    fn numeric_widening(&self, target: &Type, source: &Type) -> bool {
+        use Type::*;
+        let bits = |t: &Type| match t {
+            Int8 | UInt8 => 8,
+            Int16 | UInt16 => 16,
+            Int32 | UInt32 | Float32 => 32,
+            Int64 | UInt64 | Float64 => 64,
+            _ => 0,
+        };
+        match (target, source) {
+            // int -> int / uint -> uint: widening only.
+            (Int8 | Int16 | Int32 | Int64, Int8 | Int16 | Int32 | Int64)
+            | (UInt8 | UInt16 | UInt32 | UInt64, UInt8 | UInt16 | UInt32 | UInt64) => {
+                bits(target) >= bits(source)
+            }
+            // uint -> int: allowed only when the target is strictly wider.
+            (Int8 | Int16 | Int32 | Int64, UInt8 | UInt16 | UInt32 | UInt64) => {
+                bits(target) > bits(source)
+            }
+            // int -> uint: never implicit (a signed value can be negative).
+            (UInt8 | UInt16 | UInt32 | UInt64, Int8 | Int16 | Int32 | Int64) => false,
+            // int -> float.
+            (Float32 | Float64, Int8 | Int16 | Int32 | Int64) => true,
+            (Float32 | Float64, UInt8 | UInt16 | UInt32 | UInt64) => true,
+            // float32 -> float64 widening; float64 -> float32 needs a cast.
+            (Float64, Float32) => true,
             _ => false,
         }
     }
@@ -2587,5 +2759,74 @@ impl TypeChecker {
 impl Default for TypeChecker {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+/// Bit width of a concrete integer type.
+pub(crate) fn int_bits(ty: &Type) -> u8 {
+    match ty {
+        Type::Int8 | Type::UInt8 => 8,
+        Type::Int16 | Type::UInt16 => 16,
+        Type::Int32 | Type::UInt32 => 32,
+        Type::Int64 | Type::UInt64 => 64,
+        _ => 0,
+    }
+}
+
+/// Common type for a binary numeric operation.
+///
+/// Rules:
+/// - same sign family: the wider type wins;
+/// - equal bits but mixed signedness: promote to the next wider signed type
+///   (int8+uint8 -> int16, int32+uint32 -> int64); int64+uint64 cannot be
+///   promoted;
+/// - different bits, mixed signedness: a signed wider operand wins when it is
+///   strictly wider than the unsigned one; otherwise promote to a signed type
+///   wider than the unsigned operand;
+/// - any float operand wins, choosing the wider float.
+pub(crate) fn promote(a: &Type, b: &Type) -> Option<Type> {
+    if a.is_float() && b.is_float() {
+        return Some(if *a == Type::Float32 && *b == Type::Float32 {
+            Type::Float32
+        } else {
+            Type::Float64
+        });
+    }
+    if a.is_float() || b.is_float() {
+        return Some(if *a == Type::Float32 || *b == Type::Float32 {
+            Type::Float32
+        } else {
+            Type::Float64
+        });
+    }
+    let a_signed = a.is_signed_int();
+    let b_signed = b.is_signed_int();
+    let a_bits = int_bits(a);
+    let b_bits = int_bits(b);
+    if a_signed == b_signed {
+        return Some(if a_bits >= b_bits { a.clone() } else { b.clone() });
+    }
+    // Mixed signedness, equal bits.
+    if a_bits == b_bits {
+        return match a_bits {
+            64 => None,
+            32 => Some(Type::Int64),
+            16 => Some(Type::Int32),
+            _ => Some(Type::Int16),
+        };
+    }
+    // Mixed signedness, different bits.
+    let (wide, wide_signed) = if a_bits > b_bits { (a, a_signed) } else { (b, b_signed) };
+    if wide_signed {
+        Some(wide.clone())
+    } else {
+        // The wider operand is unsigned and cannot hold negatives; promote to
+        // a signed type strictly wider than it.
+        match int_bits(wide) {
+            64 => None,
+            32 => Some(Type::Int64),
+            16 => Some(Type::Int32),
+            _ => Some(Type::Int16),
+        }
     }
 }

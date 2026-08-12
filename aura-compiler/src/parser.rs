@@ -3,6 +3,23 @@
 use crate::ast::*;
 use crate::lexer::Token;
 
+/// Map a numeric type name to its AST type, or None if not a numeric type name.
+pub fn numeric_type_from_name(name: &str) -> Option<Type> {
+    Some(match name {
+        "int8" => Type::Int8,
+        "int16" => Type::Int16,
+        "int32" => Type::Int32,
+        "int64" => Type::Int64,
+        "uint8" => Type::UInt8,
+        "uint16" => Type::UInt16,
+        "uint32" => Type::UInt32,
+        "uint64" => Type::UInt64,
+        "float32" => Type::Float32,
+        "float64" => Type::Float64,
+        _ => return None,
+    })
+}
+
 /// Parser state.
 pub struct Parser<'a> {
     tokens: &'a [Token],
@@ -1122,9 +1139,82 @@ impl<'a> Parser<'a> {
         } else if self.match_token(Token::Bang) {
             let operand = self.parse_unary()?;
             Ok(Expr::Unary(UnaryOp::Not, Box::new(operand)))
+        } else if self.looks_like_cast() {
+            // C-style cast: (int8)expr
+            self.consume(Token::LParen, "expected `(`")?;
+            let ty = self.parse_type()?;
+            self.consume(Token::RParen, "expected `)`")?;
+            let operand = self.parse_unary()?;
+            Ok(Expr::Cast(Box::new(operand), ty))
         } else {
-            self.parse_call_or_field()
+            let mut expr = self.parse_call_or_field()?;
+            // Rust-style cast: expr as int8
+            while self.match_token(Token::As) {
+                let ty = self.parse_type()?;
+                expr = Expr::Cast(Box::new(expr), ty);
+            }
+            Ok(expr)
         }
+    }
+
+    /// True if the upcoming `(` starts a C-style cast, i.e. `(` type `)`
+    /// followed by an expression-starting token. Without this lookahead a
+    /// parenthesized expression would be ambiguous with a cast.
+    fn looks_like_cast(&self) -> bool {
+        if !self.check(Token::LParen) {
+            return false;
+        }
+        let mut pos = self.pos + 1;
+        while pos < self.tokens.len() && self.tokens[pos] == Token::Newline {
+            pos += 1;
+        }
+        // A type is a keyword type or an identifier (class / numeric type name).
+        let type_start = match self.tokens.get(pos) {
+            Some(Token::Void | Token::Int | Token::Float | Token::Bool | Token::String | Token::Ident(_)) => true,
+            _ => false,
+        };
+        if !type_start {
+            return false;
+        }
+        pos += 1;
+        // Skip generic type arguments if present.
+        if pos < self.tokens.len() && self.tokens[pos] == Token::Lt {
+            let mut depth = 1;
+            pos += 1;
+            while pos < self.tokens.len() && depth > 0 {
+                match self.tokens.get(pos) {
+                    Some(Token::Lt) => depth += 1,
+                    Some(Token::Gt) => depth -= 1,
+                    _ => {}
+                }
+                pos += 1;
+            }
+        }
+        if self.tokens.get(pos) != Some(&Token::RParen) {
+            return false;
+        }
+        pos += 1;
+        // The token after `)` must start an expression, not a binary operator,
+        // otherwise the parens are a grouping.
+        matches!(
+            self.tokens.get(pos),
+            Some(
+                Token::Ident(_)
+                    | Token::IntLit(_, _)
+                    | Token::FloatLit(_, _)
+                    | Token::StringLit(_)
+                    | Token::True
+                    | Token::False
+                    | Token::Null
+                    | Token::LParen
+                    | Token::Bang
+                    | Token::Minus
+                    | Token::New
+                    | Token::Match
+                    | Token::Super
+                    | Token::LBrace
+            )
+        )
     }
 
     fn parse_call_or_field(&mut self) -> Result<Expr, String> {
@@ -1134,12 +1224,12 @@ impl<'a> Parser<'a> {
                 // Check for tuple index access: .0, .1, etc.
                 // Also handle the case where the lexer produced a float literal like 0.0
                 let tuple_index = match self.peek() {
-                    Some(Token::IntLit(idx)) => {
+                    Some(Token::IntLit(idx, _)) => {
                         let idx = *idx as usize;
                         self.advance();
                         Some(idx)
                     }
-                    Some(Token::FloatLit(f)) => {
+                    Some(Token::FloatLit(f, _)) => {
                         // If we see a float like 0.0 after a dot, treat the integer part as the index
                         let idx = *f as usize;
                         self.advance();
@@ -1293,15 +1383,17 @@ impl<'a> Parser<'a> {
         }
 
         match self.peek() {
-            Some(Token::IntLit(i)) => {
-                let v = *i;
+            Some(Token::IntLit(v, suffix)) => {
+                let v = *v;
+                let suffix = *suffix;
                 self.advance();
-                Ok(Expr::Int(v))
+                Ok(Expr::IntLit(v, suffix))
             }
-            Some(Token::FloatLit(x)) => {
+            Some(Token::FloatLit(x, suffix)) => {
                 let v = *x;
+                let suffix = *suffix;
                 self.advance();
-                Ok(Expr::Float(v))
+                Ok(Expr::FloatLit(v, suffix))
             }
             Some(Token::StringLit(s)) => {
                 let v = s.clone();
@@ -1441,31 +1533,31 @@ impl<'a> Parser<'a> {
         if self.match_token(Token::False) {
             return Ok(Pattern::Bool(false));
         }
-        if let Some(Token::IntLit(i)) = self.peek() {
+        if let Some(Token::IntLit(i, _)) = self.peek() {
             let v = *i;
             self.advance();
             // Check for range pattern: 1..5 or 1..=5
             if self.match_token(Token::DotDot) {
                 let end = self.parse_pattern_expr()?;
-                return Ok(Pattern::Range(Box::new(Expr::Int(v)), Box::new(end), false));
+                return Ok(Pattern::Range(Box::new(Expr::IntLit(v, crate::ast::IntSuffix::None)), Box::new(end), false));
             }
             if self.match_token(Token::DotDotEq) {
                 let end = self.parse_pattern_expr()?;
-                return Ok(Pattern::Range(Box::new(Expr::Int(v)), Box::new(end), true));
+                return Ok(Pattern::Range(Box::new(Expr::IntLit(v, crate::ast::IntSuffix::None)), Box::new(end), true));
             }
             return Ok(Pattern::Int(v));
         }
-        if let Some(Token::FloatLit(x)) = self.peek() {
+        if let Some(Token::FloatLit(x, _)) = self.peek() {
             let v = *x;
             self.advance();
             // Check for range pattern
             if self.match_token(Token::DotDot) {
                 let end = self.parse_pattern_expr()?;
-                return Ok(Pattern::Range(Box::new(Expr::Float(v)), Box::new(end), false));
+                return Ok(Pattern::Range(Box::new(Expr::FloatLit(v, crate::ast::FloatSuffix::None)), Box::new(end), false));
             }
             if self.match_token(Token::DotDotEq) {
                 let end = self.parse_pattern_expr()?;
-                return Ok(Pattern::Range(Box::new(Expr::Float(v)), Box::new(end), true));
+                return Ok(Pattern::Range(Box::new(Expr::FloatLit(v, crate::ast::FloatSuffix::None)), Box::new(end), true));
             }
             return Ok(Pattern::Float(v));
         }
@@ -1520,15 +1612,17 @@ impl<'a> Parser<'a> {
 
     /// Parse an expression in a pattern context (limited to literals and simple expressions)
     fn parse_pattern_expr(&mut self) -> Result<Expr, String> {
-        if let Some(Token::IntLit(i)) = self.peek() {
+        if let Some(Token::IntLit(i, suffix)) = self.peek() {
             let v = *i;
+            let suffix = *suffix;
             self.advance();
-            return Ok(Expr::Int(v));
+            return Ok(Expr::IntLit(v, suffix));
         }
-        if let Some(Token::FloatLit(x)) = self.peek() {
+        if let Some(Token::FloatLit(x, suffix)) = self.peek() {
             let v = *x;
+            let suffix = *suffix;
             self.advance();
-            return Ok(Expr::Float(v));
+            return Ok(Expr::FloatLit(v, suffix));
         }
         if let Some(Token::Ident(name)) = self.peek() {
             let name = name.clone();
@@ -1561,11 +1655,11 @@ impl<'a> Parser<'a> {
             }
             Some(Token::Int) => {
                 self.advance();
-                Ok(Type::Int)
+                Ok(Type::Int32)
             }
             Some(Token::Float) => {
                 self.advance();
-                Ok(Type::Float)
+                Ok(Type::Float64)
             }
             Some(Token::Bool) => {
                 self.advance();
@@ -1596,6 +1690,9 @@ impl<'a> Parser<'a> {
             Some(Token::Ident(n)) => {
                 let n = n.clone();
                 self.advance();
+                if let Some(ty) = numeric_type_from_name(&n) {
+                    return Ok(ty);
+                }
                 // Check for type arguments
                 if self.check(Token::Lt) {
                     let args = self.parse_type_args()?;

@@ -1,5 +1,6 @@
 //! Lexer for Aura source code.
 
+use crate::ast::{FloatSuffix, IntSuffix};
 use std::fmt;
 
 /// Token produced by the lexer.
@@ -11,10 +12,10 @@ pub enum Token {
     Newline,
     /// Identifier or keyword.
     Ident(String),
-    /// Integer literal.
-    IntLit(i32),
-    /// Float literal.
-    FloatLit(f64),
+    /// Integer literal with optional type suffix.
+    IntLit(i64, IntSuffix),
+    /// Float literal with optional type suffix.
+    FloatLit(f64, FloatSuffix),
     /// String literal.
     StringLit(String),
     /// Start of string interpolation `{`
@@ -157,6 +158,8 @@ pub enum Token {
     Let,
     /// `with`
     With,
+    /// `as` (explicit cast).
+    As,
     /// `??`
     NullCoalesce,
     /// `?.`
@@ -169,8 +172,8 @@ impl fmt::Display for Token {
             Token::Eof => "EOF",
             Token::Newline => "newline",
             Token::Ident(n) => return write!(f, "identifier `{}`", n),
-            Token::IntLit(i) => return write!(f, "integer {}", i),
-            Token::FloatLit(x) => return write!(f, "float {}", x),
+            Token::IntLit(i, _) => return write!(f, "integer {}", i),
+            Token::FloatLit(x, _) => return write!(f, "float {}", x),
             Token::StringLit(s) => return write!(f, "string {:?}", s),
             Token::InterpStart => "`{` (interpolation)",
             Token::InterpEnd => "`}` (interpolation)",
@@ -241,6 +244,7 @@ impl fmt::Display for Token {
             Token::In => "`in`",
             Token::Let => "`let`",
             Token::With => "`with`",
+            Token::As => "`as`",
             Token::NullCoalesce => "`??`",
             Token::NullConditional => "`?.`",
         };
@@ -685,11 +689,11 @@ impl<'a> Lexer<'a> {
         if self.after_dot {
             let value = self
                 .current
-                .parse::<i32>()
+                .parse::<i64>()
                 .map_err(|e| self.error(&e.to_string()))?;
-            return Ok(Token::IntLit(value));
+            return Ok(Token::IntLit(value, IntSuffix::None));
         }
-        
+
         // Check if this is a float literal: . followed by a digit
         // But we need to handle tuple index chains like tuple.0.0
         // In that case, we want IntLit(0), Dot, IntLit(0), not IntLit(0), FloatLit(0.0)
@@ -716,7 +720,7 @@ impl<'a> Lexer<'a> {
                             }
                         }
                         // This is a tuple index chain, not a float
-                        return Ok(self.current.parse::<i32>().map(Token::IntLit).map_err(|e| self.error(&e.to_string()))?);
+                        return Ok(self.current.parse::<i64>().map(|v| Token::IntLit(v, IntSuffix::None)).map_err(|e| self.error(&e.to_string()))?);
                     } else {
                         // This is a normal float
                         break;
@@ -727,7 +731,7 @@ impl<'a> Lexer<'a> {
         } else {
             false
         };
-        
+
         if is_float {
             self.advance(); // consume the .
             while let Some(c) = self.peek() {
@@ -741,14 +745,52 @@ impl<'a> Lexer<'a> {
                 .current
                 .parse::<f64>()
                 .map_err(|e| self.error(&e.to_string()))?;
-            Ok(Token::FloatLit(value))
+            let suffix = self.read_numeric_suffix();
+            let suffix = match suffix.as_deref() {
+                None => FloatSuffix::None,
+                Some("f32") | Some("F32") => FloatSuffix::F32,
+                Some("f64") | Some("F64") => FloatSuffix::F64,
+                Some(other) => return Err(self.error(&format!("invalid float literal suffix `{}`", other))),
+            };
+            Ok(Token::FloatLit(value, suffix))
         } else {
             let value = self
                 .current
-                .parse::<i32>()
+                .parse::<i64>()
                 .map_err(|e| self.error(&e.to_string()))?;
-            Ok(Token::IntLit(value))
+            let suffix = self.read_numeric_suffix();
+            let suffix = match suffix.as_deref() {
+                None => IntSuffix::None,
+                Some("i8") | Some("I8") => IntSuffix::I8,
+                Some("i16") | Some("I16") => IntSuffix::I16,
+                Some("i32") | Some("I32") => IntSuffix::I32,
+                Some("i64") | Some("I64") => IntSuffix::I64,
+                Some("u8") | Some("U8") => IntSuffix::U8,
+                Some("u16") | Some("U16") => IntSuffix::U16,
+                Some("u32") | Some("U32") => IntSuffix::U32,
+                Some("u64") | Some("U64") => IntSuffix::U64,
+                Some(other) => return Err(self.error(&format!("invalid integer literal suffix `{}`", other))),
+            };
+            Ok(Token::IntLit(value, suffix))
         }
+    }
+
+    /// If the next characters form an alphabetic literal suffix (e.g. `u8`),
+    /// consume and return it. Otherwise return None.
+    fn read_numeric_suffix(&mut self) -> Option<String> {
+        if !self.peek().map_or(false, |c| c.is_ascii_alphabetic()) {
+            return None;
+        }
+        let mut s = String::new();
+        while let Some(c) = self.peek() {
+            if c.is_ascii_alphabetic() || c.is_ascii_digit() {
+                s.push(c);
+                self.advance();
+            } else {
+                break;
+            }
+        }
+        Some(s)
     }
 
     fn identifier(&mut self) -> Result<Token, String> {
@@ -801,6 +843,7 @@ impl<'a> Lexer<'a> {
             "in" => Token::In,
             "let" => Token::Let,
             "with" => Token::With,
+            "as" => Token::As,
             _ => Token::Ident(word.to_string()),
         })
     }
