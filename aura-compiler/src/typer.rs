@@ -81,6 +81,8 @@ pub struct ClassInfo {
     pub is_abstract: bool,
     /// Whether this is a sealed class (cannot be subclassed).
     pub is_sealed: bool,
+    /// Whether this is a record class (value semantics, structural equality).
+    pub is_record: bool,
     /// Super class name for single inheritance.
     pub super_class: Option<String>,
     /// Interfaces implemented (classes) or extended (interfaces).
@@ -227,6 +229,7 @@ impl TypeChecker {
                         is_interface: c.is_interface,
                         is_abstract: c.is_abstract,
                         is_sealed: c.is_sealed,
+                        is_record: c.is_record,
                         super_class: None,
                         interfaces: Vec::new(),
                         instance_fields: Vec::new(),
@@ -457,6 +460,36 @@ impl TypeChecker {
                             }
                         }
                     }
+                    if c.is_record {
+                        let existing_names: HashSet<String> = info
+                            .instance_fields
+                            .iter()
+                            .map(|(n, _)| n.clone())
+                            .chain(info.static_fields.iter().map(|(n, _)| n.clone()))
+                            .chain(info.properties.keys().cloned())
+                            .chain(info.static_properties.keys().cloned())
+                            .chain(info.methods.keys().cloned())
+                            .chain(info.static_methods.keys().cloned())
+                            .collect();
+                        for param in &c.record_params {
+                            if existing_names.contains(&param.name) {
+                                return Err(TypeError(format!(
+                                    "record `{}` already has a member named `{}`",
+                                    c.name, param.name
+                                )));
+                            }
+                            info.instance_fields.push((param.name.clone(), param.ty.clone()));
+                        }
+                        // The synthesized primary constructor is the default
+                        // overload used by `new` when no explicit constructor
+                        // is selected.
+                        let primary_params: Vec<Type> = c
+                            .record_params
+                            .iter()
+                            .map(|p| p.ty.clone())
+                            .collect();
+                        info.constructors.push(ConstructorInfo { params: primary_params });
+                    }
                     self.classes.insert(c.name.clone(), info);
                 }
                 Decl::Enum(e) => {
@@ -503,6 +536,11 @@ impl TypeChecker {
                     let is_interface = base_info.is_interface;
                     if is_interface {
                         interfaces.push(base.clone());
+                    } else if c.is_record {
+                        return Err(TypeError(format!(
+                            "record `{}` cannot inherit from class `{}`",
+                            c.name, base
+                        )));
                     } else if c.is_interface {
                         return Err(TypeError(format!(
                             "interface `{}` cannot extend class `{}`",
@@ -1416,6 +1454,44 @@ impl TypeChecker {
                     )?);
                 }
             }
+            Pattern::RecordClass(class_name, sub_patterns) => {
+                let info = self.classes.get(class_name).ok_or_else(|| {
+                    TypeError(format!("unknown class `{}`", class_name))
+                })?;
+                if !info.is_record {
+                    return Err(TypeError(format!(
+                        "`{}` is not a record class",
+                        class_name
+                    )));
+                }
+                let Type::Class(expected_name, _) = expected_ty else {
+                    return Err(TypeError(format!(
+                        "cannot match record `{}` against value of type `{}`",
+                        class_name,
+                        expected_ty.name()
+                    )));
+                };
+                if expected_name != class_name {
+                    return Err(TypeError(format!(
+                        "record pattern `{}` cannot match value of type `{}`",
+                        class_name,
+                        expected_ty.name()
+                    )));
+                }
+                if sub_patterns.len() != info.instance_fields.len() {
+                    return Err(TypeError(format!(
+                        "record `{}` has {} fields but pattern has {} sub-patterns",
+                        class_name,
+                        info.instance_fields.len(),
+                        sub_patterns.len()
+                    )));
+                }
+                for (sub, (_, field_ty)) in sub_patterns.iter().zip(info.instance_fields.iter()) {
+                    bindings.extend(self.check_pattern(
+                        sub, field_ty, class, locals, in_instance, return_ty, generic_params,
+                    )?);
+                }
+            }
             Pattern::Range(start, end, _) => {
                 if expected_ty != &Type::Int && expected_ty != &Type::Float {
                     return Err(TypeError(format!(
@@ -2001,6 +2077,45 @@ impl TypeChecker {
                     )));
                 }
                 Ok(ty)
+            }
+            Expr::With(obj, updates) => {
+                let obj_ty = self.infer_expr(obj, class, locals, in_instance, return_ty, generic_params)?;
+                let Type::Class(class_name, _) = &obj_ty else {
+                    return Err(TypeError(format!(
+                        "`with` requires a record value, got {}",
+                        obj_ty.name()
+                    )));
+                };
+                let info = self.classes.get(class_name).ok_or_else(|| {
+                    TypeError(format!("unknown class `{}`", class_name))
+                })?;
+                if !info.is_record {
+                    return Err(TypeError(format!(
+                        "`with` requires a record value, got {}",
+                        obj_ty.name()
+                    )));
+                }
+                for (field, value) in updates {
+                    let field_ty = info
+                        .instance_fields
+                        .iter()
+                        .find(|(n, _)| n == field)
+                        .map(|(_, t)| t.clone())
+                        .ok_or_else(|| {
+                            TypeError(format!("record `{}` has no field `{}`", class_name, field))
+                        })?;
+                    let value_ty = self.infer_expr(value, class, locals, in_instance, return_ty, generic_params)?;
+                    if !self.is_assignable(&field_ty, &value_ty) {
+                        return Err(TypeError(format!(
+                            "cannot assign {} to record field `{}.{}` of type {}",
+                            value_ty.name(),
+                            class_name,
+                            field,
+                            field_ty.name()
+                        )));
+                    }
+                }
+                Ok(obj_ty)
             }
             Expr::Block(stmts) => {
                 // Block locals are scoped to the block and do not leak out.

@@ -53,7 +53,6 @@ pub fn compile_module(source: &str, name: &str) -> Result<Module, CompileError> 
 /// Helper to build a minimal module directly from a method body.
 /// Useful for VM tests that bypass the compiler.
 pub fn synthetic_module(body: Vec<aura_bytecode::Op>) -> Module {
-    use aura_bytecode::Op;
     let program_class = ClassDef {
         name: "Program".to_string(),
         generic_params: vec![],
@@ -61,6 +60,7 @@ pub fn synthetic_module(body: Vec<aura_bytecode::Op>) -> Module {
         interfaces: vec![],
         is_interface: false,
         is_abstract: false,
+        is_record: false,
         fields: vec![],
         static_fields: vec![],
         methods: HashMap::new(),

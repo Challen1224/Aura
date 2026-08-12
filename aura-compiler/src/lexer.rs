@@ -133,6 +133,8 @@ pub enum Token {
     Internal,
     /// `interface`
     Interface,
+    /// `record`
+    Record,
     /// `abstract`
     Abstract,
     /// `sealed`
@@ -153,6 +155,8 @@ pub enum Token {
     In,
     /// `let`
     Let,
+    /// `with`
+    With,
     /// `??`
     NullCoalesce,
     /// `?.`
@@ -225,6 +229,7 @@ impl fmt::Display for Token {
             Token::Private => "`private`",
             Token::Internal => "`internal`",
             Token::Interface => "`interface`",
+            Token::Record => "`record`",
             Token::Abstract => "`abstract`",
             Token::Sealed => "`sealed`",
             Token::Final => "`final`",
@@ -235,6 +240,7 @@ impl fmt::Display for Token {
             Token::Using => "`using`",
             Token::In => "`in`",
             Token::Let => "`let`",
+            Token::With => "`with`",
             Token::NullCoalesce => "`??`",
             Token::NullConditional => "`?.`",
         };
@@ -783,6 +789,7 @@ impl<'a> Lexer<'a> {
             "private" => Token::Private,
             "internal" => Token::Internal,
             "interface" => Token::Interface,
+            "record" => Token::Record,
             "abstract" => Token::Abstract,
             "sealed" => Token::Sealed,
             "final" => Token::Final,
@@ -793,6 +800,7 @@ impl<'a> Lexer<'a> {
             "using" => Token::Using,
             "in" => Token::In,
             "let" => Token::Let,
+            "with" => Token::With,
             _ => Token::Ident(word.to_string()),
         })
     }

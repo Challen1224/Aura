@@ -1,0 +1,43 @@
+record Point(int x, int y);
+
+class Program {
+    static void Main() {
+        Point a = new Point(3, 4);
+        Point b = new Point(3, 4);
+        Point c = new Point(5, 6);
+
+        print(a.x);
+        println();
+        print(a.y);
+        println();
+
+        if (a == b) {
+            print("a equals b");
+            println();
+        } else {
+            print("a differs from b");
+            println();
+        }
+
+        if (a != c) {
+            print("a differs from c");
+            println();
+        }
+
+        Point moved = a with { x = 10 };
+        print(moved.x);
+        println();
+        print(moved.y);
+        println();
+
+        Point p = moved with { y = 2 };
+        if let Point(10, v) = p {
+            print("matched y = ");
+            print(v);
+            println();
+        } else {
+            print("no match");
+            println();
+        }
+    }
+}

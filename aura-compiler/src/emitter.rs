@@ -121,6 +121,14 @@ impl Emitter {
                         Member::Field(_) => {}
                     }
                 }
+                // The record primary constructor is synthesized by the type
+                // checker (last entry in `info.constructors`); give it an id so
+                // `new` and `: this(...)` resolution line up with the checker.
+                if class.is_record {
+                    let id = MethodId(self.next_method_id);
+                    self.next_method_id += 1;
+                    constructor_ids.entry(class.name.clone()).or_default().push(id);
+                }
             }
         }
 
@@ -262,6 +270,25 @@ impl Emitter {
                     }
                 }
 
+                // Emit the synthesized record primary constructor: it assigns
+                // each record parameter to its backing instance field.
+                if class.is_record {
+                    let primary = record_primary_constructor(class);
+                    let primary_id = constructor_ids
+                        .get(&class.name)
+                        .and_then(|ids| ids.get(info.constructors.len() - 1))
+                        .copied()
+                        .ok_or_else(|| {
+                            format!("missing primary constructor id for record `{}`", class.name)
+                        })?;
+                    let (_, method_def) = self.build_method_def(
+                        program, class, &primary, info, class_id, primary_id, &method_ids,
+                        &class_ids, &enum_ids, &field_layouts,
+                        &class_generic_params, &constructor_ids, &mut module,
+                    )?;
+                    methods.insert(primary_id, method_def);
+                }
+
                 module.classes.insert(
                     class_id,
                     ClassDef {
@@ -271,6 +298,7 @@ impl Emitter {
                         interfaces: info.interfaces.iter().map(|n| *class_ids.get(n).unwrap()).collect(),
                         is_interface: info.is_interface,
                         is_abstract: info.is_abstract,
+                        is_record: info.is_record,
                         fields,
                         static_fields,
                         methods,
@@ -393,6 +421,36 @@ fn property_accessor_decl(class_name: String, p: &PropertyDecl, is_getter: bool)
         } else {
             vec![Param { ty: p.ty.clone(), name: "value".to_string() }]
         },
+        body,
+    }
+}
+
+/// Build the synthetic `MethodDecl` for a record's primary constructor: it
+/// assigns each record parameter to the instance field with the same name.
+fn record_primary_constructor(class: &ClassDecl) -> MethodDecl {
+    let body: Vec<Stmt> = class
+        .record_params
+        .iter()
+        .map(|p| {
+            Stmt::Assign(
+                AssignTarget::Field(Box::new(Expr::Var("this".to_string())), p.name.clone()),
+                Expr::Var(p.name.clone()),
+            )
+        })
+        .collect();
+    MethodDecl {
+        is_static: false,
+        visibility: Visibility::Public,
+        is_virtual: false,
+        is_override: false,
+        is_abstract: false,
+        is_final: false,
+        is_constructor: true,
+        constructor_chain: None,
+        generic_params: Vec::new(),
+        return_ty: Type::Unit,
+        name: class.name.clone(),
+        params: class.record_params.clone(),
         body,
     }
 }
@@ -1161,6 +1219,22 @@ impl<'a> MethodEmitter<'a> {
             Expr::Binary(op, left, right) => {
                 self.emit_expr(left)?;
                 self.emit_expr(right)?;
+                if matches!(op, BinOp::Eq | BinOp::Ne) {
+                    // Records compare by value (deep structural equality); strings
+                    // compare by content (the identity-based `Eq` cannot handle
+                    // string vs string).
+                    let value_eq = matches!((self.expr_ty(left), self.expr_ty(right)),
+                        (Ok(l), Ok(r))
+                            if self.is_record_type(&l) || self.is_record_type(&r)
+                                || matches!(&l, Type::String) || matches!(&r, Type::String));
+                    if value_eq {
+                        self.ops.push(Op::ValueEq);
+                        if matches!(op, BinOp::Ne) {
+                            self.ops.push(Op::Not);
+                        }
+                        return Ok(());
+                    }
+                }
                 let emit_op = match op {
                     BinOp::Add => Op::Add,
                     BinOp::Sub => Op::Sub,
@@ -1496,6 +1570,38 @@ impl<'a> MethodEmitter<'a> {
                 // Pop the temporary local
                 self.locals.pop();
             }
+            Expr::With(obj, updates) => {
+                let obj_class = self.expr_class(obj).or_else(|| match self.expr_ty(obj) {
+                    Ok(Type::Class(c, _)) => Some(c),
+                    _ => None,
+                }).ok_or_else(|| "cannot determine record type of `with` operand".to_string())?;
+                let class_id = *self.class_ids.get(&obj_class)
+                    .ok_or_else(|| format!("unknown class `{}`", obj_class))?;
+                let layout = self.field_layout.get(&obj_class).cloned()
+                    .ok_or_else(|| format!("unknown field layout for `{}`", obj_class))?;
+
+                // Copy the source record into a fresh instance, then override
+                // the listed fields.
+                self.emit_expr(obj)?;
+                let src_local = self.push_local("__with_src".to_string()) as u16;
+                self.ops.push(Op::Stloc(src_local));
+                self.ops.push(Op::NewObj(class_id, vec![]));
+                let new_local = self.push_local("__with_new".to_string()) as u16;
+                self.ops.push(Op::Stloc(new_local));
+                for (i, _) in layout.iter().enumerate() {
+                    self.ops.push(Op::Ldloc(src_local));
+                    self.ops.push(Op::Ldfld(i as u16));
+                    self.ops.push(Op::Ldloc(new_local));
+                    self.ops.push(Op::Stfld(i as u16));
+                }
+                for (field, value) in updates {
+                    let idx = self.field_index_for(&obj_class, field)?;
+                    self.emit_expr(value)?;
+                    self.ops.push(Op::Ldloc(new_local));
+                    self.ops.push(Op::Stfld(idx));
+                }
+                self.ops.push(Op::Ldloc(new_local));
+            }
             Expr::Block(stmts) => {
                 let start_locals = self.locals.len();
                 let mut iter = stmts.iter().peekable();
@@ -1582,7 +1688,7 @@ impl<'a> MethodEmitter<'a> {
                 self.constants.push(s.clone());
                 self.ops.push(Op::Ldloc(subject_local));
                 self.ops.push(Op::LdStr(idx));
-                self.ops.push(Op::Eq);
+                self.ops.push(Op::ValueEq);
                 fail_jumps.push(self.ops.len());
                 self.ops.push(Op::BrFalse(0));
             }
@@ -1618,6 +1724,21 @@ impl<'a> MethodEmitter<'a> {
                     let field_local = self.push_local("__pattern_field".to_string()) as u16;
                     self.ops.push(Op::Ldloc(subject_local));
                     self.ops.push(Op::EnumField(i as u16));
+                    self.ops.push(Op::Stloc(field_local));
+                    self.emit_pattern(sub, field_local, fail_jumps)?;
+                }
+            }
+            Pattern::RecordClass(class_name, sub_patterns) => {
+                let info = self.program.classes.get(class_name).ok_or_else(|| {
+                    format!("unknown class `{}`", class_name)
+                })?;
+                if !info.is_record {
+                    return Err(format!("`{}` is not a record class", class_name));
+                }
+                for (i, sub) in sub_patterns.iter().enumerate() {
+                    let field_local = self.push_local("__pattern_field".to_string()) as u16;
+                    self.ops.push(Op::Ldloc(subject_local));
+                    self.ops.push(Op::Ldfld(i as u16));
                     self.ops.push(Op::Stloc(field_local));
                     self.emit_pattern(sub, field_local, fail_jumps)?;
                 }
@@ -1746,6 +1867,12 @@ impl<'a> MethodEmitter<'a> {
         }
     }
 
+    /// Whether a type is a record class.
+    fn is_record_type(&self, ty: &Type) -> bool {
+        matches!(ty, Type::Class(name, _)
+            if self.program.classes.get(name).map(|c| c.is_record).unwrap_or(false))
+    }
+
     /// Lightweight expression type inference for constructor argument matching.
     /// The type checker has already validated the program, so this only needs
     /// to be accurate enough to disambiguate overloads.
@@ -1767,6 +1894,7 @@ impl<'a> MethodEmitter<'a> {
                 }
             }
             Expr::New(class_name, type_args, _) => Type::Class(class_name.clone(), type_args.clone()),
+            Expr::With(obj, _) => self.expr_ty(obj)?,
             Expr::Field(obj, name) => {
                 let owner = self.expr_class(obj).ok_or_else(|| {
                     format!("cannot determine type of field target `{}`", name)

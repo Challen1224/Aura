@@ -255,6 +255,8 @@ pub struct ClassDef {
     pub is_interface: bool,
     /// Whether this class is abstract (cannot be instantiated).
     pub is_abstract: bool,
+    /// Whether this is a record class (value semantics, structural equality).
+    pub is_record: bool,
     /// Instance fields in layout order (base class fields first, then own).
     pub fields: Vec<FieldDef>,
     /// Static fields declared by this class (not inherited).
@@ -424,6 +426,10 @@ pub enum Op {
     Neg,
     /// Bitwise/comparison equals.
     Eq,
+    /// Deep structural value equality (used for record classes).
+    ValueEq,
+    /// Hash the top value (record-aware structural hash).
+    Hash,
     /// Less than.
     Lt,
     /// Less than or equal.

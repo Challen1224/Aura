@@ -53,6 +53,11 @@ pub struct ClassDecl {
     pub is_abstract: bool,
     /// Whether this is a sealed class (cannot be subclassed).
     pub is_sealed: bool,
+    /// Whether this is a record class (value semantics, immutable data class).
+    pub is_record: bool,
+    /// Primary constructor parameters of a record (synthesized into read-only
+    /// positional properties). Empty for regular classes.
+    pub record_params: Vec<Param>,
     /// Member declarations.
     pub members: Vec<Member>,
 }
@@ -402,6 +407,9 @@ pub enum Expr {
     SuperCall(String, Vec<Expr>),
     /// Base class field access from a subclass method: `super.field`.
     SuperField(String),
+    /// Record copy-with expression: `p with { x = 5, y = 6 }` produces a copy
+    /// of a record with the listed fields replaced.
+    With(Box<Expr>, Vec<(String, Expr)>),
     /// Block expression: `{ stmts }` evaluates to the last expression's value.
     Block(Vec<Stmt>),
 }
@@ -443,6 +451,8 @@ pub enum Pattern {
     Wildcard,
     /// Enum variant pattern with nested sub-patterns: `Some(Point(1, 2))`.
     EnumVariant(String, String, Vec<Pattern>),
+    /// Record pattern with positional sub-patterns: `Point(1, y)`.
+    RecordClass(String, Vec<Pattern>),
     /// Binding pattern: bind matched value to a name.
     Binding(String),
     /// Range pattern: `1..=5` or `1..5`.

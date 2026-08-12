@@ -74,6 +74,7 @@ fn write_class<W: Write>(w: &mut W, class: &ClassDef) -> io::Result<()> {
     write_vec(w, &class.interfaces, |w, i| write_u32(w, i.0))?;
     write_u8(w, class.is_interface as u8)?;
     write_u8(w, class.is_abstract as u8)?;
+    write_u8(w, class.is_record as u8)?;
     write_vec(w, &class.fields, |w, f| write_field(w, f))?;
     write_vec(w, &class.static_fields, |w, f| write_field(w, f))?;
 
@@ -103,6 +104,7 @@ fn read_class<R: Read>(r: &mut R) -> io::Result<ClassDef> {
     let interfaces = read_vec(r, |r| Ok(ClassId(read_u32(r)?)))?;
     let is_interface = read_u8(r)? != 0;
     let is_abstract = read_u8(r)? != 0;
+    let is_record = read_u8(r)? != 0;
     let fields = read_vec(r, |r| read_field(r))?;
     let static_fields = read_vec(r, |r| read_field(r))?;
 
@@ -126,6 +128,7 @@ fn read_class<R: Read>(r: &mut R) -> io::Result<ClassDef> {
         interfaces,
         is_interface,
         is_abstract,
+        is_record,
         fields,
         static_fields,
         methods,
@@ -346,6 +349,8 @@ fn write_op<W: Write>(w: &mut W, op: &Op) -> io::Result<()> {
         Op::Rem => (24, vec![]),
         Op::Neg => (25, vec![]),
         Op::Eq => (30, vec![]),
+        Op::ValueEq => (38, vec![]),
+        Op::Hash => (39, vec![]),
         Op::Lt => (31, vec![]),
         Op::Le => (32, vec![]),
         Op::Gt => (33, vec![]),
@@ -421,6 +426,8 @@ fn read_op<R: Read>(r: &mut R) -> io::Result<Op> {
         24 => Op::Rem,
         25 => Op::Neg,
         30 => Op::Eq,
+        38 => Op::ValueEq,
+        39 => Op::Hash,
         31 => Op::Lt,
         32 => Op::Le,
         33 => Op::Gt,

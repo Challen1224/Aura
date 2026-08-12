@@ -8,10 +8,20 @@
 
 pub mod heap;
 
-use aura_bytecode::{AuraObject, ClassId, EnumId, ExceptionHandler, MethodDef, MethodId, Module, Op, TypeDesc, Value};
+use aura_bytecode::{AuraObject, ClassId, EnumId, ExceptionHandler, GcRef, MethodDef, MethodId, Module, Op, TypeDesc, Value};
 use heap::{Heap, HeapError};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
+
+/// FNV-1a 32-bit hash of a string, used for string hashing.
+fn fnv_hash(s: &str) -> i32 {
+    let mut h: u32 = 0x811c_9dc5;
+    for byte in s.as_bytes() {
+        h ^= *byte as u32;
+        h = h.wrapping_mul(0x0100_0193);
+    }
+    h as i32
+}
 
 /// Default (zero) value for a field of the given type.
 fn default_value(ty: &TypeDesc) -> Value {
@@ -345,6 +355,17 @@ impl Vm {
                 }
 
                 Op::Eq => self.compare_eq()?,
+                Op::ValueEq => {
+                    let b = self.pop()?;
+                    let a = self.pop()?;
+                    let res = self.value_eq(&a, &b);
+                    self.push(Value::Bool(res));
+                }
+                Op::Hash => {
+                    let v = self.pop()?;
+                    let h = self.value_hash(&v);
+                    self.push(Value::Int(h));
+                }
                 Op::Lt => self.compare_int_float(|a, b| a < b, |a, b| a < b)?,
                 Op::Le => self.compare_int_float(|a, b| a <= b, |a, b| a <= b)?,
                 Op::Gt => self.compare_int_float(|a, b| a > b, |a, b| a > b)?,
@@ -790,6 +811,122 @@ impl Vm {
         };
         self.push(res);
         Ok(())
+    }
+
+    /// Deep structural equality. Record instances compare field-by-field;
+    /// non-record objects compare by identity; strings compare by content.
+    fn value_eq(&self, a: &Value, b: &Value) -> bool {
+        match (a, b) {
+            (Value::Int(a), Value::Int(b)) => a == b,
+            (Value::Float(a), Value::Float(b)) => a == b,
+            (Value::Bool(a), Value::Bool(b)) => a == b,
+            (Value::Null, Value::Null) => true,
+            (Value::Null, _) | (_, Value::Null) => false,
+            (Value::String(a), Value::String(b)) => {
+                self.heap.get_string(*a) == self.heap.get_string(*b)
+            }
+            (Value::Object(a), Value::Object(b)) => self.object_value_eq(*a, *b),
+            (Value::Enum(e1, v1, f1), Value::Enum(e2, v2, f2)) => {
+                e1 == e2
+                    && v1 == v2
+                    && f1.len() == f2.len()
+                    && f1.iter().zip(f2.iter()).all(|(x, y)| self.value_eq(x, y))
+            }
+            (Value::Tuple(t1), Value::Tuple(t2)) => {
+                t1.len() == t2.len()
+                    && t1.iter().zip(t2.iter()).all(|(x, y)| self.value_eq(x, y))
+            }
+            _ => false,
+        }
+    }
+
+    /// Structural equality of two object handles.
+    fn object_value_eq(&self, a: GcRef, b: GcRef) -> bool {
+        if a == b {
+            return true;
+        }
+        match (self.heap.get(a), self.heap.get(b)) {
+            (Ok(AuraObject::String(s1)), Ok(AuraObject::String(s2))) => s1 == s2,
+            (
+                Ok(AuraObject::Instance {
+                    class_id: c1,
+                    fields: f1,
+                }),
+                Ok(AuraObject::Instance {
+                    class_id: c2,
+                    fields: f2,
+                }),
+            ) => {
+                if c1 != c2 {
+                    return false;
+                }
+                let is_record = self
+                    .module
+                    .classes
+                    .get(c1)
+                    .map(|c| c.is_record)
+                    .unwrap_or(false);
+                if !is_record {
+                    return false;
+                }
+                f1.len() == f2.len()
+                    && f1.iter().zip(f2.iter()).all(|(x, y)| self.value_eq(x, y))
+            }
+            _ => false,
+        }
+    }
+
+    /// Structural hash of a value. Record instances hash over their fields;
+    /// strings hash by content; non-record objects hash by identity.
+    fn value_hash(&self, v: &Value) -> i32 {
+        match v {
+            Value::Int(i) => *i,
+            Value::Float(f) => f.to_bits() as i32,
+            Value::Bool(b) => *b as i32,
+            Value::Null | Value::Unit => 0,
+            Value::String(s) => self.heap.get_string(*s).map(fnv_hash).unwrap_or(0),
+            Value::Object(handle) => self.object_value_hash(*handle),
+            Value::Enum(eid, vid, fields) => {
+                let mut h = 17i32;
+                h = h.wrapping_mul(31).wrapping_add(*eid as i32);
+                h = h.wrapping_mul(31).wrapping_add(*vid as i32);
+                for f in fields {
+                    h = h.wrapping_mul(31).wrapping_add(self.value_hash(f));
+                }
+                h
+            }
+            Value::Tuple(elements) => {
+                let mut h = 17i32;
+                for e in elements {
+                    h = h.wrapping_mul(31).wrapping_add(self.value_hash(e));
+                }
+                h
+            }
+        }
+    }
+
+    /// Structural hash of an object handle.
+    fn object_value_hash(&self, handle: GcRef) -> i32 {
+        match self.heap.get(handle) {
+            Ok(AuraObject::String(s)) => fnv_hash(s),
+            Ok(AuraObject::Instance { class_id, fields }) => {
+                let is_record = self
+                    .module
+                    .classes
+                    .get(class_id)
+                    .map(|c| c.is_record)
+                    .unwrap_or(false);
+                if !is_record {
+                    return handle.0 as i32;
+                }
+                let mut h = 17i32;
+                for f in fields {
+                    h = h.wrapping_mul(31).wrapping_add(self.value_hash(f));
+                }
+                h
+            }
+            _ => handle.0 as i32,
+        }
     }
 
     fn compare_int_float<FI, FF>(&mut self, int_op: FI, float_op: FF) -> Result<(), VmError>

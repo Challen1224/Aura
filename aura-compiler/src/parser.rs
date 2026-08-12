@@ -35,8 +35,10 @@ impl<'a> Parser<'a> {
                 let is_abstract = self.match_token(Token::Abstract);
                 self.consume(Token::Class, "expected `class` after `sealed`")?;
                 decls.push(Decl::Class(self.parse_class(false, is_abstract, true)?));
+            } else if self.match_token(Token::Record) {
+                decls.push(Decl::Class(self.parse_record()?));
             } else {
-                self.consume(Token::Class, "expected `class` or `interface`")?;
+                self.consume(Token::Class, "expected `class`, `record`, or `interface`")?;
                 decls.push(Decl::Class(self.parse_class(false, false, false)?));
             }
         }
@@ -49,6 +51,8 @@ impl<'a> Parser<'a> {
             is_interface: false,
             is_abstract: false,
             is_sealed: false,
+            is_record: false,
+            record_params: vec![],
             members: vec![
                 Member::Field(FieldDecl {
                     is_static: false,
@@ -75,9 +79,34 @@ impl<'a> Parser<'a> {
         is_abstract: bool,
         is_sealed: bool,
     ) -> Result<ClassDecl, String> {
+        self.parse_class_impl(is_interface, is_abstract, is_sealed, false)
+    }
+
+    /// Parse a `record` declaration. The leading `record` keyword has already
+    /// been consumed.
+    fn parse_record(&mut self) -> Result<ClassDecl, String> {
+        self.parse_class_impl(false, false, false, true)
+    }
+
+    fn parse_class_impl(
+        &mut self,
+        is_interface: bool,
+        is_abstract: bool,
+        is_sealed: bool,
+        is_record: bool,
+    ) -> Result<ClassDecl, String> {
         let name = self.consume_ident("expected class name")?;
         let generic_params = if self.check(Token::Lt) {
             self.parse_generic_params()?
+        } else {
+            Vec::new()
+        };
+        let record_params = if is_record {
+            if self.check(Token::LParen) {
+                self.parse_params()?
+            } else {
+                Vec::new()
+            }
         } else {
             Vec::new()
         };
@@ -100,8 +129,22 @@ impl<'a> Parser<'a> {
         } else {
             Vec::new()
         };
-        self.consume(Token::LBrace, "expected `{`")?;
         let mut members = Vec::new();
+        if is_record && self.match_token(Token::Semi) {
+            // `record Point(int x, int y);` shorthand: no explicit members.
+            return Ok(ClassDecl {
+                name,
+                generic_params,
+                bases,
+                is_interface,
+                is_abstract,
+                is_sealed,
+                is_record,
+                record_params,
+                members,
+            });
+        }
+        self.consume(Token::LBrace, "expected `{`")?;
         while !self.check(Token::RBrace) && !self.is_at_end() {
             self.skip_newlines();
             if self.check(Token::RBrace) {
@@ -117,6 +160,8 @@ impl<'a> Parser<'a> {
             is_interface,
             is_abstract,
             is_sealed,
+            is_record,
+            record_params,
             members,
         })
     }
@@ -928,7 +973,25 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_expr(&mut self) -> Result<Expr, String> {
-        let expr = self.parse_null_coalesce()?;
+        let mut expr = self.parse_null_coalesce()?;
+        // Record copy-with: `p with { x = 5, y = 6 }`.
+        while self.match_token(Token::With) {
+            self.consume(Token::LBrace, "expected `{` after `with`")?;
+            let mut updates = Vec::new();
+            if !self.check(Token::RBrace) {
+                loop {
+                    let field = self.consume_ident("expected field name in `with` block")?;
+                    self.consume(Token::Assign, "expected `=` after field name in `with` block")?;
+                    let value = self.parse_expr()?;
+                    updates.push((field, value));
+                    if !self.match_token(Token::Comma) {
+                        break;
+                    }
+                }
+            }
+            self.consume(Token::RBrace, "expected `}` after `with` block")?;
+            expr = Expr::With(Box::new(expr), updates);
+        }
         if self.match_token(Token::Question) {
             let then_expr = self.parse_expr()?;
             self.consume(Token::Colon, "expected `:` in ternary expression")?;
@@ -1434,6 +1497,21 @@ impl<'a> Parser<'a> {
                     Vec::new()
                 };
                 return Ok(Pattern::EnumVariant(name, variant, args));
+            }
+            if self.check(Token::LParen) {
+                // Record pattern: `Point(x, y)` with positional sub-patterns.
+                self.consume(Token::LParen, "expected `(`")?;
+                let mut args = Vec::new();
+                if !self.check(Token::RParen) {
+                    loop {
+                        args.push(self.parse_pattern()?);
+                        if !self.match_token(Token::Comma) {
+                            break;
+                        }
+                    }
+                }
+                self.consume(Token::RParen, "expected `)`")?;
+                return Ok(Pattern::RecordClass(name, args));
             }
             return Ok(Pattern::Binding(name));
         }
