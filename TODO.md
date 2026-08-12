@@ -1,7 +1,7 @@
 # Aura Language TODO
 
 > **Status:** Production Ready  
-> **Last Updated:** 2026-08-10  
+> **Last Updated:** 2026-08-11  
 > **Current Version:** 1.0.0
 
 ---
@@ -54,12 +54,12 @@
 #### ⏳ Planned
 
 **P0 - Critical**
-- [ ] **Numeric type hierarchy**
-  - [ ] `int8`, `int16`, `int32`, `int64` (signed integers)
-  - [ ] `uint8`, `uint16`, `uint32`, `uint64` (unsigned integers)
-  - [ ] `float32`, `float64` (explicit precision)
-  - [ ] Type coercion rules and conversions
-  - [ ] Overflow/underflow checking (configurable)
+- [x] **Numeric type hierarchy**
+  - [x] `int8`, `int16`, `int32`, `int64` (signed integers)
+  - [x] `uint8`, `uint16`, `uint32`, `uint64` (unsigned integers)
+  - [x] `float32`, `float64` (explicit precision)
+  - [x] Type coercion rules and conversions
+  - [x] Overflow/underflow checking (configurable)
 
 - [ ] **Character and string types**
   - [ ] `char` type (Unicode scalar value)
@@ -193,13 +193,17 @@
   }
   ```
 
-- [ ] **Properties**
+- [x] **Properties**
   ```aura
   class Person {
       string Name { get; set; }
       int Age { get; private set; }
   }
   ```
+  - [x] Auto accessors with backing fields
+  - [x] Explicit getter/setter bodies
+  - [x] Visibility modifiers per accessor
+  - [x] Static properties
 
 **P2 - Medium Priority**
 - [ ] **Operator overloading**
@@ -227,7 +231,7 @@
 **P3 - Nice to Have**
 - [ ] **Mixin / Trait system** (alternative or complement to interfaces)
 - [ ] **Partial classes** (split class definition across files)
-- [ ] **Record classes** (immutable data classes with value semantics)
+- [x] **Record classes** (immutable data classes with value semantics)
 
 ---
 
@@ -278,13 +282,13 @@
 #### ⏳ Planned
 
 **P1 - High Priority**
-- [ ] **Pattern matching enhancements**
+- [x] **Pattern matching enhancements**
   - [x] Enum variant patterns
   - [x] Range patterns
   - [x] Pattern guards with complex expressions
-  - [ ] Nested patterns
+  - [x] Nested patterns
 
-- [ ] **Null conditional**
+- [x] **Null conditional**
 
 **P2 - Medium Priority**
 - [x] **Labeled break/continue**
