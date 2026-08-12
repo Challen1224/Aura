@@ -194,6 +194,8 @@ impl<'a> Parser<'a> {
                 visibility = Visibility::Protected;
             } else if self.match_token(Token::Private) {
                 visibility = Visibility::Private;
+            } else if self.match_token(Token::Internal) {
+                visibility = Visibility::Internal;
             } else if self.match_token(Token::Virtual) {
                 is_virtual = true;
             } else if self.match_token(Token::Override) {
@@ -249,6 +251,35 @@ impl<'a> Parser<'a> {
                     }
                     self.advance();
                     let params = self.parse_params()?;
+                    let mut constructor_chain = None;
+                    if self.match_token(Token::Colon) {
+                        if self.match_token(Token::Super) {
+                            let args = self.parse_args()?;
+                            constructor_chain = Some(ConstructorChain {
+                                target: ConstructorTarget::Base,
+                                args,
+                            });
+                        } else if let Some(Token::Ident(t)) = self.peek() {
+                            if t == "this" {
+                                self.advance();
+                                let args = self.parse_args()?;
+                                constructor_chain = Some(ConstructorChain {
+                                    target: ConstructorTarget::This,
+                                    args,
+                                });
+                            } else {
+                                return Err(format!(
+                                    "expected `super` or `this` after `:` in constructor `{}`",
+                                    class_name
+                                ));
+                            }
+                        } else {
+                            return Err(format!(
+                                "expected `super` or `this` after `:` in constructor `{}`",
+                                class_name
+                            ));
+                        }
+                    }
                     self.consume(Token::LBrace, "expected `{`")?;
                     let body = self.parse_block()?;
                     return Ok(Member::Method(MethodDecl {
@@ -259,6 +290,7 @@ impl<'a> Parser<'a> {
                         is_abstract: false,
                         is_final: false,
                         is_constructor: true,
+                        constructor_chain,
                         generic_params: Vec::new(),
                         return_ty: Type::Unit,
                         name: class_name.to_string(),
@@ -292,6 +324,7 @@ impl<'a> Parser<'a> {
                 is_abstract,
                 is_final,
                 is_constructor: false,
+                constructor_chain: None,
                 generic_params,
                 return_ty: ty,
                 name,
@@ -314,16 +347,29 @@ impl<'a> Parser<'a> {
                 if self.check(Token::RBrace) {
                     break;
                 }
+                let accessor_visibility = if self.match_token(Token::Private) {
+                    Some(Visibility::Private)
+                } else if self.match_token(Token::Protected) {
+                    Some(Visibility::Protected)
+                } else if self.match_token(Token::Internal) {
+                    Some(Visibility::Internal)
+                } else {
+                    None
+                };
                 if let Some(Token::Ident(kw)) = self.peek() {
                     if kw == "get" || kw == "set" {
                         let kw = kw.clone();
                         self.advance();
-                        let accessor = if self.match_token(Token::Semi) {
-                            Accessor::Auto
+                        let kind = if self.match_token(Token::Semi) {
+                            AccessorKind::Auto
                         } else {
                             self.consume(Token::LBrace, "expected `;` or `{` after accessor")?;
                             let body = self.parse_block()?;
-                            Accessor::Body(body)
+                            AccessorKind::Body(body)
+                        };
+                        let accessor = Accessor {
+                            visibility: accessor_visibility,
+                            kind,
                         };
                         if kw == "get" {
                             if getter.is_some() {

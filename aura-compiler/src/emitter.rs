@@ -35,6 +35,7 @@ struct MethodEmitter<'a> {
     local_types: HashMap<String, Type>,
     constants: Vec<String>,
     method_ids: &'a HashMap<(String, String, bool), MethodId>,
+    constructor_ids: &'a HashMap<String, Vec<MethodId>>,
     break_targets: Vec<(Option<String>, Vec<usize>)>,
     continue_targets: Vec<(Option<String>, Vec<usize>)>,
     handlers: Vec<ExceptionHandler>,
@@ -83,6 +84,7 @@ impl Emitter {
 
         // Second pass: assign ids to methods.
         let mut method_ids: HashMap<(String, String, bool), MethodId> = HashMap::new();
+        let mut constructor_ids: HashMap<String, Vec<MethodId>> = HashMap::new();
         for decl in &program.program.decls {
             if let Decl::Class(class) = decl {
                 for member in &class.members {
@@ -91,6 +93,12 @@ impl Emitter {
                             let id = MethodId(self.next_method_id);
                             self.next_method_id += 1;
                             method_ids.insert((class.name.clone(), m.name.clone(), !m.is_static), id);
+                            if m.is_constructor {
+                                constructor_ids
+                                    .entry(class.name.clone())
+                                    .or_default()
+                                    .push(id);
+                            }
                         }
                         Member::Property(p) => {
                             if p.getter.is_some() {
@@ -177,22 +185,35 @@ impl Emitter {
 
                 let mut methods = HashMap::new();
                 let mut static_methods = HashMap::new();
+                let mut ctor_cursor = 0usize;
 
                 for member in &class.members {
                     match member {
                         Member::Method(m) => {
-                            let method_id = *method_ids
-                                .get(&(class.name.clone(), m.name.clone(), !m.is_static))
-                                .unwrap();
+                            let method_id = if m.is_constructor {
+                                let id = constructor_ids
+                                    .get(&class.name)
+                                    .and_then(|ids| ids.get(ctor_cursor))
+                                    .copied()
+                                    .ok_or_else(|| {
+                                        format!("missing constructor id for `{}`", class.name)
+                                    })?;
+                                ctor_cursor += 1;
+                                id
+                            } else {
+                                *method_ids
+                                    .get(&(class.name.clone(), m.name.clone(), !m.is_static))
+                                    .unwrap()
+                            };
 
                             if class.name == "Program" && m.name == "Main" && m.is_static {
                                 entrypoint = Some(method_id);
                             }
 
                             let (method_id, method_def) = self.build_method_def(
-                                program, class, m, info, class_id, &method_ids,
+                                program, class, m, info, class_id, method_id, &method_ids,
                                 &class_ids, &enum_ids, &field_layouts,
-                                &class_generic_params, &mut module,
+                                &class_generic_params, &constructor_ids, &mut module,
                             )?;
 
                             if m.is_static {
@@ -204,22 +225,28 @@ impl Emitter {
                         Member::Property(p) => {
                             let mut emitted: Vec<(bool, (MethodId, MethodDef))> = Vec::new();
                             if p.getter.is_some() {
+                                let accessor_id = *method_ids
+                                    .get(&(class.name.clone(), format!("get_{}", p.name), !p.is_static))
+                                    .unwrap();
                                 emitted.push((
                                     p.is_static,
                                     self.build_method_def(
                                         program, class, &property_accessor_decl(class.name.clone(), p, true),
-                                        info, class_id, &method_ids, &class_ids, &enum_ids,
-                                        &field_layouts, &class_generic_params, &mut module,
+                                        info, class_id, accessor_id, &method_ids, &class_ids, &enum_ids,
+                                        &field_layouts, &class_generic_params, &constructor_ids, &mut module,
                                     )?,
                                 ));
                             }
                             if p.setter.is_some() {
+                                let accessor_id = *method_ids
+                                    .get(&(class.name.clone(), format!("set_{}", p.name), !p.is_static))
+                                    .unwrap();
                                 emitted.push((
                                     p.is_static,
                                     self.build_method_def(
                                         program, class, &property_accessor_decl(class.name.clone(), p, false),
-                                        info, class_id, &method_ids, &class_ids, &enum_ids,
-                                        &field_layouts, &class_generic_params, &mut module,
+                                        info, class_id, accessor_id, &method_ids, &class_ids, &enum_ids,
+                                        &field_layouts, &class_generic_params, &constructor_ids, &mut module,
                                     )?,
                                 ));
                             }
@@ -267,17 +294,15 @@ impl Emitter {
         m: &MethodDecl,
         info: &ClassInfo,
         class_id: ClassId,
+        method_id: MethodId,
         method_ids: &HashMap<(String, String, bool), MethodId>,
         class_ids: &HashMap<String, ClassId>,
         enum_ids: &HashMap<String, EnumId>,
         field_layouts: &FieldLayout,
         class_generic_params: &[aura_bytecode::GenericParam],
+        constructor_ids: &HashMap<String, Vec<MethodId>>,
         module: &mut Module,
     ) -> Result<(MethodId, MethodDef), String> {
-        let method_id = *method_ids
-            .get(&(class.name.clone(), m.name.clone(), !m.is_static))
-            .ok_or_else(|| format!("unknown method id for `{}`", m.name))?;
-
         let mut me = MethodEmitter::new(
             class_id,
             &class.name,
@@ -288,6 +313,7 @@ impl Emitter {
             enum_ids,
             field_layouts,
             method_ids,
+            constructor_ids,
         );
         me.emit_body()?;
 
@@ -330,8 +356,8 @@ fn property_accessor_decl(class_name: String, p: &PropertyDecl, is_getter: bool)
     let accessor = if is_getter { &p.getter } else { &p.setter };
     let body = match accessor {
         None => Vec::new(),
-        Some(Accessor::Body(body)) => body.clone(),
-        Some(Accessor::Auto) => {
+        Some(Accessor { kind: AccessorKind::Body(body), .. }) => body.clone(),
+        Some(Accessor { kind: AccessorKind::Auto, .. }) => {
             let backing = format!("__prop_{}", p.name);
             if is_getter {
                 let expr = if p.is_static {
@@ -358,6 +384,7 @@ fn property_accessor_decl(class_name: String, p: &PropertyDecl, is_getter: bool)
         is_abstract: false,
         is_final: false,
         is_constructor: false,
+        constructor_chain: None,
         generic_params: Vec::new(),
         return_ty: if is_getter { p.ty.clone() } else { Type::Unit },
         name: format!("{}_{}", if is_getter { "get" } else { "set" }, p.name),
@@ -400,6 +427,7 @@ impl<'a> MethodEmitter<'a> {
         enum_ids: &'a HashMap<String, EnumId>,
         field_layout: &'a HashMap<String, Vec<(String, Type)>>,
         method_ids: &'a HashMap<(String, String, bool), MethodId>,
+        constructor_ids: &'a HashMap<String, Vec<MethodId>>,
     ) -> Self {
         let params: Vec<String> = method.params.iter().map(|p| p.name.clone()).collect();
         let mut locals = Vec::new();
@@ -432,6 +460,7 @@ impl<'a> MethodEmitter<'a> {
             local_types,
             constants: Vec::new(),
             method_ids,
+            constructor_ids,
             break_targets: Vec::new(),
             continue_targets: Vec::new(),
             handlers: Vec::new(),
@@ -439,6 +468,34 @@ impl<'a> MethodEmitter<'a> {
     }
 
     fn emit_body(&mut self) -> Result<(), String> {
+        if self.method.is_constructor {
+            match &self.method.constructor_chain {
+                Some(chain) => {
+                    let target_id = self.resolve_constructor_id_for_chain(chain)?;
+                    for arg in &chain.args {
+                        self.emit_expr(arg)?;
+                    }
+                    self.ops.push(Op::Ldloc(0));
+                    self.ops.push(Op::CallSuper(target_id));
+                }
+                None => {
+                    // Implicitly invoke the base class's zero-parameter
+                    // constructor when the constructor has no explicit chain.
+                    if let Some(super_name) = &self.class_info.super_class {
+                        if let (Some(ids), Some(info)) = (
+                            self.constructor_ids.get(super_name),
+                            self.program.classes.get(super_name),
+                        ) {
+                            if let Some(idx) = info.constructors.iter().position(|c| c.params.is_empty()) {
+                                let target_id = ids[idx];
+                                self.ops.push(Op::Ldloc(0));
+                                self.ops.push(Op::CallSuper(target_id));
+                            }
+                        }
+                    }
+                }
+            }
+        }
         for stmt in &self.method.body {
             self.emit_stmt(stmt)?;
         }
@@ -1209,12 +1266,14 @@ impl<'a> MethodEmitter<'a> {
                 let class_id = *self.class_ids.get(class_name).ok_or_else(|| {
                     format!("unknown class `{}`", class_name)
                 })?;
-                let has_constructor = self
-                    .program
-                    .classes
-                    .get(class_name)
-                    .map(|ci| ci.constructor.is_some())
-                    .unwrap_or(false);
+                let has_constructor = !self.program.classes.get(class_name)
+                    .map(|ci| ci.constructors.is_empty())
+                    .unwrap_or(true);
+                let ctor_id = if has_constructor {
+                    Some(self.resolve_constructor_id(class_name, args)?)
+                } else {
+                    None
+                };
                 for arg in args {
                     self.emit_expr(arg)?;
                 }
@@ -1222,13 +1281,13 @@ impl<'a> MethodEmitter<'a> {
                     .map(|arg| map_type(arg, self.class_ids, self.enum_ids, &[]))
                     .collect();
                 self.ops.push(Op::NewObj(class_id, mapped_type_args));
-                if has_constructor {
+                if let Some(ctor_id) = ctor_id {
                     // Stash the new object, run its constructor, then restore it
                     // so the `new` expression evaluates to the object.
                     let obj_local = self.push_local("__new_temp".to_string()) as u16;
                     self.ops.push(Op::Stloc(obj_local));
                     self.ops.push(Op::Ldloc(obj_local));
-                    self.ops.push(Op::CallVirt(class_name.clone()));
+                    self.ops.push(Op::CallSuper(ctor_id));
                     self.ops.push(Op::Pop);
                     self.ops.push(Op::Ldloc(obj_local));
                 }
@@ -1628,6 +1687,231 @@ impl<'a> MethodEmitter<'a> {
                 }
             }
             _ => None,
+        }
+    }
+
+    /// Resolve the constructor `MethodId` of `class_name` that matches the
+    /// given argument expressions (by count and assignability), mirroring the
+    /// type checker's overload resolution.
+    fn resolve_constructor_id(&self, class_name: &str, args: &[Expr]) -> Result<MethodId, String> {
+        let ids = self.constructor_ids.get(class_name).ok_or_else(|| {
+            format!("class `{}` declares no constructors", class_name)
+        })?;
+        let infos = self.program.classes.get(class_name)
+            .ok_or_else(|| format!("unknown class `{}`", class_name))?;
+        let arg_types: Vec<Type> = args
+            .iter()
+            .map(|a| self.expr_ty(a))
+            .collect::<Result<_, _>>()?;
+        let idx = infos
+            .constructors
+            .iter()
+            .position(|ctor| {
+                ctor.params.len() == arg_types.len()
+                    && ctor
+                        .params
+                        .iter()
+                        .zip(arg_types.iter())
+                        .all(|(expected, actual)| self.is_assignable(expected, actual))
+            })
+            .ok_or_else(|| {
+                format!(
+                    "no constructor of `{}` matches arguments ({})",
+                    class_name,
+                    arg_types
+                        .iter()
+                        .map(|t| t.name())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                )
+            })?;
+        ids.get(idx).copied().ok_or_else(|| {
+            format!("missing constructor id for `{}`", class_name)
+        })
+    }
+
+    /// Resolve the target `MethodId` for a constructor chaining call
+    /// (`: super(...)` or `: this(...)`).
+    fn resolve_constructor_id_for_chain(&self, chain: &ConstructorChain) -> Result<MethodId, String> {
+        match chain.target {
+            ConstructorTarget::Base => {
+                let super_name = self.class_info.super_class.as_ref().ok_or_else(|| {
+                    format!("class `{}` has no super class to chain to", self.class_name)
+                })?;
+                self.resolve_constructor_id(super_name, &chain.args)
+            }
+            ConstructorTarget::This => {
+                self.resolve_constructor_id(self.class_name, &chain.args)
+            }
+        }
+    }
+
+    /// Lightweight expression type inference for constructor argument matching.
+    /// The type checker has already validated the program, so this only needs
+    /// to be accurate enough to disambiguate overloads.
+    fn expr_ty(&self, expr: &Expr) -> Result<Type, String> {
+        let ty = match expr {
+            Expr::Int(_) => Type::Int,
+            Expr::Float(_) => Type::Float,
+            Expr::Bool(_) => Type::Bool,
+            Expr::String(_) | Expr::InterpolatedString(_) => Type::String,
+            Expr::Null => Type::Class("null".to_string(), Vec::new()),
+            Expr::Var(name) => {
+                if name == "this" && !self.method.is_static {
+                    Type::Class(self.class_name.to_string(), Vec::new())
+                } else {
+                    self.local_types
+                        .get(name)
+                        .cloned()
+                        .ok_or_else(|| format!("unknown variable `{}`", name))?
+                }
+            }
+            Expr::New(class_name, type_args, _) => Type::Class(class_name.clone(), type_args.clone()),
+            Expr::Field(obj, name) => {
+                let owner = self.expr_class(obj).ok_or_else(|| {
+                    format!("cannot determine type of field target `{}`", name)
+                })?;
+                let layout = self.field_layout.get(&owner).ok_or_else(|| {
+                    format!("unknown field layout for `{}`", owner)
+                })?;
+                layout
+                    .iter()
+                    .find(|(n, _)| n == name)
+                    .map(|(_, t)| t.clone())
+                    .ok_or_else(|| format!("unknown field `{}` on `{}`", name, owner))?
+            }
+            Expr::StaticField(class_name, name) => {
+                let info = self.program.classes.get(class_name).ok_or_else(|| {
+                    format!("unknown class `{}`", class_name)
+                })?;
+                info.static_fields
+                    .iter()
+                    .find(|(n, _)| n == name)
+                    .map(|(_, t)| t.clone())
+                    .ok_or_else(|| format!("unknown static field `{}.{}`", class_name, name))?
+            }
+            Expr::EnumVariant(enum_name, _, _) => Type::Enum(enum_name.clone()),
+            Expr::Tuple(elements) => {
+                let tys = elements
+                    .iter()
+                    .map(|e| self.expr_ty(e))
+                    .collect::<Result<Vec<_>, _>>()?;
+                Type::Tuple(tys)
+            }
+            Expr::Binary(op, _, _) => {
+                match op {
+                    BinOp::Eq | BinOp::Ne | BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge
+                    | BinOp::And | BinOp::Or => Type::Bool,
+                    _ => Type::Int,
+                }
+            }
+            Expr::Unary(op, _) => {
+                match op {
+                    UnaryOp::Not => Type::Bool,
+                    UnaryOp::Neg => Type::Int,
+                }
+            }
+            Expr::Call(call) => {
+                self.call_return_type(call)?
+            }
+            _ => Type::Class("null".to_string(), Vec::new()),
+        };
+        Ok(ty)
+    }
+
+    /// Return type of a call expression, used by `expr_ty`.
+    fn call_return_type(&self, call: &CallExpr) -> Result<Type, String> {
+        let class_name;
+        let method_name;
+        let is_instance;
+        if let Some(target) = &call.target {
+            if let Expr::Var(c) = target.as_ref() {
+                if self.class_ids.contains_key(c) {
+                    class_name = c.clone();
+                    is_instance = false;
+                } else {
+                    let obj_ty = self.expr_ty(target)?;
+                    let Type::Class(c, _) = obj_ty else {
+                        return Err("cannot determine call target class".to_string());
+                    };
+                    class_name = c;
+                    is_instance = true;
+                }
+            } else {
+                let obj_ty = self.expr_ty(target)?;
+                let Type::Class(c, _) = obj_ty else {
+                    return Err("cannot determine call target class".to_string());
+                };
+                class_name = c;
+                is_instance = true;
+            }
+            method_name = call.method.clone();
+        } else if call.class_or_target == "__intrinsics" {
+            return match call.method.as_str() {
+                "int" => Ok(Type::Int),
+                "float" => Ok(Type::Float),
+                "string" => Ok(Type::String),
+                _ => Ok(Type::Unit),
+            };
+        } else {
+            class_name = call.class_or_target.clone();
+            is_instance = false;
+            method_name = call.method.clone();
+        }
+        let mut cur = Some(class_name.clone());
+        while let Some(c) = cur {
+            let info = self.program.classes.get(&c).ok_or_else(|| {
+                format!("unknown class `{}`", c)
+            })?;
+            let table = if is_instance { &info.methods } else { &info.static_methods };
+            if let Some(mi) = table.get(&method_name) {
+                return Ok(mi.return_ty.clone());
+            }
+            cur = info.super_class.clone();
+        }
+        Err(format!(
+            "cannot determine return type of `{}.{}`",
+            class_name, method_name
+        ))
+    }
+
+    /// Mirror of the type checker's assignability check, used to match
+    /// constructor overloads.
+    fn is_assignable(&self, target: &Type, source: &Type) -> bool {
+        if target == source {
+            return true;
+        }
+        if matches!(target, Type::Int | Type::Float) && matches!(source, Type::Int | Type::Float) {
+            return true;
+        }
+        match (target, source) {
+            (Type::Class(name, _), Type::Class(source_name, _)) => {
+                if source_name == "null" {
+                    return true;
+                }
+                self.is_subclass_of(source_name, name)
+            }
+            (Type::String, Type::Class(source_name, _)) if source_name == "null" => true,
+            (Type::Enum(a), Type::Enum(b)) => a == b,
+            (Type::Class(name, _), Type::Enum(enum_name)) => name == enum_name,
+            (Type::Enum(enum_name), Type::Class(name, _)) => name == enum_name,
+            _ => false,
+        }
+    }
+
+    fn is_subclass_of(&self, sub: &str, sup: &str) -> bool {
+        if sub == sup {
+            return true;
+        }
+        let mut cur = sub.to_string();
+        loop {
+            let Some(parent) = self.program.classes.get(&cur).and_then(|c| c.super_class.clone()) else {
+                return false;
+            };
+            if parent == sup {
+                return true;
+            }
+            cur = parent;
         }
     }
 

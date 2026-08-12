@@ -134,7 +134,7 @@
   ```
   - [x] Single inheritance
   - [x] `super` keyword for base class access
-  - [ ] Constructor chaining (no constructor syntax yet)
+  - [x] Constructor chaining (`: super(...)` / `: this(...)`), constructor overloads, and implicit base constructor invocation
   - [x] Protected visibility modifier
 
 - [ ] **Interfaces**

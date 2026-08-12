@@ -12,6 +12,7 @@ fn visibility_name(v: Visibility) -> &'static str {
         Visibility::Public => "public",
         Visibility::Protected => "protected",
         Visibility::Private => "private",
+        Visibility::Internal => "internal",
     }
 }
 
@@ -100,8 +101,8 @@ pub struct ClassInfo {
     pub methods: HashMap<String, MethodInfo>,
     /// Static methods keyed by name.
     pub static_methods: HashMap<String, MethodInfo>,
-    /// Optional constructor (parameter list used when type-checking `new`).
-    pub constructor: Option<ConstructorInfo>,
+    /// Constructors in declaration order (used when type-checking `new`).
+    pub constructors: Vec<ConstructorInfo>,
     /// Instance properties keyed by name.
     pub properties: HashMap<String, PropertyInfo>,
     /// Static properties keyed by name.
@@ -117,6 +118,10 @@ pub struct PropertyInfo {
     pub ty: Type,
     /// Member visibility.
     pub visibility: Visibility,
+    /// Effective visibility of the getter accessor.
+    pub getter_visibility: Visibility,
+    /// Effective visibility of the setter accessor.
+    pub setter_visibility: Visibility,
     /// Whether a getter accessor is declared.
     pub has_getter: bool,
     /// Whether a setter accessor is declared.
@@ -232,7 +237,7 @@ impl TypeChecker {
                         private_static_fields: HashSet::new(),
                         methods: HashMap::new(),
                         static_methods: HashMap::new(),
-                        constructor: None,
+                        constructors: Vec::new(),
                         properties: HashMap::new(),
                         static_properties: HashMap::new(),
                     };
@@ -273,7 +278,7 @@ impl TypeChecker {
                                         Visibility::Private => {
                                             info.private_static_fields.insert(f.name.clone());
                                         }
-                                        Visibility::Public => {}
+                                        Visibility::Public | Visibility::Internal => {}
                                     }
                                     info.static_fields.push((f.name.clone(), f.ty.clone()));
                                 } else {
@@ -284,7 +289,7 @@ impl TypeChecker {
                                         Visibility::Private => {
                                             info.private_fields.insert(f.name.clone());
                                         }
-                                        Visibility::Public => {}
+                                        Visibility::Public | Visibility::Internal => {}
                                     }
                                     info.instance_fields.push((f.name.clone(), f.ty.clone()));
                                 }
@@ -309,13 +314,21 @@ impl TypeChecker {
                                             c.name
                                         )));
                                     }
-                                    if info.constructor.is_some() {
+                                    let duplicate = info.constructors.iter().any(|ctor| {
+                                        ctor.params.len() == m.params.len()
+                                            && ctor
+                                                .params
+                                                .iter()
+                                                .zip(m.params.iter())
+                                                .all(|(a, b)| a == &b.ty)
+                                    });
+                                    if duplicate {
                                         return Err(TypeError(format!(
                                             "duplicate constructor for class `{}`",
                                             c.name
                                         )));
                                     }
-                                    info.constructor = Some(ConstructorInfo {
+                                    info.constructors.push(ConstructorInfo {
                                         params: m.params.iter().map(|p| p.ty.clone()).collect(),
                                     });
                                     continue;
@@ -411,10 +424,16 @@ impl TypeChecker {
                                         c.name, p.name
                                     )));
                                 }
+                                let getter_visibility =
+                                    self.effective_accessor_visibility(p.visibility, &p.getter)?;
+                                let setter_visibility =
+                                    self.effective_accessor_visibility(p.visibility, &p.setter)?;
                                 let pi = PropertyInfo {
                                     name: p.name.clone(),
                                     ty: p.ty.clone(),
                                     visibility: p.visibility,
+                                    getter_visibility,
+                                    setter_visibility,
                                     has_getter: p.getter.is_some(),
                                     has_setter: p.setter.is_some(),
                                     is_static: p.is_static,
@@ -425,8 +444,8 @@ impl TypeChecker {
                                     info.properties.insert(p.name.clone(), pi);
                                 }
                                 // Auto accessors are backed by a generated field.
-                                if matches!(p.getter, Some(Accessor::Auto))
-                                    || matches!(p.setter, Some(Accessor::Auto))
+                                if matches!(p.getter.as_ref().map(|a| &a.kind), Some(AccessorKind::Auto))
+                                    || matches!(p.setter.as_ref().map(|a| &a.kind), Some(AccessorKind::Auto))
                                 {
                                     let backing = format!("__prop_{}", p.name);
                                     if p.is_static {
@@ -752,6 +771,136 @@ impl TypeChecker {
                 current == declared_in || self.is_subclass_of(current, declared_in)
             }
             Visibility::Private => current == declared_in,
+            Visibility::Internal => true,
+        }
+    }
+
+    /// Effective visibility of an accessor. An explicit accessor modifier must
+    /// be more restrictive than the property's own visibility (as in C#); when
+    /// absent the accessor inherits the property visibility.
+    fn effective_accessor_visibility(
+        &self,
+        property_visibility: Visibility,
+        accessor: &Option<Accessor>,
+    ) -> Result<Visibility, TypeError> {
+        let Some(vis) = accessor.as_ref().and_then(|a| a.visibility) else {
+            return Ok(property_visibility);
+        };
+        let rank = |v: Visibility| match v {
+            Visibility::Private => 0,
+            Visibility::Protected => 1,
+            Visibility::Internal => 2,
+            Visibility::Public => 3,
+        };
+        if rank(vis) >= rank(property_visibility) {
+            return Err(TypeError(format!(
+                "accessor visibility {} is not more restrictive than the property visibility {}",
+                visibility_name(vis),
+                visibility_name(property_visibility)
+            )));
+        }
+        Ok(vis)
+    }
+
+    /// Validate a constructor's chaining call and, for `: this(...)`, return
+    /// the index of the target constructor within `ctor_members`.
+    fn check_constructor_chain(
+        &self,
+        class: &ClassInfo,
+        ctor: &MethodDecl,
+        ctor_members: &[&MethodDecl],
+        idx: usize,
+    ) -> Result<Option<usize>, TypeError> {
+        let mut locals: HashMap<String, Type> = HashMap::new();
+        for p in &ctor.params {
+            locals.insert(p.name.clone(), p.ty.clone());
+        }
+        let Some(chain) = &ctor.constructor_chain else {
+            // Derived constructors must chain explicitly when the base class
+            // declares no zero-parameter constructor.
+            if let Some(super_name) = &class.super_class {
+                if let Some(super_info) = self.classes.get(super_name) {
+                    if !super_info.constructors.is_empty()
+                        && !super_info.constructors.iter().any(|c| c.params.is_empty())
+                    {
+                        return Err(TypeError(format!(
+                            "constructor `{}(...)` must explicitly call `: super(...)` because super class `{}` has no zero-parameter constructor",
+                            class.name, super_name
+                        )));
+                    }
+                }
+            }
+            return Ok(None);
+        };
+        let arg_types: Vec<Type> = chain
+            .args
+            .iter()
+            .map(|a| self.infer_expr(a, class, &locals, true, &Type::Unit, &[]))
+            .collect::<Result<_, _>>()?;
+        let args_desc = |ts: &[Type]| -> String {
+            ts.iter().map(|t| t.name()).collect::<Vec<_>>().join(", ")
+        };
+        match chain.target {
+            ConstructorTarget::Base => {
+                let Some(super_name) = &class.super_class else {
+                    return Err(TypeError(format!(
+                        "class `{}` has no super class to chain to in `: super(...)`",
+                        class.name
+                    )));
+                };
+                let super_info = self.classes.get(super_name).unwrap();
+                if super_info.is_interface {
+                    return Err(TypeError(format!(
+                        "cannot chain `: super(...)` to interface `{}`",
+                        super_name
+                    )));
+                }
+                if super_info.constructors.is_empty() {
+                    if !chain.args.is_empty() {
+                        return Err(TypeError(format!(
+                            "super class `{}` declares no constructor; `: super(...)` must be called with no arguments",
+                            super_name
+                        )));
+                    }
+                    return Ok(None);
+                }
+                let matched = super_info.constructors.iter().any(|c| {
+                    c.params.len() == arg_types.len()
+                        && c.params
+                            .iter()
+                            .zip(arg_types.iter())
+                            .all(|(e, a)| self.is_assignable(e, a))
+                });
+                if !matched {
+                    return Err(TypeError(format!(
+                        "no constructor of super class `{}` matches arguments ({})",
+                        super_name,
+                        args_desc(&arg_types)
+                    )));
+                }
+                Ok(None)
+            }
+            ConstructorTarget::This => {
+                for (j, other) in ctor_members.iter().enumerate() {
+                    if j == idx {
+                        continue;
+                    }
+                    let matches = other.params.len() == arg_types.len()
+                        && other
+                            .params
+                            .iter()
+                            .zip(arg_types.iter())
+                            .all(|(p, a)| self.is_assignable(&p.ty, a));
+                    if matches {
+                        return Ok(Some(j));
+                    }
+                }
+                Err(TypeError(format!(
+                    "no `: this(...)` constructor of `{}` matches arguments ({})",
+                    class.name,
+                    args_desc(&arg_types)
+                )))
+            }
         }
     }
 
@@ -887,6 +1036,39 @@ impl TypeChecker {
             }
         }
 
+        let ctor_members: Vec<&MethodDecl> = class
+            .members
+            .iter()
+            .filter_map(|m| match m {
+                Member::Method(m) if m.is_constructor => Some(m),
+                _ => None,
+            })
+            .collect();
+        let mut this_chain_targets: HashMap<usize, usize> = HashMap::new();
+        for (i, ctor) in ctor_members.iter().enumerate() {
+            if let Some(target_idx) =
+                self.check_constructor_chain(&info, ctor, &ctor_members, i)?
+            {
+                this_chain_targets.insert(i, target_idx);
+            }
+        }
+        for start in 0..ctor_members.len() {
+            let mut path: HashSet<usize> = HashSet::new();
+            let mut cur = start;
+            loop {
+                if !path.insert(cur) {
+                    return Err(TypeError(format!(
+                        "constructors of `{}` form a `: this(...)` chain cycle",
+                        class.name
+                    )));
+                }
+                match this_chain_targets.get(&cur) {
+                    Some(&next) => cur = next,
+                    None => break,
+                }
+            }
+        }
+
         for member in &class.members {
             if let Member::Method(m) = member {
                 let mut locals: HashMap<String, Type> = HashMap::new();
@@ -905,13 +1087,13 @@ impl TypeChecker {
                 self.validate_type_with_generics(&f.ty, class_generic_params)?;
             } else if let Member::Property(p) = member {
                 self.validate_type_with_generics(&p.ty, class_generic_params)?;
-                if let Some(Accessor::Body(body)) = &p.getter {
+                if let Some(Accessor { kind: AccessorKind::Body(body), .. }) = &p.getter {
                     let mut locals: HashMap<String, Type> = HashMap::new();
                     for stmt in body {
                         self.check_stmt(stmt, &info, &mut locals, &p.ty, !p.is_static, class_generic_params)?;
                     }
                 }
-                if let Some(Accessor::Body(body)) = &p.setter {
+                if let Some(Accessor { kind: AccessorKind::Body(body), .. }) = &p.setter {
                     let mut locals: HashMap<String, Type> = HashMap::new();
                     locals.insert("value".to_string(), p.ty.clone());
                     for stmt in body {
@@ -1370,10 +1552,10 @@ impl TypeChecker {
                             name, declared_in
                         )));
                     }
-                    if !self.can_access(&class.name, &declared_in, pi.visibility) {
+                    if !self.can_access(&class.name, &declared_in, pi.getter_visibility) {
                         return Err(TypeError(format!(
                             "property `{}` on `{}` is {}",
-                            name, declared_in, visibility_name(pi.visibility)
+                            name, declared_in, visibility_name(pi.getter_visibility)
                         )));
                     }
                     let target_class = self.classes.get(&class_name).unwrap();
@@ -1427,10 +1609,10 @@ impl TypeChecker {
                             name, declared_in
                         )));
                     }
-                    if !self.can_access(&class.name, &declared_in, pi.visibility) {
+                    if !self.can_access(&class.name, &declared_in, pi.getter_visibility) {
                         return Err(TypeError(format!(
                             "static property `{}` on `{}` is {}",
-                            name, declared_in, visibility_name(pi.visibility)
+                            name, declared_in, visibility_name(pi.getter_visibility)
                         )));
                     }
                     return Ok(pi.ty);
@@ -1504,25 +1686,56 @@ impl TypeChecker {
                     )));
                 }
                 let subst = build_subst(&class_info.generic_params, type_args);
-                let param_types: Vec<Type> = match &class_info.constructor {
-                    Some(ctor) => ctor
-                        .params
+                let arg_types: Vec<Type> = args
+                    .iter()
+                    .map(|a| self.infer_expr(a, class, locals, in_instance, return_ty, generic_params))
+                    .collect::<Result<_, _>>()?;
+                let selected = class_info
+                    .constructors
+                    .iter()
+                    .find(|ctor| {
+                        ctor.params.len() == arg_types.len()
+                            && ctor
+                                .params
+                                .iter()
+                                .zip(arg_types.iter())
+                                .all(|(expected, actual)| {
+                                    self.is_assignable(&substitute_type(expected, &subst), actual)
+                                })
+                    });
+                let Some(ctor) = selected else {
+                    let sigs: Vec<String> = class_info
+                        .constructors
                         .iter()
-                        .map(|p| substitute_type(p, &subst))
-                        .collect(),
-                    None => Vec::new(),
-                };
-                if args.len() != param_types.len() {
+                        .map(|c| {
+                            format!(
+                                "({})",
+                                c.params
+                                    .iter()
+                                    .map(|p| substitute_type(p, &subst).name())
+                                    .collect::<Vec<_>>()
+                                    .join(", ")
+                            )
+                        })
+                        .collect();
                     return Err(TypeError(format!(
-                        "constructor `{}` expects {} argument(s), got {}",
+                        "no constructor of `{}` matches arguments ({}){}",
                         class_name,
-                        param_types.len(),
-                        args.len()
+                        arg_types.iter().map(|t| t.name()).collect::<Vec<_>>().join(", "),
+                        if sigs.is_empty() {
+                            String::new()
+                        } else {
+                            format!("; available: {}", sigs.join(", "))
+                        }
                     )));
-                }
-                for (arg, expected) in args.iter().zip(param_types.iter()) {
-                    let arg_ty = self.infer_expr(arg, class, locals, in_instance, return_ty, generic_params)?;
-                    if !self.is_assignable(expected, &arg_ty) {
+                };
+                let param_types: Vec<Type> = ctor
+                    .params
+                    .iter()
+                    .map(|p| substitute_type(p, &subst))
+                    .collect();
+                for (arg_ty, expected) in arg_types.iter().zip(param_types.iter()) {
+                    if !self.is_assignable(expected, arg_ty) {
                         return Err(TypeError(format!(
                             "argument of type {} is not assignable to constructor parameter of type {}",
                             arg_ty.name(),
@@ -1766,10 +1979,10 @@ impl TypeChecker {
                             field_name, super_name
                         )));
                     }
-                    if !self.can_access(&class.name, &declared_in, pi.visibility) {
+                    if !self.can_access(&class.name, &declared_in, pi.getter_visibility) {
                         return Err(TypeError(format!(
                             "property `{}` on `{}` is {}",
-                            field_name, declared_in, visibility_name(pi.visibility)
+                            field_name, declared_in, visibility_name(pi.getter_visibility)
                         )));
                     }
                     return Ok(pi.ty);
@@ -1856,10 +2069,10 @@ impl TypeChecker {
                             name, declared_in
                         )));
                     }
-                    if !self.can_access(&class.name, &declared_in, pi.visibility) {
+                    if !self.can_access(&class.name, &declared_in, pi.setter_visibility) {
                         return Err(TypeError(format!(
                             "property `{}` on `{}` is {}",
-                            name, declared_in, visibility_name(pi.visibility)
+                            name, declared_in, visibility_name(pi.setter_visibility)
                         )));
                     }
                     return Ok(substitute_type(&pi.ty, &subst));
@@ -1887,10 +2100,10 @@ impl TypeChecker {
                             name, declared_in
                         )));
                     }
-                    if !self.can_access(&class.name, &declared_in, pi.visibility) {
+                    if !self.can_access(&class.name, &declared_in, pi.setter_visibility) {
                         return Err(TypeError(format!(
                             "static property `{}` on `{}` is {}",
-                            name, declared_in, visibility_name(pi.visibility)
+                            name, declared_in, visibility_name(pi.setter_visibility)
                         )));
                     }
                     return Ok(pi.ty);
@@ -1919,10 +2132,10 @@ impl TypeChecker {
                             name, super_name
                         )));
                     }
-                    if !self.can_access(&class.name, &declared_in, pi.visibility) {
+                    if !self.can_access(&class.name, &declared_in, pi.setter_visibility) {
                         return Err(TypeError(format!(
                             "property `{}` on `{}` is {}",
-                            name, declared_in, visibility_name(pi.visibility)
+                            name, declared_in, visibility_name(pi.setter_visibility)
                         )));
                     }
                     return Ok(pi.ty);

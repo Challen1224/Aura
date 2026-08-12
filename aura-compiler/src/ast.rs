@@ -66,6 +66,8 @@ pub enum Visibility {
     Protected,
     /// Accessible only from within the declaring class.
     Private,
+    /// Accessible from anywhere in the same module.
+    Internal,
 }
 
 /// Generic parameter declaration.
@@ -111,7 +113,17 @@ pub struct PropertyDecl {
 
 /// A property accessor implementation.
 #[derive(Debug, Clone, PartialEq)]
-pub enum Accessor {
+pub struct Accessor {
+    /// Optional accessor visibility override (must be more restrictive than
+    /// the property's own visibility, e.g. `int Age { get; private set; }`).
+    pub visibility: Option<Visibility>,
+    /// The accessor implementation.
+    pub kind: AccessorKind,
+}
+
+/// Property accessor implementation.
+#[derive(Debug, Clone, PartialEq)]
+pub enum AccessorKind {
     /// Auto accessor (`get;` / `set;`) backed by a generated field.
     Auto,
     /// Accessor with an explicit body.
@@ -148,6 +160,8 @@ pub struct MethodDecl {
     pub is_final: bool,
     /// Whether this is a constructor: `Counter(int start) { ... }`.
     pub is_constructor: bool,
+    /// For constructors, an optional chaining call `: super(...)` / `: this(...)`.
+    pub constructor_chain: Option<ConstructorChain>,
     /// Generic parameters for this method.
     pub generic_params: Vec<GenericParam>,
     /// Return type.
@@ -158,6 +172,24 @@ pub struct MethodDecl {
     pub params: Vec<Param>,
     /// Body statements.
     pub body: Vec<Stmt>,
+}
+
+/// Constructor chaining target.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConstructorTarget {
+    /// Chain to the base class constructor: `: super(...)`.
+    Base,
+    /// Chain to another constructor of the same class: `: this(...)`.
+    This,
+}
+
+/// Constructor chaining call: `: super(...)` or `: this(...)`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ConstructorChain {
+    /// Whether the call targets the base class or the same class.
+    pub target: ConstructorTarget,
+    /// Arguments passed to the chained constructor.
+    pub args: Vec<Expr>,
 }
 
 /// Parameter.

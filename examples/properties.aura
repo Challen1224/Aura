@@ -13,8 +13,12 @@ class Bank {
 }
 
 class Person {
+    private int _age;
     string Name { get; set; }
-    int Age { get; set; }
+    int Age {
+        get { return this._age; }
+        internal set { this._age = value; }
+    }
 }
 
 class Stats {
