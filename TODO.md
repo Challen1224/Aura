@@ -1,8 +1,8 @@
 # Aura Language TODO
 
-> **Status:** Production Ready  
+> **Status:** Core language: usable prototype. Runtime/stdlib/tooling: early  
 > **Last Updated:** 2026-08-11  
-> **Current Version:** 1.0.0
+> **Current Version:** 0.26.0
 
 ---
 
