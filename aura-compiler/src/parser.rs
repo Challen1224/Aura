@@ -1395,6 +1395,11 @@ impl<'a> Parser<'a> {
                 self.advance();
                 Ok(Expr::FloatLit(v, suffix))
             }
+            Some(Token::CharLit(c)) => {
+                let v = *c;
+                self.advance();
+                Ok(Expr::Char(v))
+            }
             Some(Token::StringLit(s)) => {
                 let v = s.clone();
                 self.advance();
@@ -1690,6 +1695,9 @@ impl<'a> Parser<'a> {
             Some(Token::Ident(n)) => {
                 let n = n.clone();
                 self.advance();
+                if n == "char" {
+                    return Ok(Type::Char);
+                }
                 if let Some(ty) = numeric_type_from_name(&n) {
                     return Ok(ty);
                 }

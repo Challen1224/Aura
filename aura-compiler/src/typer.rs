@@ -1586,6 +1586,7 @@ impl TypeChecker {
                 Ok(ty.clone())
             }
             Expr::Bool(_) => Ok(Type::Bool),
+            Expr::Char(_) => Ok(Type::Char),
             Expr::String(_) => Ok(Type::String),
             Expr::InterpolatedString(parts) => {
                 // Type check all expressions in the interpolation

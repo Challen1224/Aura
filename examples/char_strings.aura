@@ -1,0 +1,56 @@
+class Program {
+    static void Main() {
+        // Character literals and equality.
+        char c = 'a';
+        print(c == 'a');
+        println();
+        print(c == 'b');
+        println();
+
+        // Escapes.
+        char nl = '\n';
+        char tab = '\t';
+        char back = '\\';
+        char quote = '\'';
+        char nul = '\0';
+
+        // Unicode scalar escapes.
+        char heart = '\u{2764}';
+        print(heart == '\u{2764}');
+        println();
+        print(heart);
+        println();
+
+        // Char assignment and passing.
+        char next = c;
+        print(next);
+        println();
+
+        // Char in interpolation.
+        print("char: {c}");
+        println();
+        print("heart: {heart}");
+        println();
+
+        // Raw strings: no escapes, may span lines.
+        string path = r"C:\new\dir";
+        print(path);
+        println();
+        string rawMulti = r"line one
+line two";
+        print(rawMulti);
+        println();
+
+        // Multi-line strings: escapes processed, newlines kept.
+        string multi = """alpha
+beta\tgamma
+line {three}""";
+        print(multi);
+        println();
+
+        // Single-quote escaped inside double-quoted string.
+        string sQuote = "it's fine";
+        print(sQuote);
+        println();
+    }
+}

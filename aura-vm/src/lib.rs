@@ -36,6 +36,7 @@ fn default_value(ty: &TypeDesc) -> Value {
         | TypeDesc::UInt64 => Value::Int(0),
         TypeDesc::Float32 | TypeDesc::Float64 => Value::Float(0.0),
         TypeDesc::Bool => Value::Bool(false),
+        TypeDesc::Char => Value::Char('\0'),
         _ => Value::Null,
     }
 }
@@ -46,6 +47,7 @@ fn describe_value(vm: &Vm, v: &Value) -> String {
         Value::Int(i) => i.to_string(),
         Value::Float(f) => f.to_string(),
         Value::Bool(b) => b.to_string(),
+        Value::Char(c) => format!("'{}'", c),
         Value::Null => "null".to_string(),
         Value::Unit => "unit".to_string(),
         Value::String(s) => vm.heap.get_string(*s).unwrap_or("<string>").to_string(),
@@ -329,6 +331,10 @@ impl Vm {
                     self.push(Value::Float(f));
                 }
                 Op::LdBool(b) => self.push(Value::Bool(b)),
+                Op::LdChar(c) => {
+                    let ch = char::from_u32(c).unwrap_or('\0');
+                    self.push(Value::Char(ch));
+                }
                 Op::LdStr(idx) => {
                     let s = self
                         .module
@@ -654,6 +660,7 @@ impl Vm {
                             Value::Int(i) => result.push_str(&i.to_string()),
                             Value::Float(f) => result.push_str(&f.to_string()),
                             Value::Bool(b) => result.push_str(&b.to_string()),
+                            Value::Char(c) => result.push_str(&c.to_string()),
                             Value::Null => result.push_str("null"),
                             Value::Unit => result.push_str("()"),
                             _ => result.push_str(&part.to_string()),
@@ -877,6 +884,7 @@ impl Vm {
             (Value::Int(a), Value::Int(b)) => Value::Bool(a == b),
             (Value::Float(a), Value::Float(b)) => Value::Bool(a == b),
             (Value::Bool(a), Value::Bool(b)) => Value::Bool(a == b),
+            (Value::Char(a), Value::Char(b)) => Value::Bool(a == b),
             (Value::Null, Value::Null) => Value::Bool(true),
             (Value::Null, Value::Object(_)) | (Value::Object(_), Value::Null) => Value::Bool(false),
             (Value::Null, Value::String(_)) | (Value::String(_), Value::Null) => Value::Bool(false),
@@ -902,6 +910,7 @@ impl Vm {
             (Value::Int(a), Value::Int(b)) => a == b,
             (Value::Float(a), Value::Float(b)) => a == b,
             (Value::Bool(a), Value::Bool(b)) => a == b,
+            (Value::Char(a), Value::Char(b)) => a == b,
             (Value::Null, Value::Null) => true,
             (Value::Null, _) | (_, Value::Null) => false,
             (Value::String(a), Value::String(b)) => {
@@ -965,6 +974,7 @@ impl Vm {
             Value::Int(i) => *i as i32,
             Value::Float(f) => f.to_bits() as i32,
             Value::Bool(b) => *b as i32,
+            Value::Char(c) => *c as i32,
             Value::Null | Value::Unit => 0,
             Value::String(s) => self.heap.get_string(*s).map(fnv_hash).unwrap_or(0),
             Value::Object(handle) => self.object_value_hash(*handle),

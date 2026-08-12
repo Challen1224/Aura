@@ -1115,6 +1115,7 @@ impl<'a> MethodEmitter<'a> {
                 self.ops.push(Op::Conv(map_type(ty, self.class_ids, self.enum_ids, &[])));
             }
             Expr::Bool(b) => self.ops.push(Op::LdBool(*b)),
+            Expr::Char(c) => self.ops.push(Op::LdChar(*c as u32)),
             Expr::String(s) => {
                 let idx = self.constants.len() as u32;
                 self.constants.push(s.clone());
@@ -1968,6 +1969,7 @@ impl<'a> MethodEmitter<'a> {
             },
             Expr::Cast(_, ty) => ty.clone(),
             Expr::Bool(_) => Type::Bool,
+            Expr::Char(_) => Type::Char,
             Expr::String(_) | Expr::InterpolatedString(_) => Type::String,
             Expr::Null => Type::Class("null".to_string(), Vec::new()),
             Expr::Var(name) => {
@@ -2282,6 +2284,7 @@ fn map_type(ty: &Type, class_ids: &HashMap<String, ClassId>, enum_ids: &HashMap<
         Type::Float32 => TypeDesc::Float32,
         Type::Float64 => TypeDesc::Float64,
         Type::Bool => TypeDesc::Bool,
+        Type::Char => TypeDesc::Char,
         Type::String => TypeDesc::String,
         Type::Enum(name) => {
             let enum_id = *enum_ids.get(name).unwrap_or(&EnumId(0));

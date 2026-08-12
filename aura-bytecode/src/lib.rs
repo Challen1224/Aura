@@ -29,6 +29,8 @@ pub enum Value {
     Float(f64),
     /// Boolean.
     Bool(bool),
+    /// Unicode scalar value.
+    Char(char),
     /// Immutable string handle.
     String(GcRef),
     /// Object instance handle.
@@ -65,6 +67,7 @@ impl Value {
             Value::Int(_) => "int",
             Value::Float(_) => "float",
             Value::Bool(_) => "bool",
+            Value::Char(_) => "char",
             Value::String(_) => "string",
             Value::Object(_) => "object",
             Value::Enum(..) => "enum",
@@ -81,6 +84,7 @@ impl fmt::Display for Value {
             Value::Int(i) => write!(f, "{i}"),
             Value::Float(fl) => write!(f, "{fl}"),
             Value::Bool(b) => write!(f, "{b}"),
+            Value::Char(c) => write!(f, "{c}"),
             Value::String(_) => write!(f, "<string>"),
             Value::Object(_) => write!(f, "<object>"),
             Value::Enum(enum_id, variant_idx, fields) => {
@@ -315,6 +319,8 @@ pub enum TypeDesc {
     Float64,
     /// Boolean.
     Bool,
+    /// Unicode scalar value.
+    Char,
     /// String reference type.
     String,
     /// Class instance reference type with optional type arguments.
@@ -366,6 +372,7 @@ impl fmt::Display for TypeDesc {
             TypeDesc::Float32 => write!(f, "float32"),
             TypeDesc::Float64 => write!(f, "float64"),
             TypeDesc::Bool => write!(f, "bool"),
+            TypeDesc::Char => write!(f, "char"),
             TypeDesc::String => write!(f, "string"),
             TypeDesc::Class(ClassId(id), args) => {
                 if args.is_empty() {
@@ -452,6 +459,8 @@ pub enum Op {
     LdBool(bool),
     /// Push a string constant (index into constant pool).
     LdStr(u32),
+    /// Push a constant Unicode scalar value.
+    LdChar(u32),
     /// Push null.
     LdNull,
     /// Load local at index.

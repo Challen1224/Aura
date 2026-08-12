@@ -251,6 +251,7 @@ fn write_type<W: Write>(w: &mut W, t: &TypeDesc) -> io::Result<()> {
         TypeDesc::Float32 => 9,
         TypeDesc::Float64 => 10,
         TypeDesc::Bool => 11,
+        TypeDesc::Char => 18,
         TypeDesc::String => 12,
         TypeDesc::Class(_, _) => 13,
         TypeDesc::Null => 14,
@@ -293,6 +294,7 @@ fn read_type<R: Read>(r: &mut R) -> io::Result<TypeDesc> {
         9 => TypeDesc::Float32,
         10 => TypeDesc::Float64,
         11 => TypeDesc::Bool,
+        18 => TypeDesc::Char,
         12 => TypeDesc::String,
         13 => {
             let id = ClassId(read_u32(r)?);
@@ -353,6 +355,7 @@ fn write_op<W: Write>(w: &mut W, op: &Op) -> io::Result<()> {
         Op::LdFloat(idx) => (3, idx.to_le_bytes().to_vec()),
         Op::LdBool(b) => (4, vec![*b as u8]),
         Op::LdStr(idx) => (5, idx.to_le_bytes().to_vec()),
+        Op::LdChar(c) => (13, c.to_le_bytes().to_vec()),
         Op::LdNull => (6, vec![]),
         Op::Ldloc(idx) => (7, idx.to_le_bytes().to_vec()),
         Op::Stloc(idx) => (8, idx.to_le_bytes().to_vec()),
@@ -436,6 +439,7 @@ fn read_op<R: Read>(r: &mut R) -> io::Result<Op> {
         3 => Op::LdFloat(read_u32(r)?),
         4 => Op::LdBool(read_u8(r)? != 0),
         5 => Op::LdStr(read_u32(r)?),
+        13 => Op::LdChar(read_u32(r)?),
         6 => Op::LdNull,
         7 => Op::Ldloc(read_u16(r)?),
         8 => Op::Stloc(read_u16(r)?),
@@ -594,6 +598,7 @@ fn encode_type_args(type_args: &[TypeDesc]) -> Vec<u8> {
             TypeDesc::Float32 => 9,
             TypeDesc::Float64 => 10,
             TypeDesc::Bool => 11,
+            TypeDesc::Char => 18,
             TypeDesc::String => 12,
             TypeDesc::Class(id, _) => {
                 v.extend(id.0.to_le_bytes());
@@ -637,6 +642,7 @@ fn decode_type_args<R: Read>(r: &mut R) -> io::Result<Vec<TypeDesc>> {
             9 => TypeDesc::Float32,
             10 => TypeDesc::Float64,
             11 => TypeDesc::Bool,
+            18 => TypeDesc::Char,
             12 => TypeDesc::String,
             13 => {
                 let id = ClassId(read_u32(r)?);

@@ -268,6 +268,8 @@ pub enum Type {
     Float64,
     /// Boolean.
     Bool,
+    /// Unicode scalar value.
+    Char,
     /// String.
     String,
     /// Named class type with optional type arguments.
@@ -302,6 +304,7 @@ impl Type {
             Type::Float32 => "float32".to_string(),
             Type::Float64 => "float64".to_string(),
             Type::Bool => "bool".to_string(),
+            Type::Char => "char".to_string(),
             Type::String => "string".to_string(),
             Type::Class(name, args) => {
                 if args.is_empty() {
@@ -465,6 +468,8 @@ pub enum Expr {
     Cast(Box<Expr>, Type),
     /// Boolean literal.
     Bool(bool),
+    /// Character literal (Unicode scalar value).
+    Char(char),
     /// String literal.
     String(String),
     /// Interpolated string: `"Hello {name}!"`.

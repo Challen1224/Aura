@@ -18,6 +18,8 @@ pub enum Token {
     FloatLit(f64, FloatSuffix),
     /// String literal.
     StringLit(String),
+    /// Character literal (Unicode scalar value).
+    CharLit(char),
     /// Start of string interpolation `{`
     InterpStart,
     /// End of string interpolation `}`
@@ -175,6 +177,7 @@ impl fmt::Display for Token {
             Token::IntLit(i, _) => return write!(f, "integer {}", i),
             Token::FloatLit(x, _) => return write!(f, "float {}", x),
             Token::StringLit(s) => return write!(f, "string {:?}", s),
+            Token::CharLit(c) => return write!(f, "character {:?}", c),
             Token::InterpStart => "`{` (interpolation)",
             Token::InterpEnd => "`}` (interpolation)",
             Token::Plus => "`+`",
@@ -316,8 +319,13 @@ impl<'a> Lexer<'a> {
                 self.skip_block_comment()?;
                 self.next_token()
             }
+            Some('"') if self.peek_next() == Some('"') && self.peek_next_next() == Some('"') => {
+                self.multiline_string()
+            }
             Some('"') => self.string(),
+            Some('\'') => self.char_lit(),
             Some(c) if c.is_ascii_digit() => self.number(),
+            Some('r') if self.peek_next() == Some('"') => self.raw_string(),
             Some(c) if c.is_ascii_alphabetic() || c == '_' => self.identifier(),
             Some('+') => {
                 self.advance();
@@ -674,6 +682,135 @@ impl<'a> Lexer<'a> {
         Err(self.error("unterminated string"))
     }
 
+    /// Parse a character literal: `'a'`, `'\n'`, `'\u{1F600}'`.
+    fn char_lit(&mut self) -> Result<Token, String> {
+        self.advance(); // opening quote
+        let c = match self.peek() {
+            Some('\\') => {
+                self.advance(); // backslash
+                self.read_escape()?
+            }
+            Some(c) => {
+                self.advance();
+                c
+            }
+            None => return Err(self.error("unterminated character literal")),
+        };
+        if self.peek() != Some('\'') {
+            return Err(self.error("character literal must contain exactly one character"));
+        }
+        self.advance(); // closing quote
+        Ok(Token::CharLit(c))
+    }
+
+    /// Parse a raw string literal: `r"..."`. Content is taken verbatim (no
+    /// escapes, no interpolation) and may span multiple lines. Ends at the
+    /// first `"` after the opening quote.
+    fn raw_string(&mut self) -> Result<Token, String> {
+        self.advance(); // 'r'
+        self.advance(); // opening quote
+        let mut value = String::new();
+        while let Some(c) = self.peek() {
+            if c == '"' {
+                self.advance();
+                return Ok(Token::StringLit(value));
+            }
+            if c == '\n' {
+                self.line += 1;
+                self.col = 0;
+            }
+            value.push(c);
+            self.advance();
+        }
+        Err(self.error("unterminated raw string"))
+    }
+
+    /// Parse a multi-line string literal: `"""..."""`. Escape sequences are
+    /// processed but there is no interpolation; the string ends at the first
+    /// run of three closing quotes.
+    fn multiline_string(&mut self) -> Result<Token, String> {
+        self.advance(); // opening '"'
+        self.advance(); // opening '"'
+        self.advance(); // opening '"'
+        let mut value = String::new();
+        loop {
+            match self.peek() {
+                None => return Err(self.error("unterminated multi-line string")),
+                Some('"') if self.peek_next() == Some('"') && self.peek_next_next() == Some('"') => {
+                    self.advance();
+                    self.advance();
+                    self.advance();
+                    return Ok(Token::StringLit(value));
+                }
+                Some('"') => {
+                    value.push('"');
+                    self.advance();
+                }
+                Some('\\') => {
+                    self.advance(); // backslash
+                    if self.peek().is_none() {
+                        return Err(self.error("unterminated multi-line string"));
+                    }
+                    value.push(self.read_escape()?);
+                }
+                Some(c) => {
+                    if c == '\n' {
+                        self.line += 1;
+                        self.col = 0;
+                    }
+                    value.push(c);
+                    self.advance();
+                }
+            }
+        }
+    }
+
+    /// Parse an escape sequence; the backslash has already been consumed and
+    /// `peek()` points at the first character after it.
+    fn read_escape(&mut self) -> Result<char, String> {
+        let c = match self.peek() {
+            Some('n') => '\n',
+            Some('t') => '\t',
+            Some('r') => '\r',
+            Some('0') => '\0',
+            Some('\\') => '\\',
+            Some('\'') => '\'',
+            Some('"') => '"',
+            Some('{') => '{',
+            Some('}') => '}',
+            Some('u') => {
+                self.advance(); // consume 'u'
+                if self.peek() != Some('{') {
+                    return Err(self.error("expected `{` after `\\u`"));
+                }
+                self.advance();
+                let mut hex = String::new();
+                while let Some(h) = self.peek() {
+                    if h == '}' {
+                        break;
+                    }
+                    if !h.is_ascii_hexdigit() {
+                        return Err(self.error("invalid hex digit in `\\u{...}` escape"));
+                    }
+                    hex.push(h);
+                    self.advance();
+                }
+                if self.peek() != Some('}') {
+                    return Err(self.error("unterminated `\\u{...}` escape"));
+                }
+                self.advance(); // consume '}'
+                let scalar = u32::from_str_radix(&hex, 16)
+                    .map_err(|_| self.error("invalid `\\u{...}` escape"))?;
+                return char::from_u32(scalar)
+                    .ok_or_else(|| self.error("`\\u{...}` escape is not a valid Unicode scalar value"));
+            }
+            Some(other) => return Err(self.error(&format!("invalid escape `\\{}`", other))),
+            None => return Err(self.error("unterminated escape")),
+        };
+        self.advance();
+        Ok(c)
+    }
+
     fn number(&mut self) -> Result<Token, String> {
         while let Some(c) = self.peek() {
             if c.is_ascii_digit() {
@@ -863,6 +1000,13 @@ impl<'a> Lexer<'a> {
 
     fn peek_next(&mut self) -> Option<char> {
         let mut it = self.chars.clone();
+        it.next();
+        it.peek().copied()
+    }
+
+    fn peek_next_next(&mut self) -> Option<char> {
+        let mut it = self.chars.clone();
+        it.next();
         it.next();
         it.peek().copied()
     }
