@@ -129,6 +129,16 @@ impl Emitter {
                     self.next_method_id += 1;
                     constructor_ids.entry(class.name.clone()).or_default().push(id);
                 }
+                // Plain classes that declare no constructors get an implicit
+                // zero-parameter default constructor synthesized by the type
+                // checker; give it an id as well.
+                if !class.is_record
+                    && !class.members.iter().any(|m| matches!(m, Member::Method(m) if m.is_constructor))
+                {
+                    let id = MethodId(self.next_method_id);
+                    self.next_method_id += 1;
+                    constructor_ids.entry(class.name.clone()).or_default().push(id);
+                }
             }
         }
 
@@ -287,6 +297,27 @@ impl Emitter {
                         &class_generic_params, &constructor_ids, &mut module,
                     )?;
                     methods.insert(primary_id, method_def);
+                }
+                // Emit the synthesized implicit default constructor for classes
+                // that declare none: an empty body (which still chains to the
+                // base class's zero-parameter constructor when present).
+                if !class.is_record
+                    && !class.members.iter().any(|m| matches!(m, Member::Method(m) if m.is_constructor))
+                {
+                    let default = record_primary_constructor(class);
+                    let default_id = constructor_ids
+                        .get(&class.name)
+                        .and_then(|ids| ids.first())
+                        .copied()
+                        .ok_or_else(|| {
+                            format!("missing default constructor id for `{}`", class.name)
+                        })?;
+                    let (_, method_def) = self.build_method_def(
+                        program, class, &default, info, class_id, default_id, &method_ids,
+                        &class_ids, &enum_ids, &field_layouts,
+                        &class_generic_params, &constructor_ids, &mut module,
+                    )?;
+                    methods.insert(default_id, method_def);
                 }
 
                 module.classes.insert(

@@ -490,6 +490,11 @@ impl TypeChecker {
                             .collect();
                         info.constructors.push(ConstructorInfo { params: primary_params });
                     }
+                    // Classes that declare no constructors get an implicit
+                    // zero-parameter default constructor.
+                    if !c.is_interface && info.constructors.is_empty() {
+                        info.constructors.push(ConstructorInfo { params: Vec::new() });
+                    }
                     self.classes.insert(c.name.clone(), info);
                 }
                 Decl::Enum(e) => {
