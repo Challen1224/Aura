@@ -1,0 +1,44 @@
+enum Result {
+    Ok(int value),
+    Err(string message)
+}
+
+class Program {
+    static void Main() {
+        Result a = Ok(42);
+        Result b = Err("boom");
+        Result c = Result.Ok(7);
+
+        string da = match (a) {
+            Ok(v) => "ok",
+            Err(m) => "err:{m}"
+        };
+        string db = match (b) {
+            Ok(v) => "ok",
+            Err(m) => "err:{m}"
+        };
+        string dc = match (c) {
+            Ok(v) => "ok",
+            Err(m) => "err:{m}"
+        };
+        print(da);
+        println();
+        print(db);
+        println();
+        print(dc);
+        println();
+
+        int value = match (a) {
+            Ok(v) => v,
+            Err(m) => -1
+        };
+        print("got {value}");
+        println();
+
+        match (a) {
+            Ok(v) => print("bare ok {v}"),
+            Err(m) => print("bare err")
+        }
+        println();
+    }
+}

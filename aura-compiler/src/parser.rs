@@ -42,6 +42,8 @@ impl<'a> Parser<'a> {
             }
             if self.check(Token::Enum) {
                 decls.push(Decl::Enum(self.parse_enum()?));
+            } else if self.match_token(Token::Type) {
+                decls.push(Decl::Enum(self.parse_type_alias()?));
             } else if self.match_token(Token::Interface) {
                 decls.push(Decl::Class(self.parse_class(true, false, false)?));
             } else if self.match_token(Token::Abstract) {
@@ -186,6 +188,11 @@ impl<'a> Parser<'a> {
     fn parse_enum(&mut self) -> Result<EnumDecl, String> {
         self.consume(Token::Enum, "expected `enum`")?;
         let name = self.consume_ident("expected enum name")?;
+        let generic_params = if self.check(Token::Lt) {
+            self.parse_generic_params()?
+        } else {
+            Vec::new()
+        };
         self.consume(Token::LBrace, "expected `{`")?;
         let mut variants = Vec::new();
         while !self.check(Token::RBrace) && !self.is_at_end() {
@@ -220,7 +227,46 @@ impl<'a> Parser<'a> {
             self.skip_newlines();
         }
         self.consume(Token::RBrace, "expected `}`")?;
-        Ok(EnumDecl { name, variants })
+        Ok(EnumDecl { name, generic_params, variants })
+    }
+
+    /// Parse a sum-type declaration: `type Name<T, U> = V1 | V2(int) | ...;`
+    /// Desugars into an [`EnumDecl`] with positional (unnamed) variant fields.
+    fn parse_type_alias(&mut self) -> Result<EnumDecl, String> {
+        let name = self.consume_ident("expected type name after `type`")?;
+        let generic_params = if self.check(Token::Lt) {
+            self.parse_generic_params()?
+        } else {
+            Vec::new()
+        };
+        self.consume(Token::Assign, "expected `=` in type declaration")?;
+        let mut variants = Vec::new();
+        loop {
+            let variant_name = self.consume_ident("expected variant name")?;
+            let fields = if self.check(Token::LParen) {
+                self.consume(Token::LParen, "expected `(`")?;
+                let mut fields = Vec::new();
+                if !self.check(Token::RParen) {
+                    loop {
+                        let ty = self.parse_type()?;
+                        fields.push(EnumVariantField { ty, name: String::new() });
+                        if !self.match_token(Token::Comma) {
+                            break;
+                        }
+                    }
+                }
+                self.consume(Token::RParen, "expected `)`")?;
+                fields
+            } else {
+                Vec::new()
+            };
+            variants.push(EnumVariant { name: variant_name, fields });
+            if !self.match_token(Token::Pipe) {
+                break;
+            }
+        }
+        self.consume(Token::Semi, "expected `;` after type declaration")?;
+        Ok(EnumDecl { name, generic_params, variants })
     }
 
     fn parse_generic_params(&mut self) -> Result<Vec<GenericParam>, String> {

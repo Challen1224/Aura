@@ -27,6 +27,7 @@ struct MethodEmitter<'a> {
     program: &'a TypedProgram,
     class_ids: &'a HashMap<String, ClassId>,
     enum_ids: &'a HashMap<String, EnumId>,
+    variant_lookup: &'a HashMap<String, (EnumId, u16)>,
     field_layout: &'a HashMap<String, Vec<(String, Type)>>,
     ops: Vec<Op>,
     locals: Vec<String>,
@@ -79,6 +80,18 @@ impl Emitter {
                 let id = EnumId(self.next_enum_id);
                 self.next_enum_id += 1;
                 enum_ids.insert(e.name.clone(), id);
+            }
+        }
+
+        // Map each sum-type/enum variant name to its enum id and index so bare
+        // constructors (`Ok(5)`) and bare patterns (`Ok(v)`) can be emitted.
+        let mut variant_lookup: HashMap<String, (EnumId, u16)> = HashMap::new();
+        for decl in &program.program.decls {
+            if let Decl::Enum(e) = decl {
+                let id = enum_ids[&e.name];
+                for (idx, v) in e.variants.iter().enumerate() {
+                    variant_lookup.insert(v.name.clone(), (id, idx as u16));
+                }
             }
         }
 
@@ -230,7 +243,7 @@ impl Emitter {
 
                             let (method_id, method_def) = self.build_method_def(
                                 program, class, m, info, class_id, method_id, &method_ids,
-                                &class_ids, &enum_ids, &field_layouts,
+                                &class_ids, &enum_ids, &variant_lookup, &field_layouts,
                                 &class_generic_params, &constructor_ids, &mut module,
                             )?;
 
@@ -251,7 +264,7 @@ impl Emitter {
                                     self.build_method_def(
                                         program, class, &property_accessor_decl(class.name.clone(), p, true),
                                         info, class_id, accessor_id, &method_ids, &class_ids, &enum_ids,
-                                        &field_layouts, &class_generic_params, &constructor_ids, &mut module,
+                                        &variant_lookup, &field_layouts, &class_generic_params, &constructor_ids, &mut module,
                                     )?,
                                 ));
                             }
@@ -264,7 +277,7 @@ impl Emitter {
                                     self.build_method_def(
                                         program, class, &property_accessor_decl(class.name.clone(), p, false),
                                         info, class_id, accessor_id, &method_ids, &class_ids, &enum_ids,
-                                        &field_layouts, &class_generic_params, &constructor_ids, &mut module,
+                                        &variant_lookup, &field_layouts, &class_generic_params, &constructor_ids, &mut module,
                                     )?,
                                 ));
                             }
@@ -293,7 +306,7 @@ impl Emitter {
                         })?;
                     let (_, method_def) = self.build_method_def(
                         program, class, &primary, info, class_id, primary_id, &method_ids,
-                        &class_ids, &enum_ids, &field_layouts,
+                        &class_ids, &enum_ids, &variant_lookup, &field_layouts,
                         &class_generic_params, &constructor_ids, &mut module,
                     )?;
                     methods.insert(primary_id, method_def);
@@ -314,7 +327,7 @@ impl Emitter {
                         })?;
                     let (_, method_def) = self.build_method_def(
                         program, class, &default, info, class_id, default_id, &method_ids,
-                        &class_ids, &enum_ids, &field_layouts,
+                        &class_ids, &enum_ids, &variant_lookup, &field_layouts,
                         &class_generic_params, &constructor_ids, &mut module,
                     )?;
                     methods.insert(default_id, method_def);
@@ -357,6 +370,7 @@ impl Emitter {
         method_ids: &HashMap<(String, String, bool), MethodId>,
         class_ids: &HashMap<String, ClassId>,
         enum_ids: &HashMap<String, EnumId>,
+        variant_lookup: &HashMap<String, (EnumId, u16)>,
         field_layouts: &FieldLayout,
         class_generic_params: &[aura_bytecode::GenericParam],
         constructor_ids: &HashMap<String, Vec<MethodId>>,
@@ -370,6 +384,7 @@ impl Emitter {
             program,
             class_ids,
             enum_ids,
+            variant_lookup,
             field_layouts,
             method_ids,
             constructor_ids,
@@ -514,6 +529,7 @@ impl<'a> MethodEmitter<'a> {
         program: &'a TypedProgram,
         class_ids: &'a HashMap<String, ClassId>,
         enum_ids: &'a HashMap<String, EnumId>,
+        variant_lookup: &'a HashMap<String, (EnumId, u16)>,
         field_layout: &'a HashMap<String, Vec<(String, Type)>>,
         method_ids: &'a HashMap<(String, String, bool), MethodId>,
         constructor_ids: &'a HashMap<String, Vec<MethodId>>,
@@ -541,6 +557,7 @@ impl<'a> MethodEmitter<'a> {
             program,
             class_ids,
             enum_ids,
+            variant_lookup,
             field_layout,
             ops: Vec::new(),
             locals,
@@ -1374,6 +1391,12 @@ impl<'a> MethodEmitter<'a> {
                                 self.emit_expr(arg)?;
                             }
                             self.ops.push(Op::NewEnum(*enum_id, variant_idx as u16));
+                        } else if let Some((enum_id, variant_idx)) = self.variant_lookup.get(&call.method).copied() {
+                            // Bare sum-type constructor: `Ok(5)`.
+                            for arg in &call.args {
+                                self.emit_expr(arg)?;
+                            }
+                            self.ops.push(Op::NewEnum(enum_id, variant_idx));
                         } else {
                             for arg in &call.args {
                                 self.emit_expr(arg)?;
@@ -1598,6 +1621,12 @@ impl<'a> MethodEmitter<'a> {
                         
                         // Emit body
                         self.emit_expr(&arm.body)?;
+                        // A void body (e.g. an intrinsic or void method call)
+                        // leaves nothing on the stack; push null so the match
+                        // always yields exactly one value.
+                        if self.expr_ty(&arm.body).map(|t| t == Type::Unit).unwrap_or(false) {
+                            self.ops.push(Op::LdNull);
+                        }
                         let end_jump = self.ops.len();
                         self.ops.push(Op::Br(0));
                         end_jumps.push(end_jump);
@@ -1606,6 +1635,9 @@ impl<'a> MethodEmitter<'a> {
                     } else {
                         // Emit body
                         self.emit_expr(&arm.body)?;
+                        if self.expr_ty(&arm.body).map(|t| t == Type::Unit).unwrap_or(false) {
+                            self.ops.push(Op::LdNull);
+                        }
                         let end_jump = self.ops.len();
                         self.ops.push(Op::Br(0));
                         end_jumps.push(end_jump);
@@ -1668,6 +1700,11 @@ impl<'a> MethodEmitter<'a> {
                         // stack (no trailing Pop like a normal expression stmt).
                         if let Stmt::Expr(e) = s {
                             self.emit_expr(e)?;
+                            // A void trailing expression leaves nothing on the
+                            // stack; push null so the block still yields a value.
+                            if self.expr_ty(e).map(|t| t == Type::Unit).unwrap_or(false) {
+                                self.ops.push(Op::LdNull);
+                            }
                             break;
                         }
                     }
@@ -1796,18 +1833,39 @@ impl<'a> MethodEmitter<'a> {
                 }
             }
             Pattern::RecordClass(class_name, sub_patterns) => {
-                let info = self.program.classes.get(class_name).ok_or_else(|| {
-                    format!("unknown class `{}`", class_name)
-                })?;
-                if !info.is_record {
-                    return Err(format!("`{}` is not a record class", class_name));
-                }
-                for (i, sub) in sub_patterns.iter().enumerate() {
-                    let field_local = self.push_local("__pattern_field".to_string()) as u16;
-                    self.ops.push(Op::Ldloc(subject_local));
-                    self.ops.push(Op::Ldfld(i as u16));
-                    self.ops.push(Op::Stloc(field_local));
-                    self.emit_pattern(sub, field_local, fail_jumps)?;
+                match self.program.classes.get(class_name) {
+                    Some(info) => {
+                        if !info.is_record {
+                            return Err(format!("`{}` is not a record class", class_name));
+                        }
+                        for (i, sub) in sub_patterns.iter().enumerate() {
+                            let field_local = self.push_local("__pattern_field".to_string()) as u16;
+                            self.ops.push(Op::Ldloc(subject_local));
+                            self.ops.push(Op::Ldfld(i as u16));
+                            self.ops.push(Op::Stloc(field_local));
+                            self.emit_pattern(sub, field_local, fail_jumps)?;
+                        }
+                    }
+                    None => {
+                        // Bare sum-type variant pattern: `Ok(v)`.
+                        let (_enum_id, variant_idx) = *self.variant_lookup.get(class_name).ok_or_else(|| {
+                            format!("unknown class `{}`", class_name)
+                        })?;
+                        self.ops.push(Op::Ldloc(subject_local));
+                        self.ops.push(Op::EnumTag);
+                        self.ops.push(Op::LdInt(variant_idx as i32));
+                        self.ops.push(Op::Eq);
+                        fail_jumps.push(self.ops.len());
+                        self.ops.push(Op::BrFalse(0));
+
+                        for (i, sub) in sub_patterns.iter().enumerate() {
+                            let field_local = self.push_local("__pattern_field".to_string()) as u16;
+                            self.ops.push(Op::Ldloc(subject_local));
+                            self.ops.push(Op::EnumField(i as u16));
+                            self.ops.push(Op::Stloc(field_local));
+                            self.emit_pattern(sub, field_local, fail_jumps)?;
+                        }
+                    }
                 }
             }
             Pattern::Range(start, end, inclusive) => {
@@ -2291,13 +2349,13 @@ fn map_type(ty: &Type, class_ids: &HashMap<String, ClassId>, enum_ids: &HashMap<
             TypeDesc::Enum(enum_id)
         }
         Type::Class(name, args) => {
-            if args.is_empty() {
-                if let Some(idx) = generic_params.iter().position(|gp| gp.name == *name) {
-                    return TypeDesc::GenericParam(idx as u32);
-                }
-                if let Some(enum_id) = enum_ids.get(name) {
-                    return TypeDesc::Enum(*enum_id);
-                }
+            if let Some(idx) = generic_params.iter().position(|gp| gp.name == *name) {
+                return TypeDesc::GenericParam(idx as u32);
+            }
+            if let Some(enum_id) = enum_ids.get(name) {
+                // Enum (or sum-type) reference; runtime type arguments are not
+                // needed since enum values carry only their variant and fields.
+                return TypeDesc::Enum(*enum_id);
             }
             let class_id = *class_ids.get(name).unwrap_or(&ClassId(0));
             let mapped_args: Vec<TypeDesc> = args.iter().map(|a| map_type(a, class_ids, enum_ids, generic_params)).collect();

@@ -169,6 +169,8 @@ pub struct MethodInfo {
 pub struct EnumInfo {
     /// Enum name.
     pub name: String,
+    /// Generic parameters (empty for plain enums).
+    pub generic_params: Vec<GenericParam>,
     /// Variants in declaration order.
     pub variants: Vec<VariantInfo>,
 }
@@ -511,9 +513,13 @@ impl TypeChecker {
                             name: v.name.clone(),
                             fields,
                         });
+                        for f in &v.fields {
+                            self.validate_type_with_generics(&f.ty, &e.generic_params)?;
+                        }
                     }
                     self.enums.insert(e.name.clone(), EnumInfo {
                         name: e.name.clone(),
+                        generic_params: e.generic_params.clone(),
                         variants,
                     });
                 }
@@ -1445,56 +1451,93 @@ impl TypeChecker {
                         enum_name, variant_name, variant.fields.len(), sub_patterns.len()
                     )));
                 }
-                if let Type::Enum(ref sn) = expected_ty {
-                    if sn != enum_name {
+                let enum_args = match expected_ty {
+                    Type::Enum(sn) if sn == enum_name => Vec::new(),
+                    Type::Class(name, args) if name == enum_name => args.clone(),
+                    _ => {
                         return Err(TypeError(format!(
                             "cannot match enum `{}` against value of type `{}`",
                             enum_name, expected_ty.name()
                         )));
                     }
-                }
+                };
+                let subst = build_subst(&enum_info.generic_params, &enum_args);
                 for (sub, (_, field_ty)) in sub_patterns.iter().zip(variant.fields.iter()) {
+                    let sub_ty = substitute_type(field_ty, &subst);
                     bindings.extend(self.check_pattern(
-                        sub, field_ty, class, locals, in_instance, return_ty, generic_params,
+                        sub, &sub_ty, class, locals, in_instance, return_ty, generic_params,
                     )?);
                 }
             }
             Pattern::RecordClass(class_name, sub_patterns) => {
-                let info = self.classes.get(class_name).ok_or_else(|| {
-                    TypeError(format!("unknown class `{}`", class_name))
-                })?;
-                if !info.is_record {
-                    return Err(TypeError(format!(
-                        "`{}` is not a record class",
-                        class_name
-                    )));
-                }
-                let Type::Class(expected_name, _) = expected_ty else {
-                    return Err(TypeError(format!(
-                        "cannot match record `{}` against value of type `{}`",
-                        class_name,
-                        expected_ty.name()
-                    )));
-                };
-                if expected_name != class_name {
-                    return Err(TypeError(format!(
-                        "record pattern `{}` cannot match value of type `{}`",
-                        class_name,
-                        expected_ty.name()
-                    )));
-                }
-                if sub_patterns.len() != info.instance_fields.len() {
-                    return Err(TypeError(format!(
-                        "record `{}` has {} fields but pattern has {} sub-patterns",
-                        class_name,
-                        info.instance_fields.len(),
-                        sub_patterns.len()
-                    )));
-                }
-                for (sub, (_, field_ty)) in sub_patterns.iter().zip(info.instance_fields.iter()) {
-                    bindings.extend(self.check_pattern(
-                        sub, field_ty, class, locals, in_instance, return_ty, generic_params,
-                    )?);
+                match self.classes.get(class_name) {
+                    Some(info) => {
+                        if !info.is_record {
+                            return Err(TypeError(format!(
+                                "`{}` is not a record class",
+                                class_name
+                            )));
+                        }
+                        let Type::Class(expected_name, _) = expected_ty else {
+                            return Err(TypeError(format!(
+                                "cannot match record `{}` against value of type `{}`",
+                                class_name,
+                                expected_ty.name()
+                            )));
+                        };
+                        if expected_name != class_name {
+                            return Err(TypeError(format!(
+                                "record pattern `{}` cannot match value of type `{}`",
+                                class_name,
+                                expected_ty.name()
+                            )));
+                        }
+                        if sub_patterns.len() != info.instance_fields.len() {
+                            return Err(TypeError(format!(
+                                "record `{}` has {} fields but pattern has {} sub-patterns",
+                                class_name,
+                                info.instance_fields.len(),
+                                sub_patterns.len()
+                            )));
+                        }
+                        for (sub, (_, field_ty)) in sub_patterns.iter().zip(info.instance_fields.iter()) {
+                            bindings.extend(self.check_pattern(
+                                sub, field_ty, class, locals, in_instance, return_ty, generic_params,
+                            )?);
+                        }
+                    }
+                    None => {
+                        // Bare sum-type variant pattern: `Ok(v)` with no type
+                        // prefix. Resolve the variant to its unique sum type.
+                        let (enum_name, enum_info) = self.resolve_bare_variant(class_name)?;
+                        let variant = enum_info.variants.iter().find(|v| v.name == *class_name).unwrap();
+                        if sub_patterns.len() != variant.fields.len() {
+                            return Err(TypeError(format!(
+                                "variant `{}` has {} fields but pattern has {} sub-patterns",
+                                class_name,
+                                variant.fields.len(),
+                                sub_patterns.len()
+                            )));
+                        }
+                        let enum_args = match expected_ty {
+                            Type::Enum(sn) if *sn == *enum_name => Vec::new(),
+                            Type::Class(name, args) if *name == *enum_name => args.clone(),
+                            _ => {
+                                return Err(TypeError(format!(
+                                    "cannot match variant `{}` against value of type `{}`",
+                                    class_name,
+                                    expected_ty.name()
+                                )));
+                            }
+                        };
+                        let subst = build_subst(&enum_info.generic_params, &enum_args);
+                        for (sub, (_, field_ty)) in sub_patterns.iter().zip(variant.fields.iter()) {
+                            let sub_ty = substitute_type(field_ty, &subst);
+                            bindings.extend(self.check_pattern(
+                                sub, &sub_ty, class, locals, in_instance, return_ty, generic_params,
+                            )?);
+                        }
+                    }
                 }
             }
             Pattern::Range(start, end, _) => {
@@ -1692,25 +1735,10 @@ impl TypeChecker {
                 Ok(substitute_type(&field_type, &subst))
             }
             Expr::StaticField(class_name, name) => {
-                if let Some(enum_info) = self.enums.get(class_name) {
-                    let variant = enum_info.variants.iter().find(|v| v.name == *name);
-                    match variant {
-                        Some(v) if v.fields.is_empty() => {
-                            return Ok(Type::Enum(class_name.clone()));
-                        }
-                        Some(_) => {
-                            return Err(TypeError(format!(
-                                "enum variant `{}.{}` requires arguments",
-                                class_name, name
-                            )));
-                        }
-                        None => {
-                            return Err(TypeError(format!(
-                                "unknown variant `{}.{}`",
-                                class_name, name
-                            )));
-                        }
-                    }
+                if self.enums.contains_key(class_name) {
+                    return self.infer_enum_construction(
+                        class_name, name, &[], class, locals, in_instance, return_ty, generic_params,
+                    );
                 }
                 if !self.classes.contains_key(class_name) {
                     return Err(TypeError(format!("unknown class `{}`", class_name)));
@@ -1988,29 +2016,9 @@ impl TypeChecker {
                 Ok(result_ty.unwrap_or(Type::Unit))
             }
             Expr::EnumVariant(enum_name, variant_name, args) => {
-                let enum_info = self.enums.get(enum_name).ok_or_else(|| {
-                    TypeError(format!("unknown enum `{}`", enum_name))
-                })?;
-                let variant = enum_info.variants.iter().find(|v| v.name == *variant_name)
-                    .ok_or_else(|| TypeError(format!(
-                        "unknown variant `{}.{}`", enum_name, variant_name
-                    )))?;
-                if args.len() != variant.fields.len() {
-                    return Err(TypeError(format!(
-                        "variant `{}.{}` expects {} arguments, got {}",
-                        enum_name, variant_name, variant.fields.len(), args.len()
-                    )));
-                }
-                for (arg, (_, expected_ty)) in args.iter().zip(variant.fields.iter()) {
-                    let arg_ty = self.infer_expr(arg, class, locals, in_instance, return_ty, generic_params)?;
-                    if !self.is_assignable(expected_ty, &arg_ty) {
-                        return Err(TypeError(format!(
-                            "argument type mismatch in `{}.{}`: expected {}, got {}",
-                            enum_name, variant_name, expected_ty.name(), arg_ty.name()
-                        )));
-                    }
-                }
-                Ok(Type::Enum(enum_name.clone()))
+                return self.infer_enum_construction(
+                    enum_name, variant_name, args, class, locals, in_instance, return_ty, generic_params,
+                );
             }
             Expr::Tuple(elements) => {
                 let mut types = Vec::new();
@@ -2327,6 +2335,102 @@ impl TypeChecker {
         }
     }
 
+    /// Whether a type is a bare reference to the given type parameter (either
+    /// the parser's `Class(name, [])` form or an explicit `GenericParam`).
+    fn is_param_ref(ty: &Type, param: &str) -> bool {
+        matches!(ty, Type::Class(n, args) if n == param && args.is_empty())
+            || matches!(ty, Type::GenericParam(n) if n == param)
+    }
+
+    /// Resolve a bare variant name to the single sum type that declares it.
+    /// Returns an error if no enum declares it, or if several do (ambiguous).
+    fn resolve_bare_variant(&self, variant_name: &str) -> Result<(String, EnumInfo), TypeError> {
+        let mut found = None;
+        for (name, info) in &self.enums {
+            if info.variants.iter().any(|v| v.name == variant_name) {
+                if found.is_some() {
+                    return Err(TypeError(format!(
+                        "variant `{}` is ambiguous: declared by multiple sum types; use `Type.{}`",
+                        variant_name, variant_name
+                    )));
+                }
+                found = Some((name.clone(), info.clone()));
+            }
+        }
+        found.ok_or_else(|| TypeError(format!("unknown variant `{}`", variant_name)))
+    }
+
+    /// Type-check construction of an enum variant, e.g. `Result.Ok(5)` or a
+    /// bare `Ok(5)`. `enum_name` is the resolved sum-type/enum name. Generic
+    /// type parameters that appear in the selected variant's fields are
+    /// inferred from the argument expressions; parameters not used by this
+    /// variant are left as `Type::GenericParam` and later unified against an
+    /// expected type by `is_assignable`.
+    fn infer_enum_construction(
+        &self,
+        enum_name: &str,
+        variant_name: &str,
+        args: &[Expr],
+        class: &ClassInfo,
+        locals: &HashMap<String, Type>,
+        in_instance: bool,
+        return_ty: &Type,
+        generic_params: &[GenericParam],
+    ) -> Result<Type, TypeError> {
+        let enum_info = self.enums.get(enum_name).ok_or_else(|| {
+            TypeError(format!("unknown enum `{}`", enum_name))
+        })?;
+        let variant = enum_info.variants.iter().find(|v| v.name == *variant_name)
+            .ok_or_else(|| TypeError(format!(
+                "unknown variant `{}.{}`", enum_name, variant_name
+            )))?;
+        if args.len() != variant.fields.len() {
+            return Err(TypeError(format!(
+                "variant `{}.{}` expects {} arguments, got {}",
+                enum_name, variant_name, variant.fields.len(), args.len()
+            )));
+        }
+
+        let mut arg_tys = Vec::with_capacity(args.len());
+        for arg in args {
+            arg_tys.push(self.infer_expr(arg, class, locals, in_instance, return_ty, generic_params)?);
+        }
+
+        // Infer type parameters from arguments that occupy whole field slots.
+        let mut subst: TypeSubst = HashMap::new();
+        for ((_, field_ty), arg_ty) in variant.fields.iter().zip(arg_tys.iter()) {
+            if let Some(p) = enum_info.generic_params.iter().find(|gp| Self::is_param_ref(field_ty, &gp.name)) {
+                subst.insert(p.name.clone(), arg_ty.clone());
+            }
+        }
+
+        // Validate each argument against its substituted field type; an
+        // unbound parameter is satisfied by the argument that fills its slot.
+        for ((_, field_ty), arg_ty) in variant.fields.iter().zip(arg_tys.iter()) {
+            let expected = substitute_type(field_ty, &subst);
+            let unbound = enum_info.generic_params.iter()
+                .find(|gp| Self::is_param_ref(&expected, &gp.name));
+            if let Some(p) = unbound {
+                subst.insert(p.name.clone(), arg_ty.clone());
+            } else if !self.is_assignable(&expected, arg_ty) {
+                return Err(TypeError(format!(
+                    "argument type mismatch in `{}.{}`: expected {}, got {}",
+                    enum_name, variant_name, expected.name(), arg_ty.name()
+                )));
+            }
+        }
+
+        if enum_info.generic_params.is_empty() {
+            Ok(Type::Enum(enum_name.to_string()))
+        } else {
+            let type_args = enum_info.generic_params.iter().map(|gp| {
+                subst.get(&gp.name).cloned()
+                    .unwrap_or_else(|| Type::GenericParam(gp.name.clone()))
+            }).collect();
+            Ok(Type::Class(enum_name.to_string(), type_args))
+        }
+    }
+
     fn check_call(
         &self,
         call: &CallExpr,
@@ -2432,38 +2536,23 @@ impl TypeChecker {
         } else {
             // static call: ClassName.Method(args) or EnumName.Variant(args)
             let class_name = call.class_or_target.clone();
-            
-            if let Some(enum_info) = self.enums.get(&class_name) {
-                let variant = enum_info.variants.iter().find(|v| v.name == call.method);
-                match variant {
-                    Some(v) => {
-                        if call.args.len() != v.fields.len() {
-                            return Err(TypeError(format!(
-                                "variant `{}.{}` expects {} arguments, got {}",
-                                class_name, call.method, v.fields.len(), call.args.len()
-                            )));
-                        }
-                        for (arg, (_, expected_ty)) in call.args.iter().zip(v.fields.iter()) {
-                            let arg_ty = self.infer_expr(arg, class, locals, in_instance, return_ty, generic_params)?;
-                            if !self.is_assignable(expected_ty, &arg_ty) {
-                                return Err(TypeError(format!(
-                                    "argument type mismatch in `{}.{}`: expected {}, got {}",
-                                    class_name, call.method, expected_ty.name(), arg_ty.name()
-                                )));
-                            }
-                        }
-                        return Ok(Type::Enum(class_name));
-                    }
-                    None => {
-                        return Err(TypeError(format!(
-                            "unknown variant `{}.{}`",
-                            class_name, call.method
-                        )));
-                    }
-                }
+
+            if self.enums.contains_key(&class_name) {
+                return self.infer_enum_construction(
+                    &class_name, &call.method, &call.args, class, locals, in_instance, return_ty, generic_params,
+                );
             }
-            
+
             if !self.classes.contains_key(&class_name) {
+                // Bare variant construction: `Ok(5)` where `Ok` is a sum-type
+                // variant. Only attempt this when a matching variant exists, so
+                // unknown-class errors keep their usual message.
+                if self.enums.values().any(|info| info.variants.iter().any(|v| v.name == call.method)) {
+                    let (enum_name, _) = self.resolve_bare_variant(&call.method)?;
+                    return self.infer_enum_construction(
+                        &enum_name, &call.method, &call.args, class, locals, in_instance, return_ty, generic_params,
+                    );
+                }
                 return Err(TypeError(format!("unknown class `{}`", class_name)));
             }
             let (declared_in, method_info) = self
@@ -2650,7 +2739,23 @@ impl TypeChecker {
             return self.numeric_widening(target, source);
         }
         match (target, source) {
-            (Type::Class(target_name, _), Type::Class(source_name, _)) => {
+            // Unbound type parameters (from sum-type construction) accept any
+            // type; they are unified with an expected type later.
+            (Type::GenericParam(_), _) | (_, Type::GenericParam(_)) => true,
+            (Type::Class(target_name, target_args), Type::Class(source_name, source_args)) => {
+                // Same-name reference: compare type arguments elementwise so a
+                // sum type like `Result<int, string>` is checked against an
+                // inferred `Result<int, T>`.
+                if target_name == source_name
+                    && !target_args.is_empty()
+                    && !source_args.is_empty()
+                {
+                    return target_args.len() == source_args.len()
+                        && target_args
+                            .iter()
+                            .zip(source_args)
+                            .all(|(t, s)| self.is_assignable(t, s));
+                }
                 // Null is assignable to any class reference.
                 if source_name == "null" {
                     return true;

@@ -70,6 +70,8 @@ pub enum Token {
     And,
     /// `||`
     Or,
+    /// `|`
+    Pipe,
     /// `..`
     DotDot,
     /// `..=`
@@ -78,6 +80,8 @@ pub enum Token {
     // Keywords
     /// `class`
     Class,
+    /// `type`
+    Type,
     /// `static`
     Static,
     /// `void`
@@ -203,9 +207,11 @@ impl fmt::Display for Token {
             Token::Bang => "`!`",
             Token::And => "`&&`",
             Token::Or => "`||`",
+            Token::Pipe => "`|`",
             Token::DotDot => "`..`",
             Token::DotDotEq => "`..=`",
             Token::Class => "`class`",
+            Token::Type => "`type`",
             Token::Static => "`static`",
             Token::Void => "`void`",
             Token::Int => "`int`",
@@ -444,7 +450,7 @@ impl<'a> Lexer<'a> {
                 if self.match_char('|') {
                     Ok(Token::Or)
                 } else {
-                    Err(self.error("unexpected character `|`"))
+                    Ok(Token::Pipe)
                 }
             }
             Some(c) => Err(self.error(&format!("unexpected character `{}`", c))),
@@ -941,6 +947,7 @@ impl<'a> Lexer<'a> {
         let word = self.current.as_str();
         Ok(match word {
             "class" => Token::Class,
+            "type" => Token::Type,
             "static" => Token::Static,
             "void" => Token::Void,
             "int" => Token::Int,

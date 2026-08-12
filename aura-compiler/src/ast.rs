@@ -20,6 +20,9 @@ pub enum Decl {
 #[derive(Debug, Clone, PartialEq)]
 pub struct EnumDecl {
     pub name: String,
+    /// Generic parameters (e.g., `<T, E>`). Sum types declared with
+    /// `type Result<T, E> = ...` carry their type parameters here.
+    pub generic_params: Vec<GenericParam>,
     pub variants: Vec<EnumVariant>,
 }
 

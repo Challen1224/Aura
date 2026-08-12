@@ -1,0 +1,39 @@
+enum Option {
+    None,
+    Some(int value)
+}
+
+class Helper {
+    void shout() {
+        print("shout!");
+    }
+}
+
+class Program {
+    static void Main() {
+        Option opt = Option.Some(42);
+
+        match (opt) {
+            Option.Some(v) => {
+                print("some ");
+                print(v);
+                println();
+            },
+            Option.None => print("none")
+        }
+
+        Helper h = new Helper();
+        match (opt) {
+            Option.Some(v) => h.shout(),
+            Option.None => h.shout()
+        }
+        println();
+
+        int value = match (opt) {
+            Option.Some(v) => v,
+            Option.None => -1
+        };
+        print("value {value}");
+        println();
+    }
+}

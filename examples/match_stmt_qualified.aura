@@ -1,0 +1,18 @@
+enum Color {
+    Red,
+    Green
+}
+
+class Program {
+    static void Main() {
+        Color c = Color.Red;
+
+        match (c) {
+            Color.Red => print("red"),
+            Color.Green => print("green")
+        }
+        println();
+        print("done");
+        println();
+    }
+}
