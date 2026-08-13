@@ -1,8 +1,9 @@
 # Aura Language TODO
 
-> **Status:** Core language: usable prototype. Runtime/stdlib/tooling: early  
-> **Last Updated:** 2026-08-11  
-> **Current Version:** 0.26.0
+> **Status:** Core language and compiler: usable. VM with GC and baseline
+> x86-64 JIT: implemented. Stdlib/tooling: early.  
+> **Last Updated:** 2026-08-12  
+> **Current Version:** 1.0.0
 
 ---
 
@@ -43,7 +44,8 @@
 ### 1.1 Type System
 
 #### ✅ Completed
-- [x] Basic primitive types: `int`, `float`, `bool`, `string`, `void`
+- [x] Primitive types: `int8`–`int64`, `uint8`–`uint64`, `float32`/`float64`,
+      `bool`, `char`, `string`, `void`
 - [x] Null reference type
 - [x] Type inference for local variables
 - [x] Static type checking
@@ -254,7 +256,6 @@
 - [x] Assignment expressions
 - [x] Variable shadowing (proper scoping)
 
-#### ✅ Completed
 - [x] **Range expressions**
   ```aura
   for (int i in 1..10) { }      // exclusive: 1 to 9
@@ -613,11 +614,11 @@
 #### ⏳ Planned
 
 **P0 - Critical**
-- [ ] **JIT compilation**
-  - [ ] Tiered compilation (interpreter → baseline JIT → optimizing JIT)
+- [x] **JIT compilation**
+  - [x] Tiered compilation (interpreter → baseline JIT; optimizing JIT pending)
+  - [x] Constant folding
+  - [x] Dead code elimination
   - [ ] Method inlining
-  - [ ] Constant folding
-  - [ ] Dead code elimination
   - [ ] Loop optimizations
 
 - [ ] **Bytecode optimizations**
@@ -626,10 +627,10 @@
   - [ ] Common subexpression elimination
   - [ ] Strength reduction
 
-- [ ] **Stack machine optimizations**
-  - [ ] Convert to register-based IR
-  - [ ] Register allocation
-  - [ ] SSA form
+- [x] **Stack machine optimizations**
+  - [x] Convert to register-based IR
+  - [x] Register allocation
+  - [x] SSA form
 
 **P1 - High Priority**
 - [ ] **Inline caching**
@@ -674,7 +675,7 @@
   - [ ] Debug information (DWARF or custom format)
   - [ ] Line number mapping
   - [ ] Variable inspection
-  - [ ] Stack traces
+  - [x] Stack traces
 
 - [ ] **REPL / Interactive mode**
   ```bash

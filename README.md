@@ -1,32 +1,7 @@
 # Aura
 
-A from-scratch, statically-typed, object-oriented programming language and runtime, architected similarly to C# / .NET CLR.
-
-**Host language:** Rust
-
-## Components
-
-| Crate | Role |
-|-------|------|
-| `aura-bytecode` | Custom bytecode ISA, values, object model, method/class metadata |
-| `aura-vm` | Stack-based VM, managed heap, mark-and-sweep GC |
-| `aura-compiler` | Lexer → parser → type-checker → bytecode emitter |
-| `aura-cli` | `aura` CLI — compile and run `.aura` programs |
-
-## Quick start
-
-```bash
-# Build
-cargo build --release
-
-# Run a program
-cargo run -p aura-cli -- run examples/hello.aura
-
-# Compile to bytecode dump
-cargo run -p aura-cli -- compile examples/hello.aura
-```
-
-## Language sketch
+A from-scratch, statically-typed, object-oriented programming language and
+runtime, architected like C# / .NET CLR and written entirely in Rust.
 
 ```aura
 class Program {
@@ -38,6 +13,64 @@ class Program {
 }
 ```
 
+## Highlights
+
+- **Modern type system** — numeric hierarchy (`int8`–`int64`, `uint8`–`uint64`,
+  `float32`/`float64`), `char`, `bool`, `string`, `null`
+- **Object-oriented core** — classes, interfaces, inheritance, virtual dispatch,
+  abstract/sealed/final, properties, records with value semantics
+- **Algebraic data types** — enums with pattern matching, generic sum types,
+  tuples with destructuring
+- **Generics** — reified generic classes and methods with constraints
+- **Exceptions** — try/catch/finally, custom exception classes, stack traces,
+  `using` for resource management
+- **Rich expressions** — ranges, pattern guards, null-coalescing (`??`) and
+  null-conditional (`?.`), expression blocks, labeled loops
+- **Tiered JIT** (x86-64) — hot methods compile to native code; the rest run on
+  a bytecode interpreter
+
+## Quick start
+
+```bash
+# Build the whole toolchain
+cargo build --release
+
+# Compile and run a program
+cargo run -p aura-cli -- run examples/hello.aura
+
+# Compile and dump the resulting bytecode module
+cargo run -p aura-cli -- compile examples/hello.aura
+```
+
+Try one of the 40+ programs under [`examples/`](examples/):
+
+```bash
+cargo run -p aura-cli -- run examples/fib.aura
+cargo run -p aura-cli -- run examples/records.aura
+cargo run -p aura-cli -- run examples/generics.aura
+```
+
+## Components
+
+| Crate           | Role                                                        |
+|-----------------|-------------------------------------------------------------|
+| `aura-bytecode` | Bytecode ISA, 16-byte `Value` model, object/metadata types  |
+| `aura-vm`       | Stack VM, managed heap, mark-and-sweep GC, x86-64 JIT       |
+| `aura-compiler` | Lexer → parser → type-checker → bytecode emitter            |
+| `aura-cli`      | `aura` CLI — compile and run `.aura` programs               |
+
+### The JIT
+
+`aura-vm` ships a baseline x86-64 JIT. Methods run interpreted until they cross
+an invocation threshold, then are compiled to native code via an SSA-like IR,
+optimization passes, linear-scan register allocation, and a machine-code
+emitter. Complex operations (allocation, calls, field access, exceptions,
+`div`/`rem`) delegate to VM helper stubs that reuse the interpreter's exact
+semantics.
+
+The JIT is enabled through the VM API (`vm.enable_jit()`), requires an x86-64
+host, and falls back to a stub on other architectures.
+
 ## Architecture
 
 ```
@@ -47,12 +80,29 @@ class Program {
 ┌────────┐   ┌────────┐   ┌──────────────┐   ┌─────────┐
 │ Lexer  │ → │ Parser │ → │ Type-checker │ → │ Emitter │
 └────────┘   └────────┘   └──────────────┘   └─────────┘
-                                                   │
-                                                   ▼
-                                            Bytecode module
-                                                   │
-                                                   ▼
-┌──────────────────────────────────────────────────────────┐
-│  VM: call stack · eval stack · locals · managed heap · GC │
-└──────────────────────────────────────────────────────────┘
+                                                    │
+                                                    ▼
+                                             Bytecode module
+                                                    │
+                                                    ▼
+┌────────────────────────────────────────────────────────┐
+│ VM: call stack · eval stack · locals · heap · GC       │
+│ x86-64 JIT (tiered: interpret → compile hot)           │
+└────────────────────────────────────────────────────────┘
 ```
+
+Every `Value` is a fixed 16-byte `[tag, payload]` pair, which lets the JIT and
+interpreter share one compact representation and lets compiled code treat a
+value as two registers.
+
+## Roadmap
+
+See [TODO.md](TODO.md) for the feature roadmap and current status.
+
+## Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for how to build, test, and contribute.
+
+## License
+
+Aura is released under the [MIT license](LICENSE).
