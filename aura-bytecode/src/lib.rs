@@ -18,6 +18,10 @@ pub mod encode;
 /// Reference types (`AuraObject`) live behind `GcRef` handles into the VM heap.
 /// All integer types (int8..int64, uint8..uint64) are stored in the single
 /// `Int(i64)` slot; width is carried by static types and conversions.
+///
+/// Enum and tuple values are stored in the managed heap so that every `Value`
+/// is exactly 16 bytes (an 8-byte tag followed by an 8-byte payload). This
+/// compact representation lets the JIT treat a value as a pair of registers.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Value {
     /// Unit / void result.
@@ -35,12 +39,30 @@ pub enum Value {
     String(GcRef),
     /// Object instance handle.
     Object(GcRef),
-    /// Enum value: (enum_id, variant_index, field_values).
-    Enum(u32, u32, Vec<Value>),
-    /// Tuple value: (element_values).
-    Tuple(Vec<Value>),
+    /// Enum value stored in the managed heap.
+    Enum(GcRef),
+    /// Tuple value stored in the managed heap.
+    Tuple(GcRef),
     /// Null reference.
     Null,
+}
+
+/// Payload of an enum value on the managed heap.
+#[derive(Debug, Clone, PartialEq)]
+pub struct EnumValue {
+    /// Enum metadata id.
+    pub enum_id: u32,
+    /// Variant index within the enum.
+    pub variant_idx: u32,
+    /// Variant field values.
+    pub fields: Vec<Value>,
+}
+
+/// Payload of a tuple value on the managed heap.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TupleValue {
+    /// Element values.
+    pub elements: Vec<Value>,
 }
 
 impl Value {
@@ -70,9 +92,18 @@ impl Value {
             Value::Char(_) => "char",
             Value::String(_) => "string",
             Value::Object(_) => "object",
-            Value::Enum(..) => "enum",
+            Value::Enum(_) => "enum",
             Value::Tuple(_) => "tuple",
             Value::Null => "null",
+        }
+    }
+
+    /// Garbage-collector references held directly by this value. The values
+    /// behind enum/tuple handles are traced recursively by their heap objects.
+    pub fn contained_refs(&self) -> Vec<GcRef> {
+        match self {
+            Value::String(r) | Value::Object(r) | Value::Enum(r) | Value::Tuple(r) => vec![*r],
+            _ => Vec::new(),
         }
     }
 }
@@ -87,26 +118,8 @@ impl fmt::Display for Value {
             Value::Char(c) => write!(f, "{c}"),
             Value::String(_) => write!(f, "<string>"),
             Value::Object(_) => write!(f, "<object>"),
-            Value::Enum(enum_id, variant_idx, fields) => {
-                write!(f, "enum({enum_id}:{variant_idx})")?;
-                if !fields.is_empty() {
-                    write!(f, "(")?;
-                    for (i, field) in fields.iter().enumerate() {
-                        if i > 0 { write!(f, ", ")?; }
-                        write!(f, "{field}")?;
-                    }
-                    write!(f, ")")?;
-                }
-                Ok(())
-            }
-            Value::Tuple(elements) => {
-                write!(f, "(")?;
-                for (i, elem) in elements.iter().enumerate() {
-                    if i > 0 { write!(f, ", ")?; }
-                    write!(f, "{elem}")?;
-                }
-                write!(f, ")")
-            }
+            Value::Enum(_) => write!(f, "enum"),
+            Value::Tuple(_) => write!(f, "tuple"),
             Value::Null => write!(f, "null"),
         }
     }
@@ -133,13 +146,21 @@ pub enum AuraObject {
         /// Element values.
         elements: Vec<Value>,
     },
+    /// Enum value payload.
+    Enum(EnumValue),
+    /// Tuple value payload.
+    Tuple(TupleValue),
 }
 
 impl AuraObject {
     /// Returns true if this object contains any reference fields.
     pub fn has_references(&self) -> bool {
         match self {
-            AuraObject::String(_) | AuraObject::Array { .. } | AuraObject::Instance { .. } => true,
+            AuraObject::String(_)
+            | AuraObject::Array { .. }
+            | AuraObject::Instance { .. }
+            | AuraObject::Enum(_)
+            | AuraObject::Tuple(_) => true,
         }
     }
 
@@ -150,10 +171,17 @@ impl AuraObject {
             AuraObject::String(_) => {}
             AuraObject::Instance { fields, .. } | AuraObject::Array { elements: fields } => {
                 for v in fields {
-                    match v {
-                        Value::String(r) | Value::Object(r) => refs.push(*r),
-                        _ => {}
-                    }
+                    refs.extend(v.contained_refs());
+                }
+            }
+            AuraObject::Enum(e) => {
+                for v in &e.fields {
+                    refs.extend(v.contained_refs());
+                }
+            }
+            AuraObject::Tuple(t) => {
+                for v in &t.elements {
+                    refs.extend(v.contained_refs());
                 }
             }
         }

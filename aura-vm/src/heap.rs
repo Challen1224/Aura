@@ -5,7 +5,7 @@
 //! across collections. A GC is triggered when allocated bytes exceed a
 //! configurable threshold.
 
-use aura_bytecode::{AuraObject, GcRef, Value};
+use aura_bytecode::{AuraObject, EnumValue, GcRef, TupleValue, Value};
 use std::collections::{HashMap, HashSet};
 
 /// Default heap size threshold that triggers a collection.
@@ -99,6 +99,22 @@ impl Heap {
         })
     }
 
+    /// Borrow an enum payload from the heap.
+    pub fn get_enum(&self, handle: GcRef) -> Result<&EnumValue, HeapError> {
+        match self.get(handle)? {
+            AuraObject::Enum(e) => Ok(e),
+            _ => Err(HeapError::InvalidRef(handle)),
+        }
+    }
+
+    /// Borrow a tuple payload from the heap.
+    pub fn get_tuple(&self, handle: GcRef) -> Result<&TupleValue, HeapError> {
+        match self.get(handle)? {
+            AuraObject::Tuple(t) => Ok(t),
+            _ => Err(HeapError::InvalidRef(handle)),
+        }
+    }
+
     /// Run a mark-and-sweep collection given the root set.
     pub fn collect(&mut self, roots: &[GcRef]) {
         let mut work: Vec<GcRef> = roots.to_vec();
@@ -139,6 +155,12 @@ impl Heap {
             AuraObject::String(s) => s.len(),
             AuraObject::Instance { fields, .. } | AuraObject::Array { elements: fields } => {
                 fields.len() * std::mem::size_of::<Value>() + std::mem::size_of::<AuraObject>()
+            }
+            AuraObject::Enum(e) => {
+                e.fields.len() * std::mem::size_of::<Value>() + std::mem::size_of::<AuraObject>()
+            }
+            AuraObject::Tuple(t) => {
+                t.elements.len() * std::mem::size_of::<Value>() + std::mem::size_of::<AuraObject>()
             }
         }
     }

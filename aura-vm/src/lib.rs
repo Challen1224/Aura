@@ -7,9 +7,11 @@
 #![warn(missing_docs)]
 
 pub mod heap;
+pub mod jit;
 
-use aura_bytecode::{AuraObject, ClassId, EnumId, ExceptionHandler, GcRef, MethodDef, MethodId, Module, Op, TypeDesc, Value};
+use aura_bytecode::{AuraObject, ClassId, EnumId, EnumValue, ExceptionHandler, GcRef, MethodDef, MethodId, Module, Op, TupleValue, TypeDesc, Value};
 use heap::{Heap, HeapError};
+use jit::Jit;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
@@ -24,7 +26,7 @@ fn fnv_hash(s: &str) -> i32 {
 }
 
 /// Default (zero) value for a field of the given type.
-fn default_value(ty: &TypeDesc) -> Value {
+pub(crate) fn default_value(ty: &TypeDesc) -> Value {
     match ty {
         TypeDesc::Int8
         | TypeDesc::Int16
@@ -42,7 +44,7 @@ fn default_value(ty: &TypeDesc) -> Value {
 }
 
 /// Human-readable description of a value, used in error messages.
-fn describe_value(vm: &Vm, v: &Value) -> String {
+pub(crate) fn describe_value(vm: &Vm, v: &Value) -> String {
     match v {
         Value::Int(i) => i.to_string(),
         Value::Float(f) => f.to_string(),
@@ -51,25 +53,52 @@ fn describe_value(vm: &Vm, v: &Value) -> String {
         Value::Null => "null".to_string(),
         Value::Unit => "unit".to_string(),
         Value::String(s) => vm.heap.get_string(*s).unwrap_or("<string>").to_string(),
-        Value::Enum(enum_id, variant_idx, fields) => {
-            let (name, variant) = vm
-                .module
-                .enums
-                .get(&EnumId(*enum_id))
-                .map(|e| {
-                    (
-                        e.name.clone(),
-                        e.variants
-                            .get(*variant_idx as usize)
-                            .map(|v| v.name.clone())
-                            .unwrap_or_else(|| format!("#{}", variant_idx)),
-                    )
-                })
-                .unwrap_or_else(|| (format!("enum#{}", enum_id), format!("#{}", variant_idx)));
-            if fields.is_empty() {
-                format!("{}.{}", name, variant)
-            } else {
-                format!("{}.{}(...)", name, variant)
+        Value::Enum(handle) => {
+            let e = vm.heap.get_enum(*handle).ok();
+            match e {
+                Some(e) => {
+                    let (name, variant) = vm
+                        .module
+                        .enums
+                        .get(&EnumId(e.enum_id))
+                        .map(|en| {
+                            (
+                                en.name.clone(),
+                                en.variants
+                                    .get(e.variant_idx as usize)
+                                    .map(|v| v.name.clone())
+                                    .unwrap_or_else(|| format!("#{}", e.variant_idx)),
+                            )
+                        })
+                        .unwrap_or_else(|| (format!("enum#{}", e.enum_id), format!("#{}", e.variant_idx)));
+                    if e.fields.is_empty() {
+                        format!("{}.{}", name, variant)
+                    } else {
+                        let inner = e
+                            .fields
+                            .iter()
+                            .map(|f| describe_value(vm, f))
+                            .collect::<Vec<_>>()
+                            .join(", ");
+                        format!("{}.{}({})", name, variant, inner)
+                    }
+                }
+                None => "enum".to_string(),
+            }
+        }
+        Value::Tuple(handle) => {
+            let t = vm.heap.get_tuple(*handle).ok();
+            match t {
+                Some(t) => {
+                    let inner = t
+                        .elements
+                        .iter()
+                        .map(|e| describe_value(vm, e))
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    format!("({})", inner)
+                }
+                None => "tuple".to_string(),
             }
         }
         Value::Object(handle) => vm
@@ -83,12 +112,11 @@ fn describe_value(vm: &Vm, v: &Value) -> String {
                 _ => None,
             })
             .unwrap_or_else(|| "instance".to_string()),
-        Value::Tuple(_) => "tuple".to_string(),
     }
 }
 
 /// Substitute generic parameters in a TypeDesc with concrete types
-fn substitute_type_desc(ty: &TypeDesc, generic_params: &[aura_bytecode::GenericParam], type_args: &[TypeDesc]) -> TypeDesc {
+pub(crate) fn substitute_type_desc(ty: &TypeDesc, generic_params: &[aura_bytecode::GenericParam], type_args: &[TypeDesc]) -> TypeDesc {
     match ty {
         TypeDesc::GenericParam(idx) => {
             // Look up the parameter name by index, then find the corresponding type argument
@@ -149,13 +177,8 @@ pub enum VmError {
     Overflow,
 }
 
-/// The outcome of executing a frame.
-enum FrameResult {
-    /// The frame returned normally with a value.
-    Normal(Value),
-    /// An exception propagated out of the frame without being handled.
-    Exception(Value),
-}
+/// The outcome of executing a frame (re-exported from the JIT module).
+pub use jit::FrameResult;
 
 /// A single call frame.
 #[derive(Debug)]
@@ -164,6 +187,9 @@ pub struct Frame {
     pc: usize,
     locals: Vec<Value>,
     stack: Vec<Value>,
+    /// True for frames of JIT-compiled methods (kept on the call stack so
+    /// stack traces include them, but never dispatched by the interpreter).
+    is_jit: bool,
 }
 
 impl Frame {
@@ -176,6 +202,20 @@ impl Frame {
             pc: 0,
             locals,
             stack: Vec::new(),
+            is_jit: false,
+        }
+    }
+
+    /// A placeholder frame for a JIT-compiled method: no arguments or bytecode
+    /// stack (values live in machine registers / the native frame), but the
+    /// frame is tracked so `capture_stack_trace` works while it runs.
+    pub(crate) fn for_jit(method_id: MethodId, locals_count: u16) -> Self {
+        Self {
+            method_id,
+            pc: 0,
+            locals: vec![Value::Unit; locals_count as usize],
+            stack: Vec::new(),
+            is_jit: true,
         }
     }
 
@@ -194,13 +234,26 @@ impl Frame {
 
 /// A virtual machine execution context.
 pub struct Vm {
-    module: Arc<Module>,
-    heap: Heap,
-    call_stack: Vec<Frame>,
-    static_fields: HashMap<ClassId, Vec<Value>>,
+    pub(crate) module: Arc<Module>,
+    pub(crate) heap: Heap,
+    pub(crate) call_stack: Vec<Frame>,
+    pub(crate) static_fields: HashMap<ClassId, Vec<Value>>,
     /// When true, integer arithmetic and narrowing conversions detect overflow
     /// and raise a runtime error; when false they wrap (unchecked semantics).
-    overflow_checks: bool,
+    pub(crate) overflow_checks: bool,
+    /// Error raised inside JIT-generated code and surfaced by the caller.
+    pub(crate) jit_error: Option<VmError>,
+    /// The JIT, when enabled.
+    pub(crate) jit: Option<Jit>,
+    /// True once the JIT has been enabled (tiered execution active).
+    pub(crate) jit_enabled: bool,
+    /// Invocation count per method; crossing [`Self::jit_threshold`] triggers
+    /// compilation.
+    pub(crate) call_counts: HashMap<MethodId, u64>,
+    /// Methods (and overflow modes) that failed to compile; never retried.
+    pub(crate) jit_failed: HashSet<(MethodId, bool)>,
+    /// Compilation threshold in interpreter invocations.
+    pub(crate) jit_threshold: u64,
 }
 
 impl Vm {
@@ -219,6 +272,12 @@ impl Vm {
             call_stack: Vec::new(),
             static_fields,
             overflow_checks: false,
+            jit_error: None,
+            jit: None,
+            jit_enabled: false,
+            call_counts: HashMap::new(),
+            jit_failed: HashSet::new(),
+            jit_threshold: jit::JIT_THRESHOLD,
         }
     }
 
@@ -227,6 +286,32 @@ impl Vm {
     /// [`VmError::Overflow`]; when disabled, results wrap around.
     pub fn set_overflow_checks(&mut self, enabled: bool) {
         self.overflow_checks = enabled;
+    }
+
+    /// Enable tiered JIT compilation: methods crossing the invocation
+    /// threshold are compiled to x86-64 machine code on their next call.
+    /// Disabled by default.
+    pub fn enable_jit(&mut self) {
+        if self.jit.is_none() {
+            self.jit = Some(Jit::new());
+        }
+        self.jit_enabled = true;
+    }
+
+    /// Disable JIT compilation; already-compiled methods stay cached but are
+    /// no longer used.
+    pub fn disable_jit(&mut self) {
+        self.jit_enabled = false;
+    }
+
+    /// Set the invocation count at which a method is compiled.
+    pub fn set_jit_threshold(&mut self, threshold: u64) {
+        self.jit_threshold = threshold;
+    }
+
+    /// Number of methods compiled by the JIT so far (0 when disabled).
+    pub fn jit_compiled_count(&self) -> usize {
+        self.jit.as_ref().map_or(0, |j| j.compiled_count())
     }
 
     /// Run the module entrypoint and return the resulting value.
@@ -248,7 +333,29 @@ impl Vm {
 
     /// Push a frame for `method_id` and run it. The frame is popped before this
     /// returns, whether the method returns normally or throws.
-    fn invoke_frame(&mut self, method_id: MethodId, args: Vec<Value>) -> Result<FrameResult, VmError> {
+    ///
+    /// When the JIT is enabled, already-compiled methods run natively and hot
+    /// (threshold-crossing) methods are compiled before being executed.
+    pub(crate) fn invoke_frame(&mut self, method_id: MethodId, args: Vec<Value>) -> Result<FrameResult, VmError> {
+        if self.jit_enabled {
+            if let Some(compiled) = self.jit.as_ref().and_then(|j| j.get(method_id, self.overflow_checks)) {
+                return compiled.run(self, &args);
+            }
+            let key = (method_id, self.overflow_checks);
+            let count = self.call_counts.entry(method_id).or_insert(0);
+            *count += 1;
+            if *count >= self.jit_threshold && !self.jit_failed.contains(&key) {
+                let result = if let Some(jit) = self.jit.as_mut() {
+                    Some(jit.compile(&self.module, method_id, self.overflow_checks))
+                } else {
+                    None
+                };
+                if let Some(Ok(compiled)) = result {
+                    return compiled.run(self, &args);
+                }
+                self.jit_failed.insert(key);
+            }
+        }
         let locals = self.resolve_method(method_id)?.locals;
         let frame = Frame::new(method_id, args, locals);
         self.call_stack.push(frame);
@@ -586,12 +693,20 @@ impl Vm {
                         fields.push(self.pop()?);
                     }
                     fields.reverse();
-                    self.push(Value::Enum(enum_id.0, variant_idx as u32, fields));
+                    let handle = self.heap.allocate(AuraObject::Enum(EnumValue {
+                        enum_id: enum_id.0,
+                        variant_idx: variant_idx as u32,
+                        fields,
+                    }));
+                    self.push(Value::Enum(handle));
                 }
                 Op::EnumTag => {
                     let v = self.pop()?;
                     match v {
-                        Value::Enum(_, variant_idx, _) => self.push(Value::Int(variant_idx as i64)),
+                        Value::Enum(handle) => {
+                            let e = self.heap.get_enum(handle)?;
+                            self.push(Value::Int(e.variant_idx as i64))
+                        }
                         _ => return Err(VmError::TypeMismatch {
                             expected: "enum",
                             got: v.type_name().into(),
@@ -601,8 +716,9 @@ impl Vm {
                 Op::EnumField(idx) => {
                     let v = self.pop()?;
                     match v {
-                        Value::Enum(_, _, fields) => {
-                            let field = fields.get(idx as usize)
+                        Value::Enum(handle) => {
+                            let e = self.heap.get_enum(handle)?;
+                            let field = e.fields.get(idx as usize)
                                 .ok_or_else(|| VmError::Runtime(format!("enum field index {} out of range", idx)))?;
                             self.push(field.clone());
                         }
@@ -619,13 +735,15 @@ impl Vm {
                         elements.push(self.pop()?);
                     }
                     elements.reverse();
-                    self.push(Value::Tuple(elements));
+                    let handle = self.heap.allocate(AuraObject::Tuple(TupleValue { elements }));
+                    self.push(Value::Tuple(handle));
                 }
                 Op::TupleField(idx) => {
                     let v = self.pop()?;
                     match v {
-                        Value::Tuple(elements) => {
-                            let elem = elements.get(idx as usize)
+                        Value::Tuple(handle) => {
+                            let t = self.heap.get_tuple(handle)?;
+                            let elem = t.elements.get(idx as usize)
                                 .ok_or_else(|| VmError::Runtime(format!("tuple index {} out of range", idx)))?;
                             self.push(elem.clone());
                         }
@@ -640,7 +758,7 @@ impl Vm {
                     let v = self.pop()?;
                     match &v {
                         Value::String(handle) => print!("{}", self.heap.get_string(*handle).unwrap_or("")),
-                        _ => print!("{}", v),
+                        _ => print!("{}", describe_value(self, &v)),
                     }
                 }
                 Op::PrintLn => println!(),
@@ -663,7 +781,7 @@ impl Vm {
                             Value::Char(c) => result.push_str(&c.to_string()),
                             Value::Null => result.push_str("null"),
                             Value::Unit => result.push_str("()"),
-                            _ => result.push_str(&part.to_string()),
+                            other => result.push_str(&describe_value(self, &other)),
                         }
                     }
                     
@@ -727,11 +845,11 @@ impl Vm {
         self.local(idx)
     }
 
-    fn resolve_method(&self, id: MethodId) -> Result<&MethodDef, VmError> {
+    pub(crate) fn resolve_method(&self, id: MethodId) -> Result<&MethodDef, VmError> {
         self.module.method(id).ok_or(VmError::UnknownMethod(id))
     }
 
-    fn resolve_virtual(&self, class_id: ClassId, name: &str) -> Result<MethodId, VmError> {
+    pub(crate) fn resolve_virtual(&self, class_id: ClassId, name: &str) -> Result<MethodId, VmError> {
         let mut visited = HashSet::new();
         self.resolve_virtual_from(class_id, name, &mut visited)
     }
@@ -815,7 +933,12 @@ impl Vm {
             (TypeDesc::Bool, Value::Bool(_)) => true,
             (TypeDesc::Null, Value::Null) => true,
             (TypeDesc::Tuple(_), Value::Tuple(_)) => true,
-            (TypeDesc::Enum(eid), Value::Enum(eid2, _, _)) => *eid == EnumId(*eid2),
+            (TypeDesc::Enum(eid), Value::Enum(handle)) => {
+                self.heap
+                    .get_enum(*handle)
+                    .map(|e| e.enum_id == eid.0)
+                    .unwrap_or(false)
+            }
             (TypeDesc::GenericParam(_), _) => true,
             (TypeDesc::Class(target, _), Value::Object(handle)) => match self.heap.get(*handle) {
                 Ok(AuraObject::Instance { class_id, .. }) => self.is_instance_of(*class_id, *target),
@@ -826,7 +949,7 @@ impl Vm {
     }
 
     /// True if `sub` is the same as, a subclass of, or an implementer of `base`.
-    fn is_instance_of(&self, sub: ClassId, base: ClassId) -> bool {
+    pub(crate) fn is_instance_of(&self, sub: ClassId, base: ClassId) -> bool {
         let mut visited = HashSet::new();
         self.is_instance_of_inner(sub, base, &mut visited)
     }
@@ -889,9 +1012,7 @@ impl Vm {
             (Value::Null, Value::Object(_)) | (Value::Object(_), Value::Null) => Value::Bool(false),
             (Value::Null, Value::String(_)) | (Value::String(_), Value::Null) => Value::Bool(false),
             (Value::Object(a), Value::Object(b)) => Value::Bool(a == b),
-            (Value::Enum(eid_a, vid_a, ref fields_a), Value::Enum(eid_b, vid_b, ref fields_b)) => {
-                Value::Bool(eid_a == eid_b && vid_a == vid_b && fields_a == fields_b)
-            }
+            (Value::Enum(a), Value::Enum(b)) => Value::Bool(self.enum_value_eq(a, b)),
             (a, b) => {
                 return Err(VmError::TypeMismatch {
                     expected: "comparable values",
@@ -903,9 +1024,39 @@ impl Vm {
         Ok(())
     }
 
+    /// Structural equality of two enum handles.
+    fn enum_value_eq(&self, a: GcRef, b: GcRef) -> bool {
+        if a == b {
+            return true;
+        }
+        match (self.heap.get_enum(a), self.heap.get_enum(b)) {
+            (Ok(e1), Ok(e2)) => {
+                e1.enum_id == e2.enum_id
+                    && e1.variant_idx == e2.variant_idx
+                    && e1.fields.len() == e2.fields.len()
+                    && e1.fields.iter().zip(e2.fields.iter()).all(|(x, y)| self.value_eq(x, y))
+            }
+            _ => false,
+        }
+    }
+
+    /// Structural equality of two tuple handles.
+    fn tuple_value_eq(&self, a: GcRef, b: GcRef) -> bool {
+        if a == b {
+            return true;
+        }
+        match (self.heap.get_tuple(a), self.heap.get_tuple(b)) {
+            (Ok(t1), Ok(t2)) => {
+                t1.elements.len() == t2.elements.len()
+                    && t1.elements.iter().zip(t2.elements.iter()).all(|(x, y)| self.value_eq(x, y))
+            }
+            _ => false,
+        }
+    }
+
     /// Deep structural equality. Record instances compare field-by-field;
     /// non-record objects compare by identity; strings compare by content.
-    fn value_eq(&self, a: &Value, b: &Value) -> bool {
+    pub(crate) fn value_eq(&self, a: &Value, b: &Value) -> bool {
         match (a, b) {
             (Value::Int(a), Value::Int(b)) => a == b,
             (Value::Float(a), Value::Float(b)) => a == b,
@@ -917,16 +1068,8 @@ impl Vm {
                 self.heap.get_string(*a) == self.heap.get_string(*b)
             }
             (Value::Object(a), Value::Object(b)) => self.object_value_eq(*a, *b),
-            (Value::Enum(e1, v1, f1), Value::Enum(e2, v2, f2)) => {
-                e1 == e2
-                    && v1 == v2
-                    && f1.len() == f2.len()
-                    && f1.iter().zip(f2.iter()).all(|(x, y)| self.value_eq(x, y))
-            }
-            (Value::Tuple(t1), Value::Tuple(t2)) => {
-                t1.len() == t2.len()
-                    && t1.iter().zip(t2.iter()).all(|(x, y)| self.value_eq(x, y))
-            }
+            (Value::Enum(a), Value::Enum(b)) => self.enum_value_eq(*a, *b),
+            (Value::Tuple(a), Value::Tuple(b)) => self.tuple_value_eq(*a, *b),
             _ => false,
         }
     }
@@ -969,7 +1112,7 @@ impl Vm {
 
     /// Structural hash of a value. Record instances hash over their fields;
     /// strings hash by content; non-record objects hash by identity.
-    fn value_hash(&self, v: &Value) -> i32 {
+    pub(crate) fn value_hash(&self, v: &Value) -> i32 {
         match v {
             Value::Int(i) => *i as i32,
             Value::Float(f) => f.to_bits() as i32,
@@ -978,22 +1121,22 @@ impl Vm {
             Value::Null | Value::Unit => 0,
             Value::String(s) => self.heap.get_string(*s).map(fnv_hash).unwrap_or(0),
             Value::Object(handle) => self.object_value_hash(*handle),
-            Value::Enum(eid, vid, fields) => {
+            Value::Enum(handle) => self.heap.get_enum(*handle).map(|e| {
                 let mut h = 17i32;
-                h = h.wrapping_mul(31).wrapping_add(*eid as i32);
-                h = h.wrapping_mul(31).wrapping_add(*vid as i32);
-                for f in fields {
+                h = h.wrapping_mul(31).wrapping_add(e.enum_id as i32);
+                h = h.wrapping_mul(31).wrapping_add(e.variant_idx as i32);
+                for f in &e.fields {
                     h = h.wrapping_mul(31).wrapping_add(self.value_hash(f));
                 }
                 h
-            }
-            Value::Tuple(elements) => {
+            }).unwrap_or(0),
+            Value::Tuple(handle) => self.heap.get_tuple(*handle).map(|t| {
                 let mut h = 17i32;
-                for e in elements {
+                for e in &t.elements {
                     h = h.wrapping_mul(31).wrapping_add(self.value_hash(e));
                 }
                 h
-            }
+            }).unwrap_or(0),
         }
     }
 
@@ -1062,7 +1205,7 @@ impl Vm {
     /// Convert a value to the given numeric type. Narrowing truncates; with
     /// overflow checking enabled, a value that does not fit the target width
     /// raises [`VmError::Overflow`] instead of wrapping.
-    fn convert(&self, v: Value, ty: &TypeDesc) -> Result<Value, VmError> {
+    pub(crate) fn convert(&self, v: Value, ty: &TypeDesc) -> Result<Value, VmError> {
         if ty.is_float() {
             let f = match v {
                 Value::Int(i) => i as f64,
@@ -1150,7 +1293,7 @@ impl Vm {
 
     /// If `exc` is an instance of the standard `Exception` class, record the
     /// current stack trace into its `stackTrace` field.
-    fn attach_stack_trace(&mut self, exc: &Value) {
+    pub(crate) fn attach_stack_trace(&mut self, exc: &Value) {
         let Value::Object(handle) = exc else { return };
         let Ok(obj) = self.heap.get(*handle) else { return };
         let AuraObject::Instance { class_id, .. } = obj else { return };
@@ -1224,7 +1367,7 @@ impl Vm {
     }
 }
 
-trait ObjectExt {
+pub(crate) trait ObjectExt {
     fn instance_class_id(&self) -> Result<ClassId, VmError>;
     fn field(&self, idx: usize) -> Result<&Value, VmError>;
     fn field_mut(&mut self, idx: usize) -> Result<&mut Value, VmError>;
