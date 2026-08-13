@@ -3,7 +3,7 @@
 > **Status:** Core language and compiler: usable. VM with GC and baseline
 > x86-64 JIT: implemented. Stdlib/tooling: early.  
 > **Last Updated:** 2026-08-12  
-> **Current Version:** 1.0.0
+> **Current Version:** 0.27.0
 
 ---
 
