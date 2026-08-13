@@ -26,6 +26,9 @@ enum Command {
     Run {
         /// Source file path.
         path: PathBuf,
+        /// Enable the x86-64 JIT (methods are compiled to native code once hot).
+        #[arg(long)]
+        jit: bool,
     },
 }
 
@@ -39,11 +42,14 @@ fn main() -> Result<()> {
             println!("{:#?}", module);
             Ok(())
         }
-        Command::Run { path } => {
+        Command::Run { path, jit } => {
             let source = fs::read_to_string(&path)
                 .with_context(|| format!("reading {}", path.display()))?;
             let module = Arc::new(compile(&source, module_name(&path)?)?);
             let mut vm = Vm::new(module);
+            if jit {
+                vm.enable_jit();
+            }
             vm.run().context("runtime error")?;
             Ok(())
         }

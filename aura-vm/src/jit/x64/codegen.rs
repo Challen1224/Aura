@@ -213,7 +213,9 @@ impl<'a> Codegen<'a> {
                 self.store_tag(dst, RAX);
             }
             Insn::ConstChar { dst, ch } => {
-                self.asm.mov_ri(RAX, 4 | (ch as u32 as i64) << 8);
+                // Rust stores the char at byte offset 4 of the 16-byte slot, so
+                // the tag word is `TAG | c << 32` (not `<< 8`).
+                self.asm.mov_ri(RAX, 4 | (ch as u32 as i64) << 32);
                 self.store_tag(dst, RAX);
             }
             Insn::ConstNull { dst } => {

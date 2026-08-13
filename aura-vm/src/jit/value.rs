@@ -15,7 +15,7 @@ pub const TAG_INT: u64 = 1;
 pub const TAG_FLOAT: u64 = 2;
 /// `Value::Bool` tag (truth bit packed at bit 8).
 pub const TAG_BOOL: u64 = 3;
-/// `Value::Char` tag (char code packed at bit 8).
+/// `Value::Char` tag (char code packed at bit 32 to match Rust's layout).
 pub const TAG_CHAR: u64 = 4;
 /// `Value::String` tag.
 pub const TAG_STRING: u64 = 5;
@@ -137,7 +137,7 @@ pub fn verify_layout() -> Result<(), String> {
     check("Float", Value::Float(3.5), TAG_FLOAT, 3.5f64.to_bits())?;
     check("Bool(true)", Value::Bool(true), TAG_BOOL | (1 << 8), 0)?;
     check("Bool(false)", Value::Bool(false), TAG_BOOL, 0)?;
-    check("Char", Value::Char('A'), TAG_CHAR | ('A' as u64) << 8, 0)?;
+    check("Char", Value::Char('A'), TAG_CHAR | ('A' as u64) << 32, 0)?;
     check("String", Value::String(GcRef(7)), TAG_STRING, 7)?;
     check("Object", Value::Object(GcRef(9)), TAG_OBJECT, 9)?;
     check("Null", Value::Null, TAG_NULL, 0)?;

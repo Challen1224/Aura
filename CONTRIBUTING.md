@@ -53,6 +53,34 @@ language; a change to the compiler or VM should keep them all running.
   Runtime validation of JIT-compiled code requires an x86-64 host, as the
   generated machine code is architecture-specific.
 
+### Running JIT tests on non-x86-64 hosts (e.g. an ARM Chromebook)
+
+On an ARM (aarch64) machine you can still compile **and run** the x86-64 JIT
+tests using a cross-toolchain plus QEMU user-mode emulation. QEMU executes the
+JIT's generated x86-64 machine code, so the full 9-test suite runs:
+
+```bash
+# Debian/Ubuntu: install the cross linker and qemu
+sudo apt install -y gcc-x86-64-linux-gnu qemu-user-static
+
+# Point cargo at them (this is a per-user, machine-specific setting)
+mkdir -p ~/.cargo
+cat >> ~/.cargo/config.toml <<'EOF'
+[target.x86_64-unknown-linux-gnu]
+linker = "x86_64-linux-gnu-gcc"
+runner = "qemu-x86_64-static"
+EOF
+
+# Compile and run the whole JIT test suite under QEMU
+cargo test -p aura-vm --target x86_64-unknown-linux-gnu
+
+# Or run a real program with the JIT enabled
+cargo run -p aura-cli --target x86_64-unknown-linux-gnu -- run --jit examples/fib.aura
+```
+
+Remember QEMU emulates the compiled code, so this verifies *correctness*, not
+performance — there is no speedup compared with the interpreter.
+
 ## Style
 
 - Run `cargo fmt` before submitting changes.

@@ -232,10 +232,12 @@ pub fn allocate(func: &mut Function) -> Allocation {
 
     let overlaps = |a: usize, b: usize, c: usize, d: usize| a < d && c < b;
 
-    // Cross-call (callee-saved) known virtuals first, then the rest.
+    // Cross-call (callee-saved) known virtuals first, then the rest. Every
+    // known-typed vreg is included, even ones with no live interval (e.g.
+    // phantoms left behind by constant folding): they are dead and get a slot.
     let mut known: Vec<VReg> = (0..nv)
         .map(|v| v as VReg)
-        .filter(|v| func.types[*v as usize].is_known() && start[*v as usize] != usize::MAX)
+        .filter(|v| func.types[*v as usize].is_known())
         .collect();
     known.sort_by_key(|v| (std::cmp::Reverse(crosses_call[*v as usize]), start[*v as usize]));
 

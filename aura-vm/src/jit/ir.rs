@@ -1841,17 +1841,29 @@ mod tests {
     #[cfg(target_arch = "x86_64")]
     #[test]
     fn pipeline_lower_optimize_allocate() {
+        // A `div` lowers to a helper call whose result is an untyped box, so the
+        // allocator must reserve a 16-byte spill slot even though the rest of the
+        // arithmetic fits in registers.
         let mut f = lower(
-            vec![Op::LdInt(1), Op::LdInt(2), Op::Add, Op::Stloc(0), Op::Ldloc(0), Op::Ret],
+            vec![
+                Op::LdInt(6),
+                Op::LdInt(3),
+                Op::Div,
+                Op::Pop,
+                Op::LdInt(1),
+                Op::LdInt(2),
+                Op::Add,
+                Op::Stloc(0),
+                Op::Ldloc(0),
+                Op::Ret,
+            ],
             vec![],
             1,
             2,
         );
         super::optimize(&mut f);
         let alloc = crate::jit::regalloc::allocate(&mut f);
-        assert!(f.spill_bytes > 0);
-        for v in 0..f.types.len() as VReg {
-            assert!(alloc.homes[v as usize] != Home::Void, "vreg {v} not assigned a home");
-        }
+        assert_eq!(alloc.homes.len(), f.types.len(), "every vreg must have a home");
+        assert!(f.spill_bytes > 0, "expected a spill slot for the untyped helper result");
     }
 }

@@ -38,6 +38,9 @@ cargo build --release
 # Compile and run a program
 cargo run -p aura-cli -- run examples/hello.aura
 
+# Run with the x86-64 JIT enabled (native code once methods are hot)
+cargo run -p aura-cli -- run --jit examples/hello.aura
+
 # Compile and dump the resulting bytecode module
 cargo run -p aura-cli -- compile examples/hello.aura
 ```
