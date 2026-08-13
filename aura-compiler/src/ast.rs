@@ -14,6 +14,19 @@ pub enum Decl {
     Class(ClassDecl),
     /// Enum declaration.
     Enum(EnumDecl),
+    /// Type alias declaration (e.g., `type UserId = int;`).
+    TypeAlias(TypeAliasDecl),
+}
+
+/// Type alias declaration.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TypeAliasDecl {
+    /// Alias name (e.g., `UserId` in `type UserId = int;`).
+    pub name: String,
+    /// Generic parameters (e.g., `<T>` in `type Result2<T> = Result<T, string>;`).
+    pub generic_params: Vec<GenericParam>,
+    /// The type this alias refers to.
+    pub target: Type,
 }
 
 /// Enum declaration.
@@ -520,6 +533,9 @@ pub enum Expr {
     With(Box<Expr>, Vec<(String, Expr)>),
     /// Block expression: `{ stmts }` evaluates to the last expression's value.
     Block(Vec<Stmt>),
+    /// Error propagation: `expr?` unwraps a `Result`-like sum type, returning
+    /// the error variant from the enclosing function when it does not match.
+    TryUnwrap(Box<Expr>),
 }
 
 /// A part of an interpolated string.

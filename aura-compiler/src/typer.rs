@@ -17,7 +17,7 @@ fn visibility_name(v: Visibility) -> &'static str {
 }
 
 /// Substitute generic parameters in a type with concrete types
-fn substitute_type(ty: &Type, subst: &TypeSubst) -> Type {
+pub fn substitute_type(ty: &Type, subst: &TypeSubst) -> Type {
     match ty {
         Type::GenericParam(name) => {
             subst.get(name).cloned().unwrap_or_else(|| ty.clone())
@@ -43,7 +43,8 @@ fn substitute_type(ty: &Type, subst: &TypeSubst) -> Type {
 }
 
 /// Build a substitution map from generic parameter names and concrete type arguments
-fn build_subst(generic_params: &[GenericParam], type_args: &[Type]) -> TypeSubst {    let mut subst = TypeSubst::new();
+pub fn build_subst(generic_params: &[GenericParam], type_args: &[Type]) -> TypeSubst {
+    let mut subst = TypeSubst::new();
     for (param, arg) in generic_params.iter().zip(type_args.iter()) {
         subst.insert(param.name.clone(), arg.clone());
     }
@@ -206,6 +207,7 @@ impl TypeChecker {
             match decl {
                 Decl::Class(c) => self.check_class(c)?,
                 Decl::Enum(_) => {}
+                Decl::TypeAlias(_) => {}
             }
         }
         Ok(TypedProgram {
@@ -523,6 +525,7 @@ impl TypeChecker {
                         variants,
                     });
                 }
+                Decl::TypeAlias(_) => {}
             }
         }
         self.split_bases(program)?;
@@ -1911,9 +1914,9 @@ impl TypeChecker {
                         cond_ty.name()
                     )));
                 }
-                let then_ty = self.infer_expr(then_expr, class, locals, in_instance, return_ty, generic_params)?;
-                let else_ty = self.infer_expr(else_expr, class, locals, in_instance, return_ty, generic_params)?;
-                if !self.is_assignable(&then_ty, &else_ty) {
+                let then_ty = self.resolve_literal(&self.infer_expr(then_expr, class, locals, in_instance, return_ty, generic_params)?);
+                let else_ty = self.resolve_literal(&self.infer_expr(else_expr, class, locals, in_instance, return_ty, generic_params)?);
+                if !self.is_assignable(&then_ty, &else_ty) && !self.is_assignable(&else_ty, &then_ty) {
                     return Err(TypeError(format!(
                         "ternary branches must have compatible types, got {} and {}",
                         then_ty.name(),
@@ -2196,6 +2199,50 @@ impl TypeChecker {
                     }
                 }
                 Ok(result_ty)
+            }
+            Expr::TryUnwrap(inner) => {
+                let inner_ty = self.infer_expr(inner, class, locals, in_instance, return_ty, generic_params)?;
+                let (enum_name, type_args) = match &inner_ty {
+                    Type::Class(name, args) if self.enums.contains_key(name) => (name.clone(), args.clone()),
+                    Type::Enum(name) => (name.clone(), Vec::new()),
+                    _ => {
+                        return Err(TypeError(format!(
+                            "`?` requires a Result-like sum type, got `{}`",
+                            inner_ty.name()
+                        )));
+                    }
+                };
+                // The enclosing function must return the same sum type so the
+                // error variant can be propagated as-is.
+                let return_name = match return_ty {
+                    Type::Class(name, _) if self.enums.contains_key(name) => name.clone(),
+                    Type::Enum(name) => name.clone(),
+                    _ => {
+                        return Err(TypeError(format!(
+                            "`?` can only be used in a function returning a Result-like sum type, but it returns `{}`",
+                            return_ty.name()
+                        )));
+                    }
+                };
+                if return_name != enum_name {
+                    return Err(TypeError(format!(
+                        "`?` propagates `{}` but the enclosing function returns `{}`",
+                        enum_name, return_name
+                    )));
+                }
+                // The first variant is the success case; unwrap its single field.
+                let enum_info = self.enums.get(&enum_name).unwrap();
+                let success = enum_info.variants.first().ok_or_else(|| {
+                    TypeError(format!("sum type `{}` has no variants", enum_name))
+                })?;
+                if success.fields.len() != 1 {
+                    return Err(TypeError(format!(
+                        "cannot `?` unwrap `{}`: success variant `{}` must carry exactly one value",
+                        enum_name, success.name
+                    )));
+                }
+                let subst = build_subst(&enum_info.generic_params, &type_args);
+                Ok(substitute_type(&success.fields[0].1, &subst))
             }
         }
     }
@@ -2552,6 +2599,13 @@ impl TypeChecker {
                     return self.infer_enum_construction(
                         &enum_name, &call.method, &call.args, class, locals, in_instance, return_ty, generic_params,
                     );
+                }
+                // Bare static method call: `safeDivide(a, b)` resolves to a
+                // static method of the current class.
+                if let Some((declared_in, method_info)) = self.find_static_method(&class.name, &call.method) {
+                    if self.can_access(&class.name, &declared_in, method_info.visibility) {
+                        return self.check_call_args(call, &method_info, class, locals, in_instance, return_ty, generic_params);
+                    }
                 }
                 return Err(TypeError(format!("unknown class `{}`", class_name)));
             }

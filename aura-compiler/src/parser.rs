@@ -2,6 +2,431 @@
 
 use crate::ast::*;
 use crate::lexer::Token;
+use std::collections::HashMap;
+
+/// Expand `type X = ...;` aliases throughout the program, replacing every
+/// reference to an alias name with its target type. Alias declarations
+/// themselves are removed from the result.
+///
+/// Because generic parameters are represented as `Type::Class(name, [])` in
+/// this parser, an alias that shares its name with a generic parameter is not
+/// expanded (the parameter reference wins). Pick non-colliding alias names.
+pub fn expand_type_aliases(program: &Program) -> Result<Program, String> {
+    let mut aliases: HashMap<String, TypeAliasDecl> = HashMap::new();
+    for decl in &program.decls {
+        if let Decl::TypeAlias(a) = decl {
+            if aliases.contains_key(&a.name) {
+                return Err(format!("duplicate type alias `{}`", a.name));
+            }
+            aliases.insert(a.name.clone(), a.clone());
+        }
+    }
+    if aliases.is_empty() {
+        return Ok(program.clone());
+    }
+
+    let mut decls = Vec::new();
+    for decl in &program.decls {
+        let expanded = match decl {
+            Decl::Class(c) => {
+                let mut c = c.clone();
+                c.generic_params = expand_generic_params(&c.generic_params, &aliases)?;
+                c.record_params = c
+                    .record_params
+                    .iter()
+                    .map(|p| Ok(Param { ty: expand_type(&p.ty, &aliases)?, name: p.name.clone() }))
+                    .collect::<Result<Vec<Param>, String>>()?;
+                c.members = c
+                    .members
+                    .iter()
+                    .map(|m| expand_member(m, &aliases))
+                    .collect::<Result<Vec<_>, _>>()?;
+                Decl::Class(c)
+            }
+            Decl::Enum(e) => {
+                let mut e = e.clone();
+                e.generic_params = expand_generic_params(&e.generic_params, &aliases)?;
+                for variant in &mut e.variants {
+                    for field in &mut variant.fields {
+                        field.ty = expand_type(&field.ty, &aliases)?;
+                    }
+                }
+                Decl::Enum(e)
+            }
+            Decl::TypeAlias(_) => continue,
+        };
+        decls.push(expanded);
+    }
+    Ok(Program { decls })
+}
+
+fn expand(ty: &Type, aliases: &HashMap<String, TypeAliasDecl>, stack: &mut Vec<String>) -> Result<Type, String> {
+    match ty {
+        Type::Class(name, args) => {
+            if let Some(alias) = aliases.get(name) {
+                if stack.contains(name) {
+                    return Err(format!("circular type alias `{}`", name));
+                }
+                let mut subst = HashMap::new();
+                for (param, arg) in alias.generic_params.iter().zip(args.iter()) {
+                    subst.insert(param.name.clone(), arg.clone());
+                }
+                stack.push(name.clone());
+                let result = expand(&substitute(&alias.target, &subst), aliases, stack);
+                stack.pop();
+                result
+            } else {
+                let args = args
+                    .iter()
+                    .map(|a| expand(a, aliases, stack))
+                    .collect::<Result<Vec<_>, _>>()?;
+                Ok(Type::Class(name.clone(), args))
+            }
+        }
+        Type::Enum(name) => {
+            if let Some(alias) = aliases.get(name) {
+                if stack.contains(name) {
+                    return Err(format!("circular type alias `{}`", name));
+                }
+                stack.push(name.clone());
+                let result = expand(&alias.target, aliases, stack);
+                stack.pop();
+                result
+            } else {
+                Ok(ty.clone())
+            }
+        }
+        Type::Tuple(types) => {
+            let types = types
+                .iter()
+                .map(|t| expand(t, aliases, stack))
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok(Type::Tuple(types))
+        }
+        _ => Ok(ty.clone()),
+    }
+}
+
+fn substitute(ty: &Type, subst: &HashMap<String, Type>) -> Type {
+    match ty {
+        Type::GenericParam(name) => subst.get(name).cloned().unwrap_or_else(|| ty.clone()),
+        Type::Class(name, args) => {
+            if args.is_empty() && subst.contains_key(name) {
+                return subst.get(name).cloned().unwrap();
+            }
+            let args = args.iter().map(|a| substitute(a, subst)).collect();
+            Type::Class(name.clone(), args)
+        }
+        Type::Tuple(types) => Type::Tuple(types.iter().map(|t| substitute(t, subst)).collect()),
+        _ => ty.clone(),
+    }
+}
+
+fn expand_type(ty: &Type, aliases: &HashMap<String, TypeAliasDecl>) -> Result<Type, String> {
+    expand(ty, aliases, &mut Vec::new())
+}
+
+fn expand_member(member: &Member, aliases: &HashMap<String, TypeAliasDecl>) -> Result<Member, String> {
+    let expand_type = |ty: &Type| expand(ty, aliases, &mut Vec::new());
+    match member {
+        Member::Field(f) => {
+            let mut f = f.clone();
+            f.ty = expand_type(&f.ty)?;
+            Ok(Member::Field(f))
+        }
+        Member::Method(m) => {
+            let mut m = m.clone();
+            m.return_ty = expand_type(&m.return_ty)?;
+            m.generic_params = expand_generic_params(&m.generic_params, aliases)?;
+            for p in &mut m.params {
+                p.ty = expand_type(&p.ty)?;
+            }
+            for stmt in &mut m.body {
+                expand_stmt(stmt, aliases)?;
+            }
+            Ok(Member::Method(m))
+        }
+        Member::Property(p) => {
+            let mut p = p.clone();
+            p.ty = expand_type(&p.ty)?;
+            if let Some(Accessor { kind: AccessorKind::Body(body), .. }) = &mut p.getter {
+                for stmt in body {
+                    expand_stmt(stmt, aliases)?;
+                }
+            }
+            if let Some(Accessor { kind: AccessorKind::Body(body), .. }) = &mut p.setter {
+                for stmt in body {
+                    expand_stmt(stmt, aliases)?;
+                }
+            }
+            Ok(Member::Property(p))
+        }
+    }
+}
+
+fn expand_generic_params(
+    params: &[GenericParam],
+    aliases: &HashMap<String, TypeAliasDecl>,
+) -> Result<Vec<GenericParam>, String> {
+    params
+        .iter()
+        .map(|gp| {
+            Ok(GenericParam {
+                name: gp.name.clone(),
+                constraint: gp
+                    .constraint
+                    .as_ref()
+                    .map(|c| expand(c, aliases, &mut Vec::new()))
+                    .transpose()?,
+            })
+        })
+        .collect()
+}
+
+fn expand_stmt(stmt: &mut Stmt, aliases: &HashMap<String, TypeAliasDecl>) -> Result<(), String> {
+    let expand_type = |ty: &Type| expand(ty, aliases, &mut Vec::new());
+    match stmt {
+        Stmt::VarDecl(ty, _, init) => {
+            *ty = expand_type(ty)?;
+            if let Some(e) = init {
+                expand_expr(e, aliases)?;
+            }
+        }
+        Stmt::TupleDecl(_, expr) => expand_expr(expr, aliases)?,
+        Stmt::Expr(expr) => expand_expr(expr, aliases)?,
+        Stmt::Assign(_, expr) => expand_expr(expr, aliases)?,
+        Stmt::Return(Some(expr)) => expand_expr(expr, aliases)?,
+        Stmt::Return(None) => {}
+        Stmt::If(cond, then_stmts, else_stmts) => {
+            expand_expr(cond, aliases)?;
+            for s in then_stmts {
+                expand_stmt(s, aliases)?;
+            }
+            if let Some(else_stmts) = else_stmts {
+                for s in else_stmts {
+                    expand_stmt(s, aliases)?;
+                }
+            }
+        }
+        Stmt::IfLet(pattern, expr, then_stmts, else_stmts) => {
+            expand_pattern(pattern, aliases)?;
+            expand_expr(expr, aliases)?;
+            for s in then_stmts {
+                expand_stmt(s, aliases)?;
+            }
+            if let Some(else_stmts) = else_stmts {
+                for s in else_stmts {
+                    expand_stmt(s, aliases)?;
+                }
+            }
+        }
+        Stmt::While { condition, body, .. } => {
+            expand_expr(condition, aliases)?;
+            for s in body {
+                expand_stmt(s, aliases)?;
+            }
+        }
+        Stmt::For { init, condition, update, body, .. } => {
+            expand_stmt(init, aliases)?;
+            expand_expr(condition, aliases)?;
+            expand_stmt(update, aliases)?;
+            for s in body {
+                expand_stmt(s, aliases)?;
+            }
+        }
+        Stmt::ForIn { var_type, iterable, body, .. } => {
+            *var_type = expand_type(var_type)?;
+            expand_expr(iterable, aliases)?;
+            for s in body {
+                expand_stmt(s, aliases)?;
+            }
+        }
+        Stmt::DoWhile { body, condition, .. } => {
+            for s in body {
+                expand_stmt(s, aliases)?;
+            }
+            expand_expr(condition, aliases)?;
+        }
+        Stmt::Block(body) => {
+            for s in body {
+                expand_stmt(s, aliases)?;
+            }
+        }
+        Stmt::Throw(expr) => expand_expr(expr, aliases)?,
+        Stmt::Try { try_body, catches, finally_body } => {
+            for s in try_body {
+                expand_stmt(s, aliases)?;
+            }
+            for c in catches {
+                c.ty = expand_type(&c.ty)?;
+                for s in &mut c.body {
+                    expand_stmt(s, aliases)?;
+                }
+            }
+            if let Some(finally_body) = finally_body {
+                for s in finally_body {
+                    expand_stmt(s, aliases)?;
+                }
+            }
+        }
+        Stmt::Using { resource_ty, expr, body, .. } => {
+            if let Some(ty) = resource_ty {
+                *ty = expand_type(ty)?;
+            }
+            expand_expr(expr, aliases)?;
+            for s in body {
+                expand_stmt(s, aliases)?;
+            }
+        }
+        Stmt::Break(_) | Stmt::Continue(_) => {}
+    }
+    Ok(())
+}
+
+fn expand_expr(expr: &mut Expr, aliases: &HashMap<String, TypeAliasDecl>) -> Result<(), String> {
+    let expand_type = |ty: &Type| expand(ty, aliases, &mut Vec::new());
+    match expr {
+        Expr::Cast(inner, ty) => {
+            *ty = expand_type(ty)?;
+            expand_expr(inner, aliases)?;
+        }
+        Expr::Binary(op, a, b) => {
+            expand_expr(a, aliases)?;
+            expand_expr(b, aliases)?;
+            let _ = op;
+        }
+        Expr::Unary(_, a) => expand_expr(a, aliases)?,
+        Expr::Ternary(c, a, b) => {
+            expand_expr(c, aliases)?;
+            expand_expr(a, aliases)?;
+            expand_expr(b, aliases)?;
+        }
+        Expr::Call(call) => {
+            for ta in &mut call.type_args {
+                *ta = expand_type(ta)?;
+            }
+            if let Some(t) = &mut call.target {
+                expand_expr(t, aliases)?;
+            }
+            for a in &mut call.args {
+                expand_expr(a, aliases)?;
+            }
+        }
+        Expr::NullConditionalCall(call) => {
+            for ta in &mut call.type_args {
+                *ta = expand_type(ta)?;
+            }
+            if let Some(t) = &mut call.target {
+                expand_expr(t, aliases)?;
+            }
+            for a in &mut call.args {
+                expand_expr(a, aliases)?;
+            }
+        }
+        Expr::Field(inner, _) => expand_expr(inner, aliases)?,
+        Expr::New(_, type_args, args) => {
+            for ta in type_args {
+                *ta = expand_type(ta)?;
+            }
+            for a in args {
+                expand_expr(a, aliases)?;
+            }
+        }
+        Expr::Match(inner, arms) => {
+            expand_expr(inner, aliases)?;
+            for arm in arms {
+                for p in &mut arm.patterns {
+                    expand_pattern(p, aliases)?;
+                }
+                if let Some(guard) = &mut arm.guard {
+                    expand_expr(guard, aliases)?;
+                }
+                expand_expr(&mut arm.body, aliases)?;
+            }
+        }
+        Expr::EnumVariant(_, _, args) => {
+            for a in args {
+                expand_expr(a, aliases)?;
+            }
+        }
+        Expr::Tuple(items) => {
+            for item in items {
+                expand_expr(item, aliases)?;
+            }
+        }
+        Expr::TupleIndex(inner, _) => expand_expr(inner, aliases)?,
+        Expr::Range(a, b, _) => {
+            expand_expr(a, aliases)?;
+            expand_expr(b, aliases)?;
+        }
+        Expr::NullCoalesce(a, b) => {
+            expand_expr(a, aliases)?;
+            expand_expr(b, aliases)?;
+        }
+        Expr::NullConditionalField(inner, _) => expand_expr(inner, aliases)?,
+        Expr::SuperCall(_, args) => {
+            for a in args {
+                expand_expr(a, aliases)?;
+            }
+        }
+        Expr::With(inner, updates) => {
+            expand_expr(inner, aliases)?;
+            for (_, e) in updates {
+                expand_expr(e, aliases)?;
+            }
+        }
+        Expr::Block(body) => {
+            for s in body {
+                expand_stmt(s, aliases)?;
+            }
+        }
+        Expr::TryUnwrap(inner) => expand_expr(inner, aliases)?,
+        Expr::InterpolatedString(parts) => {
+            for part in parts {
+                if let InterpPart::Expr(e) = part {
+                    expand_expr(e, aliases)?;
+                }
+            }
+        }
+        Expr::IntLit(..)
+        | Expr::FloatLit(..)
+        | Expr::Bool(_)
+        | Expr::Char(_)
+        | Expr::String(_)
+        | Expr::Null
+        | Expr::Var(_)
+        | Expr::StaticField(..)
+        | Expr::SuperField(_) => {}
+    }
+    Ok(())
+}
+
+fn expand_pattern(pattern: &mut Pattern, aliases: &HashMap<String, TypeAliasDecl>) -> Result<(), String> {
+    match pattern {
+        Pattern::EnumVariant(_, _, sub) => {
+            for p in sub {
+                expand_pattern(p, aliases)?;
+            }
+        }
+        Pattern::RecordClass(_, sub) => {
+            for p in sub {
+                expand_pattern(p, aliases)?;
+            }
+        }
+        Pattern::Range(a, b, _) => {
+            expand_expr(a, aliases)?;
+            expand_expr(b, aliases)?;
+        }
+        Pattern::Int(_)
+        | Pattern::Float(_)
+        | Pattern::Bool(_)
+        | Pattern::StringLit(_)
+        | Pattern::Null
+        | Pattern::Wildcard
+        | Pattern::Binding(_) => {}
+    }
+    Ok(())
+}
 
 /// Map a numeric type name to its AST type, or None if not a numeric type name.
 pub fn numeric_type_from_name(name: &str) -> Option<Type> {
@@ -43,7 +468,7 @@ impl<'a> Parser<'a> {
             if self.check(Token::Enum) {
                 decls.push(Decl::Enum(self.parse_enum()?));
             } else if self.match_token(Token::Type) {
-                decls.push(Decl::Enum(self.parse_type_alias()?));
+                decls.push(self.parse_type_decl()?);
             } else if self.match_token(Token::Interface) {
                 decls.push(Decl::Class(self.parse_class(true, false, false)?));
             } else if self.match_token(Token::Abstract) {
@@ -232,7 +657,7 @@ impl<'a> Parser<'a> {
 
     /// Parse a sum-type declaration: `type Name<T, U> = V1 | V2(int) | ...;`
     /// Desugars into an [`EnumDecl`] with positional (unnamed) variant fields.
-    fn parse_type_alias(&mut self) -> Result<EnumDecl, String> {
+    fn parse_type_decl(&mut self) -> Result<Decl, String> {
         let name = self.consume_ident("expected type name after `type`")?;
         let generic_params = if self.check(Token::Lt) {
             self.parse_generic_params()?
@@ -240,33 +665,44 @@ impl<'a> Parser<'a> {
             Vec::new()
         };
         self.consume(Token::Assign, "expected `=` in type declaration")?;
-        let mut variants = Vec::new();
-        loop {
-            let variant_name = self.consume_ident("expected variant name")?;
-            let fields = if self.check(Token::LParen) {
-                self.consume(Token::LParen, "expected `(`")?;
-                let mut fields = Vec::new();
-                if !self.check(Token::RParen) {
-                    loop {
-                        let ty = self.parse_type()?;
-                        fields.push(EnumVariantField { ty, name: String::new() });
-                        if !self.match_token(Token::Comma) {
-                            break;
+        // A `type` declaration is either a sum type (`type Result<T,E> = Ok(T) | Err(E);`)
+        // or an alias to a single type (`type UserId = int;`). A sum type starts
+        // with a variant name followed by `(` (fields) or `|` (bare variants).
+        let is_sum = matches!(self.tokens.get(self.pos), Some(Token::Ident(_)))
+            && matches!(self.tokens.get(self.pos + 1), Some(Token::LParen | Token::Pipe));
+        if is_sum {
+            let mut variants = Vec::new();
+            loop {
+                let variant_name = self.consume_ident("expected variant name")?;
+                let fields = if self.check(Token::LParen) {
+                    self.consume(Token::LParen, "expected `(`")?;
+                    let mut fields = Vec::new();
+                    if !self.check(Token::RParen) {
+                        loop {
+                            let ty = self.parse_type()?;
+                            fields.push(EnumVariantField { ty, name: String::new() });
+                            if !self.match_token(Token::Comma) {
+                                break;
+                            }
                         }
                     }
+                    self.consume(Token::RParen, "expected `)`")?;
+                    fields
+                } else {
+                    Vec::new()
+                };
+                variants.push(EnumVariant { name: variant_name, fields });
+                if !self.match_token(Token::Pipe) {
+                    break;
                 }
-                self.consume(Token::RParen, "expected `)`")?;
-                fields
-            } else {
-                Vec::new()
-            };
-            variants.push(EnumVariant { name: variant_name, fields });
-            if !self.match_token(Token::Pipe) {
-                break;
             }
+            self.consume(Token::Semi, "expected `;` after type declaration")?;
+            Ok(Decl::Enum(EnumDecl { name, generic_params, variants }))
+        } else {
+            let target = self.parse_type()?;
+            self.consume(Token::Semi, "expected `;` after type declaration")?;
+            Ok(Decl::TypeAlias(TypeAliasDecl { name, generic_params, target }))
         }
-        self.consume(Token::Semi, "expected `;` after type declaration")?;
-        Ok(EnumDecl { name, generic_params, variants })
     }
 
     fn parse_generic_params(&mut self) -> Result<Vec<GenericParam>, String> {
@@ -1353,11 +1789,35 @@ impl<'a> Parser<'a> {
                 } else {
                     expr = Expr::NullConditionalField(Box::new(expr), name);
                 }
+            } else if self.check(Token::Question) {
+                // `?` is ambiguous: it starts a ternary (`cond ? a : b`) or is
+                // a postfix error-propagation operator (`expr?`). A ternary is
+                // always followed by a then-expression and then `:`; consume
+                // the `?`, try to parse that, and restore on success so the
+                // enclosing expression can parse the ternary.
+                let saved = self.pos;
+                self.advance(); // tentatively consume `?`
+                let is_ternary = self.try_parse_ternary_then();
+                if is_ternary {
+                    self.pos = saved;
+                    break;
+                }
+                expr = Expr::TryUnwrap(Box::new(expr));
+                continue;
             } else {
                 break;
             }
         }
         Ok(expr)
+    }
+
+    /// Attempt to parse the then-part of a ternary following an already
+    /// consumed `?`. Returns true if a complete expression followed by `:` is
+    /// found; the caller restores the token position on success.
+    fn try_parse_ternary_then(&mut self) -> bool {
+        self.parse_expr()
+            .map(|_| self.check(Token::Colon))
+            .unwrap_or(false)
     }
 
     fn lookahead_is_type_args(&mut self) -> bool {

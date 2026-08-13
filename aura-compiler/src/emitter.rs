@@ -3,7 +3,7 @@
 //! Translates the typed AST into an Aura [`Module`].
 
 use crate::ast::*;
-use crate::typer::{promote, ClassInfo, TypedProgram};
+use crate::typer::{build_subst, promote, substitute_type, ClassInfo, TypedProgram};
 use aura_bytecode::{ClassDef, ClassId, EnumDef, EnumId, ExceptionHandler, FieldDef, MethodDef, MethodId, Module, Op, TypeDesc, VariantDef};
 use std::collections::HashMap;
 
@@ -1401,14 +1401,21 @@ impl<'a> MethodEmitter<'a> {
                             for arg in &call.args {
                                 self.emit_expr(arg)?;
                             }
+                            // Bare static method call: `foo(args)` without a
+                            // class qualifier resolves to the current class.
+                            let owner = if self.class_ids.contains_key(&call.class_or_target) {
+                                call.class_or_target.clone()
+                            } else {
+                                self.class_name.to_string()
+                            };
                             let method_id = *self.method_ids.get(&(
-                                call.class_or_target.clone(),
+                                owner.clone(),
                                 call.method.clone(),
                                 false,
                             )).ok_or_else(|| {
                                 format!(
                                     "unknown static method `{}` on `{}`",
-                                    call.method, call.class_or_target
+                                    call.method, owner
                                 )
                             })?;
                             self.ops.push(Op::Call(method_id));
@@ -1424,7 +1431,7 @@ impl<'a> MethodEmitter<'a> {
                     .map(|ci| ci.constructors.is_empty())
                     .unwrap_or(true);
                 let ctor_id = if has_constructor {
-                    Some(self.resolve_constructor_id(class_name, args)?)
+                    Some(self.resolve_constructor_id(class_name, type_args, args)?)
                 } else {
                     None
                 };
@@ -1719,6 +1726,40 @@ impl<'a> MethodEmitter<'a> {
                     self.locals.pop();
                 }
             }
+            Expr::TryUnwrap(inner) => {
+                // `expr?` — if the subject is the success variant (variant 0),
+                // push its payload; otherwise return the error value as-is
+                // from the enclosing function.
+                let inner_ty = self.expr_ty(inner)?;
+                let _enum_name = match &inner_ty {
+                    Type::Class(name, _) | Type::Enum(name) => name.clone(),
+                    _ => {
+                        return Err(format!(
+                            "`?` requires a Result-like sum type, got `{}`",
+                            inner_ty.name()
+                        ));
+                    }
+                };
+                self.emit_expr(inner)?;
+                let temp = self.push_local("__try_unwrap".to_string()) as u16;
+                self.ops.push(Op::Stloc(temp));
+                // success variant index is 0
+                self.ops.push(Op::Ldloc(temp));
+                self.ops.push(Op::EnumTag);
+                self.ops.push(Op::LdInt(0));
+                self.ops.push(Op::Eq);
+                let err_label = self.ops.len();
+                self.ops.push(Op::BrFalse(0));
+                self.ops.push(Op::Ldloc(temp));
+                self.ops.push(Op::EnumField(0));
+                let end_label = self.ops.len();
+                self.ops.push(Op::Br(0));
+                self.ops[err_label] = Op::BrFalse(self.ops.len() as u32);
+                self.ops.push(Op::Ldloc(temp));
+                self.ops.push(Op::Ret);
+                self.ops[end_label] = Op::Br(self.ops.len() as u32);
+                self.locals.pop();
+            }
         }
         Ok(())
     }
@@ -1938,13 +1979,15 @@ impl<'a> MethodEmitter<'a> {
 
     /// Resolve the constructor `MethodId` of `class_name` that matches the
     /// given argument expressions (by count and assignability), mirroring the
-    /// type checker's overload resolution.
-    fn resolve_constructor_id(&self, class_name: &str, args: &[Expr]) -> Result<MethodId, String> {
+    /// type checker's overload resolution. `type_args` are substituted into
+    /// generic constructor parameters before matching.
+    fn resolve_constructor_id(&self, class_name: &str, type_args: &[Type], args: &[Expr]) -> Result<MethodId, String> {
         let ids = self.constructor_ids.get(class_name).ok_or_else(|| {
             format!("class `{}` declares no constructors", class_name)
         })?;
         let infos = self.program.classes.get(class_name)
             .ok_or_else(|| format!("unknown class `{}`", class_name))?;
+        let subst = build_subst(&infos.generic_params, type_args);
         let arg_types: Vec<Type> = args
             .iter()
             .map(|a| self.expr_ty(a))
@@ -1958,7 +2001,7 @@ impl<'a> MethodEmitter<'a> {
                         .params
                         .iter()
                         .zip(arg_types.iter())
-                        .all(|(expected, actual)| self.is_assignable(expected, actual))
+                        .all(|(expected, actual)| self.is_assignable(&substitute_type(expected, &subst), actual))
             })
             .ok_or_else(|| {
                 format!(
@@ -1984,10 +2027,10 @@ impl<'a> MethodEmitter<'a> {
                 let super_name = self.class_info.super_class.as_ref().ok_or_else(|| {
                     format!("class `{}` has no super class to chain to", self.class_name)
                 })?;
-                self.resolve_constructor_id(super_name, &chain.args)
+                self.resolve_constructor_id(super_name, &[], &chain.args)
             }
             ConstructorTarget::This => {
-                self.resolve_constructor_id(self.class_name, &chain.args)
+                self.resolve_constructor_id(self.class_name, &[], &chain.args)
             }
         }
     }
@@ -2066,6 +2109,19 @@ impl<'a> MethodEmitter<'a> {
                     .ok_or_else(|| format!("unknown static field `{}.{}`", class_name, name))?
             }
             Expr::EnumVariant(enum_name, _, _) => Type::Enum(enum_name.clone()),
+            Expr::TryUnwrap(inner) => {
+                let inner_ty = self.expr_ty(inner)?;
+                let enum_name = match &inner_ty {
+                    Type::Class(name, _) | Type::Enum(name) => Some(name.clone()),
+                    _ => None,
+                };
+                let name = enum_name.ok_or_else(|| "cannot determine unwrapped type of `?`".to_string())?;
+                self.program.enums.get(&name)
+                    .and_then(|e| e.variants.first())
+                    .and_then(|v| v.fields.first())
+                    .map(|f| f.1.clone())
+                    .ok_or_else(|| format!("cannot determine unwrapped type of `?`"))?
+            }
             Expr::Tuple(elements) => {
                 let tys = elements
                     .iter()
@@ -2133,7 +2189,14 @@ impl<'a> MethodEmitter<'a> {
                 _ => Ok(Type::Unit),
             };
         } else {
-            class_name = call.class_or_target.clone();
+            // Bare call: `foo(args)` without a class qualifier. If the
+            // class_or_target is not a known class, it resolves to a static
+            // method of the current class.
+            class_name = if self.class_ids.contains_key(&call.class_or_target) {
+                call.class_or_target.clone()
+            } else {
+                self.class_name.to_string()
+            };
             is_instance = false;
             method_name = call.method.clone();
         }

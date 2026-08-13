@@ -61,15 +61,18 @@
   - [x] Type coercion rules and conversions
   - [x] Overflow/underflow checking (configurable)
 
-- [ ] **Character and string types**
-  - [ ] `char` type (Unicode scalar value)
-  - [ ] Raw string literals: `r"..."`
-  - [ ] Multi-line strings: `"""..."""`
+- [x] **Character and string types**
+  - [x] `char` type (Unicode scalar value)
+  - [x] Raw string literals: `r"..."`
+  - [x] Multi-line strings: `"""..."""`
 
-- [ ] **Union types / Sum types**
+- [x] **Union types / Sum types**
   ```aura
   type Result<T, E> = Ok(T) | Err(E);
   ```
+  - [x] Generic sum types via `type Name<...> = V1(...) | V2(...)`
+  - [x] Bare variant construction: `Ok(5)`
+  - [x] Bare variant patterns: `match (r) { Ok(v) => ..., Err(m) => ... }`
 
 **P1 - High Priority**
 - [ ] **Structural typing**

@@ -1,0 +1,35 @@
+type UserId = int;
+type Name = string;
+type Boxed<T> = Box<T>;
+type Pair = (int, string);
+type MaybeInt = Some(int) | None;
+
+class Program {
+    static int twice(UserId x) {
+        return x * 2;
+    }
+    static void Main() {
+        UserId id = 21;
+        Name n = "alice";
+        print(id);
+        print(n);
+        print(twice(id));
+        Boxed<int> b = new Box<int>(5);
+        print(b.value);
+        Pair p = (7, "seven");
+        print(p.0);
+        print(p.1);
+        MaybeInt m = Some(3);
+        match (m) {
+            Some(v) => { print(v); }
+            None => { print(0); }
+        }
+    }
+}
+
+class Box<T> {
+    T value;
+    Box(T value) {
+        this.value = value;
+    }
+}

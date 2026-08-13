@@ -1,0 +1,39 @@
+type Result<T, E> = Ok(T) | Err(E);
+
+class Program {
+    static Result<int, string> safeDivide(int a, int b) {
+        if (b == 0) {
+            return Err("division by zero");
+        }
+        return Ok(a / b);
+    }
+
+    static Result<int, string> compute(int a, int b) {
+        int q = safeDivide(a, b)?;
+        return Ok(q * 2);
+    }
+
+    static void Main() {
+        Result<int, string> r1 = compute(10, 2);
+        Result<int, string> r2 = compute(10, 0);
+
+        string d1 = match (r1) {
+            Ok(v) => "ok:{v}",
+            Err(m) => "err:{m}"
+        };
+        string d2 = match (r2) {
+            Ok(v) => "ok:{v}",
+            Err(m) => "err:{m}"
+        };
+        print(d1);
+        println();
+        print(d2);
+        println();
+
+        // Ternary still works alongside `?`.
+        bool ok = true;
+        int t = ok ? 1 : 0;
+        print("t={t}");
+        println();
+    }
+}
