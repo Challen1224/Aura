@@ -3,7 +3,7 @@
 A from-scratch, statically-typed, object-oriented programming language and
 runtime, architected like C# / .NET CLR and written entirely in Rust.
 
-This program aims at not replacing C#/.NET CLR but showing what 1 solo developer and an AI companion can accomplish. This is just... a project I thought would challenge my programming abilities in compilers. Even with an AI companion who did most of the debugging to save time I still put effort into making it as smooth and faster!
+This program aims at not replacing C#/.NET CLR but showing what 1 solo developer and an AI companion can accomplish. This is just... a project I thought would challenge my programming abilities in compilers. Even with an AI companion who did most of the debugging to save time I still put effort into making it as smooth and fast!
 
 ```aura
 class Program {
