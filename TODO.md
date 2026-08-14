@@ -169,14 +169,24 @@
         constructor.
   - [ ] Refinement types (see research note above: rejected in SMT form;
         interval-fact diagnostics are the plausible subset)
-  - [ ] Phantom types
+  - [x] Phantom types — supported as a checked idiom: a generic parameter
+        used only as a compile-time tag (`FileHandle<Open>` vs
+        `FileHandle<Closed>`) is un-dodgeable. Type-argument arity is now
+        exact (raw references to generic classes like `FileHandle` or
+        `new FileHandle(1)` are compile errors, as are arguments on
+        non-generic classes), cross-tag assignment/argument passing is
+        rejected by the existing invariant checking, and tags are fully
+        erased at runtime. Verified under both tiers
+        (aura-vm/tests/phantom_types.rs, examples/phantom_types.aura).
   - [ ] Type-level computation
 
-- [ ] **Generic constraint enforcement** — found while researching
-      dependent types, verified 2026-08-14: `class Box<T : Sized>` parses
-      the constraint but the typer never enforces it; `Box<Plain>` with a
-      non-conforming `Plain` compiles and runs. Ordinary type-checking
-      work, prerequisite for any type-level feature.
+- [x] **Generic constraint enforcement** — `<T : IFace>` (and class
+      constraints) are now enforced at every type reference and `new`
+      instantiation via assignability, so structural (duck-typed)
+      satisfaction counts. v1 limit, documented: a type argument that is
+      itself a generic parameter is accepted without constraint
+      propagation. Was: parsed but silently ignored (found during the
+      dependent-types research).
 
 - [ ] **Type inference improvements**
   - [ ] Hindley-Milner style inference

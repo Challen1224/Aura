@@ -2449,6 +2449,10 @@ impl TypeChecker {
                         class_name
                     )));
                 }
+                self.validate_type_args(class_name, type_args, generic_params)?;
+                for arg in type_args {
+                    self.validate_type_with_generics(arg, generic_params)?;
+                }
                 let subst = build_subst(&class_info.generic_params, type_args);
                 let arg_types: Vec<Type> = args
                     .iter()
@@ -3625,6 +3629,48 @@ impl TypeChecker {
         }
     }
 
+    /// Check a generic class reference's type arguments: exact arity (raw
+    /// references to generic classes are rejected — required for phantom
+    /// type parameters to be un-dodgeable) and declared constraints
+    /// (`<T : IFace>` accepts only arguments assignable to the constraint;
+    /// arguments that are themselves type parameters are accepted without
+    /// constraint propagation — a documented v1 limit).
+    fn validate_type_args(
+        &self,
+        name: &str,
+        args: &[Type],
+        generic_params: &[GenericParam],
+    ) -> Result<(), TypeError> {
+        let Some(info) = self.classes.get(name) else {
+            return Ok(());
+        };
+        if info.generic_params.len() != args.len() {
+            return Err(TypeError(format!(
+                "class `{}` expects {} type argument(s), got {}",
+                name,
+                info.generic_params.len(),
+                args.len()
+            )));
+        }
+        for (param, arg) in info.generic_params.iter().zip(args.iter()) {
+            if let Some(constraint) = &param.constraint {
+                let is_param = matches!(arg, Type::GenericParam(_))
+                    || matches!(arg, Type::Class(n, a) if a.is_empty()
+                        && generic_params.iter().any(|gp| gp.name == *n));
+                if !is_param && !self.is_assignable(constraint, arg) {
+                    return Err(TypeError(format!(
+                        "type argument {} for parameter `{}` of `{}` does not satisfy constraint {}",
+                        arg.name(),
+                        param.name,
+                        name,
+                        constraint.name()
+                    )));
+                }
+            }
+        }
+        Ok(())
+    }
+
     fn validate_type_with_generics(&self, ty: &Type, generic_params: &[GenericParam]) -> Result<(), TypeError> {
         match ty {
             Type::Class(name, args) => {
@@ -3634,6 +3680,7 @@ impl TypeChecker {
                 if !self.classes.contains_key(name) && !self.enums.contains_key(name) {
                     return Err(TypeError(format!("unknown type `{}`", name)));
                 }
+                self.validate_type_args(name, args, generic_params)?;
                 for arg in args {
                     self.validate_type_with_generics(arg, generic_params)?;
                 }

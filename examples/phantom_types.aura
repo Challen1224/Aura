@@ -1,0 +1,70 @@
+// Phantom types: a generic parameter used purely as a compile-time tag.
+//
+// FileHandle<S> stores no S — the parameter exists only in the type. That
+// makes illegal state transitions unrepresentable: Read wants a
+// FileHandle<Open>, Close consumes an Open handle and returns a Closed
+// one, and handing a closed handle to Read is a compile error, not a
+// runtime bug. Tags are fully erased: at runtime a handle is just an
+// object with an fd.
+//
+// Constraints are enforced (`S : FileState` rejects FileHandle<int>) and
+// satisfied structurally — Open and Closed never declare `: FileState`,
+// their shape is enough. Raw references (`FileHandle` without a tag) are
+// rejected, so the tag cannot be dodged.
+
+interface FileState {
+    int Marker();
+}
+
+class Open {
+    int Marker() { return 1; }
+}
+
+class Closed {
+    int Marker() { return 0; }
+}
+
+class FileHandle<S : FileState> {
+    int fd;
+    FileHandle(int fd) { this.fd = fd; }
+}
+
+class Files {
+    static FileHandle<Open> OpenFile(int fd) {
+        print("open ");
+        print(fd);
+        println();
+        return new FileHandle<Open>(fd);
+    }
+
+    static int Read(FileHandle<Open> h) {
+        print("read fd ");
+        print(h.fd);
+        println();
+        return h.fd * 100;
+    }
+
+    static FileHandle<Closed> Close(FileHandle<Open> h) {
+        print("close fd ");
+        print(h.fd);
+        println();
+        return new FileHandle<Closed>(h.fd);
+    }
+}
+
+class Program {
+    static void Main() {
+        FileHandle<Open> f = Files.OpenFile(7);
+        int data = Files.Read(f);
+        FileHandle<Closed> done = Files.Close(f);
+
+        print("data: ");
+        print(data);
+        println();
+
+        // These would be compile errors:
+        //   Files.Read(done);                       // closed handle
+        //   FileHandle raw = f;                     // tag dodged
+        //   new FileHandle<int>(1);                 // constraint violated
+    }
+}
