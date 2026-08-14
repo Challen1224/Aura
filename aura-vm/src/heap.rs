@@ -199,10 +199,10 @@ impl Heap {
             AuraObject::String(s) => s.len(),
             AuraObject::Instance { fields, .. }
             | AuraObject::Array { elements: fields }
-            | AuraObject::Set { elements: fields } => {
+            | AuraObject::Set { elements: fields, .. } => {
                 fields.len() * std::mem::size_of::<Value>() + std::mem::size_of::<AuraObject>()
             }
-            AuraObject::Map { entries } => {
+            AuraObject::Map { entries, .. } => {
                 entries.len() * 2 * std::mem::size_of::<Value>() + std::mem::size_of::<AuraObject>()
             }
             AuraObject::Enum(e) => {

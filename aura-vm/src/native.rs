@@ -14,6 +14,7 @@
 use crate::{Vm, VmError};
 use aura_bytecode::natives::NativeId;
 use aura_bytecode::{AuraObject, GcRef, Value};
+use std::collections::HashMap;
 
 /// Execute the native `id` with already-popped arguments.
 pub(crate) fn exec_native(vm: &mut Vm, id: NativeId, args: &[Value]) -> Result<Value, VmError> {
@@ -93,28 +94,36 @@ pub(crate) fn exec_native(vm: &mut Vm, id: NativeId, args: &[Value]) -> Result<V
 
         // ---------------- Map<K, V> ----------------
         NativeId::MapNew => {
-            let handle = vm.heap.allocate(AuraObject::Map { entries: Vec::new() });
+            let handle = vm.heap.allocate(AuraObject::Map {
+                entries: Vec::new(),
+                index: HashMap::new(),
+            });
             Ok(Value::Object(handle))
         }
         NativeId::MapPut => {
             let h = map_handle(vm, id, &args[0])?;
             let (key, value) = (args[1].clone(), args[2].clone());
-            let existing = map_ref(vm, h)?
-                .iter()
-                .position(|(k, _)| vm.value_eq(k, &key));
-            let entries = map_mut(vm, h)?;
+            let kh = vm.value_hash(&key);
+            let existing = {
+                let (entries, index) = map_ref(vm, h)?;
+                bucket_find(vm, index, kh, &key, |pos| &entries[pos].0)
+            };
+            let (entries, index) = map_mut(vm, h)?;
             match existing {
-                Some(i) => entries[i].1 = value,
-                None => entries.push((key, value)),
+                Some(pos) => entries[pos].1 = value,
+                None => {
+                    entries.push((key, value));
+                    index.entry(kh).or_default().push((entries.len() - 1) as u32);
+                }
             }
             Ok(Value::Unit)
         }
         NativeId::MapGet => {
             let h = map_handle(vm, id, &args[0])?;
-            map_ref(vm, h)?
-                .iter()
-                .find(|(k, _)| vm.value_eq(k, &args[1]))
-                .map(|(_, v)| v.clone())
+            let kh = vm.value_hash(&args[1]);
+            let (entries, index) = map_ref(vm, h)?;
+            bucket_find(vm, index, kh, &args[1], |pos| &entries[pos].0)
+                .map(|pos| entries[pos].1.clone())
                 .ok_or_else(|| {
                     VmError::Runtime(format!(
                         "{}: key {} not found",
@@ -125,17 +134,23 @@ pub(crate) fn exec_native(vm: &mut Vm, id: NativeId, args: &[Value]) -> Result<V
         }
         NativeId::MapContainsKey => {
             let h = map_handle(vm, id, &args[0])?;
-            let found = map_ref(vm, h)?.iter().any(|(k, _)| vm.value_eq(k, &args[1]));
+            let kh = vm.value_hash(&args[1]);
+            let (entries, index) = map_ref(vm, h)?;
+            let found = bucket_find(vm, index, kh, &args[1], |pos| &entries[pos].0).is_some();
             Ok(Value::Bool(found))
         }
         NativeId::MapRemove => {
             let h = map_handle(vm, id, &args[0])?;
-            let existing = map_ref(vm, h)?
-                .iter()
-                .position(|(k, _)| vm.value_eq(k, &args[1]));
+            let kh = vm.value_hash(&args[1]);
+            let existing = {
+                let (entries, index) = map_ref(vm, h)?;
+                bucket_find(vm, index, kh, &args[1], |pos| &entries[pos].0)
+            };
             match existing {
-                Some(i) => {
-                    map_mut(vm, h)?.remove(i);
+                Some(pos) => {
+                    let (entries, index) = map_mut(vm, h)?;
+                    entries.remove(pos);
+                    index_remove(index, kh, pos as u32);
                     Ok(Value::Bool(true))
                 }
                 None => Ok(Value::Bool(false)),
@@ -143,53 +158,72 @@ pub(crate) fn exec_native(vm: &mut Vm, id: NativeId, args: &[Value]) -> Result<V
         }
         NativeId::MapKeys => {
             let h = map_handle(vm, id, &args[0])?;
-            let keys: Vec<Value> = map_ref(vm, h)?.iter().map(|(k, _)| k.clone()).collect();
+            let keys: Vec<Value> = map_ref(vm, h)?.0.iter().map(|(k, _)| k.clone()).collect();
             let handle = vm.heap.allocate(AuraObject::Array { elements: keys });
             Ok(Value::Object(handle))
         }
         NativeId::MapValues => {
             let h = map_handle(vm, id, &args[0])?;
-            let values: Vec<Value> = map_ref(vm, h)?.iter().map(|(_, v)| v.clone()).collect();
+            let values: Vec<Value> = map_ref(vm, h)?.0.iter().map(|(_, v)| v.clone()).collect();
             let handle = vm.heap.allocate(AuraObject::Array { elements: values });
             Ok(Value::Object(handle))
         }
         NativeId::MapClear => {
             let h = map_handle(vm, id, &args[0])?;
-            map_mut(vm, h)?.clear();
+            let (entries, index) = map_mut(vm, h)?;
+            entries.clear();
+            index.clear();
             Ok(Value::Unit)
         }
         NativeId::MapCount => {
             let h = map_handle(vm, id, &args[0])?;
-            Ok(Value::Int(map_ref(vm, h)?.len() as i64))
+            Ok(Value::Int(map_ref(vm, h)?.0.len() as i64))
         }
 
         // ---------------- Set<T> ----------------
         NativeId::SetNew => {
-            let handle = vm.heap.allocate(AuraObject::Set { elements: Vec::new() });
+            let handle = vm.heap.allocate(AuraObject::Set {
+                elements: Vec::new(),
+                index: HashMap::new(),
+            });
             Ok(Value::Object(handle))
         }
         NativeId::SetAdd => {
             let h = set_handle(vm, id, &args[0])?;
             let item = args[1].clone();
-            let present = set_ref(vm, h)?.iter().any(|e| vm.value_eq(e, &item));
+            let ih = vm.value_hash(&item);
+            let present = {
+                let (elements, index) = set_ref(vm, h)?;
+                bucket_find(vm, index, ih, &item, |pos| &elements[pos]).is_some()
+            };
             if present {
                 Ok(Value::Bool(false))
             } else {
-                set_mut(vm, h)?.push(item);
+                let (elements, index) = set_mut(vm, h)?;
+                elements.push(item);
+                index.entry(ih).or_default().push((elements.len() - 1) as u32);
                 Ok(Value::Bool(true))
             }
         }
         NativeId::SetContains => {
             let h = set_handle(vm, id, &args[0])?;
-            let found = set_ref(vm, h)?.iter().any(|e| vm.value_eq(e, &args[1]));
+            let ih = vm.value_hash(&args[1]);
+            let (elements, index) = set_ref(vm, h)?;
+            let found = bucket_find(vm, index, ih, &args[1], |pos| &elements[pos]).is_some();
             Ok(Value::Bool(found))
         }
         NativeId::SetRemove => {
             let h = set_handle(vm, id, &args[0])?;
-            let existing = set_ref(vm, h)?.iter().position(|e| vm.value_eq(e, &args[1]));
+            let ih = vm.value_hash(&args[1]);
+            let existing = {
+                let (elements, index) = set_ref(vm, h)?;
+                bucket_find(vm, index, ih, &args[1], |pos| &elements[pos])
+            };
             match existing {
-                Some(i) => {
-                    set_mut(vm, h)?.remove(i);
+                Some(pos) => {
+                    let (elements, index) = set_mut(vm, h)?;
+                    elements.remove(pos);
+                    index_remove(index, ih, pos as u32);
                     Ok(Value::Bool(true))
                 }
                 None => Ok(Value::Bool(false)),
@@ -197,18 +231,20 @@ pub(crate) fn exec_native(vm: &mut Vm, id: NativeId, args: &[Value]) -> Result<V
         }
         NativeId::SetToList => {
             let h = set_handle(vm, id, &args[0])?;
-            let elements = set_ref(vm, h)?.to_vec();
+            let elements = set_ref(vm, h)?.0.to_vec();
             let handle = vm.heap.allocate(AuraObject::Array { elements });
             Ok(Value::Object(handle))
         }
         NativeId::SetClear => {
             let h = set_handle(vm, id, &args[0])?;
-            set_mut(vm, h)?.clear();
+            let (elements, index) = set_mut(vm, h)?;
+            elements.clear();
+            index.clear();
             Ok(Value::Unit)
         }
         NativeId::SetCount => {
             let h = set_handle(vm, id, &args[0])?;
-            Ok(Value::Int(set_ref(vm, h)?.len() as i64))
+            Ok(Value::Int(set_ref(vm, h)?.0.len() as i64))
         }
 
         // ---------------- string ----------------
@@ -471,16 +507,16 @@ fn map_handle(vm: &Vm, id: NativeId, v: &Value) -> Result<GcRef, VmError> {
     }
 }
 
-fn map_ref<'a>(vm: &'a Vm, h: GcRef) -> Result<&'a Vec<(Value, Value)>, VmError> {
+fn map_ref<'a>(vm: &'a Vm, h: GcRef) -> Result<(&'a Vec<(Value, Value)>, &'a HashMap<i32, Vec<u32>>), VmError> {
     match vm.heap.get(h)? {
-        AuraObject::Map { entries } => Ok(entries),
+        AuraObject::Map { entries, index } => Ok((entries, index)),
         _ => unreachable!("checked by map_handle"),
     }
 }
 
-fn map_mut<'a>(vm: &'a mut Vm, h: GcRef) -> Result<&'a mut Vec<(Value, Value)>, VmError> {
+fn map_mut<'a>(vm: &'a mut Vm, h: GcRef) -> Result<(&'a mut Vec<(Value, Value)>, &'a mut HashMap<i32, Vec<u32>>), VmError> {
     match vm.heap.get_mut(h)? {
-        AuraObject::Map { entries } => Ok(entries),
+        AuraObject::Map { entries, index } => Ok((entries, index)),
         _ => unreachable!("checked by map_handle"),
     }
 }
@@ -492,16 +528,56 @@ fn set_handle(vm: &Vm, id: NativeId, v: &Value) -> Result<GcRef, VmError> {
     }
 }
 
-fn set_ref<'a>(vm: &'a Vm, h: GcRef) -> Result<&'a Vec<Value>, VmError> {
+fn set_ref<'a>(vm: &'a Vm, h: GcRef) -> Result<(&'a Vec<Value>, &'a HashMap<i32, Vec<u32>>), VmError> {
     match vm.heap.get(h)? {
-        AuraObject::Set { elements } => Ok(elements),
+        AuraObject::Set { elements, index } => Ok((elements, index)),
         _ => unreachable!("checked by set_handle"),
     }
 }
 
-fn set_mut<'a>(vm: &'a mut Vm, h: GcRef) -> Result<&'a mut Vec<Value>, VmError> {
+fn set_mut<'a>(vm: &'a mut Vm, h: GcRef) -> Result<(&'a mut Vec<Value>, &'a mut HashMap<i32, Vec<u32>>), VmError> {
     match vm.heap.get_mut(h)? {
-        AuraObject::Set { elements } => Ok(elements),
+        AuraObject::Set { elements, index } => Ok((elements, index)),
         _ => unreachable!("checked by set_handle"),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Shared hash-index helpers (Map keys and Set elements)
+// ---------------------------------------------------------------------------
+
+/// Find the storage position of `needle` via the hash index: probe the
+/// bucket for its structural hash and confirm with `value_eq` (hash equality
+/// is necessary but not sufficient — distinct values can collide).
+fn bucket_find<'a>(
+    vm: &Vm,
+    index: &HashMap<i32, Vec<u32>>,
+    hash: i32,
+    needle: &Value,
+    key_at: impl Fn(usize) -> &'a Value,
+) -> Option<usize> {
+    index.get(&hash)?.iter().copied().find_map(|pos| {
+        let pos = pos as usize;
+        vm.value_eq(key_at(pos), needle).then_some(pos)
+    })
+}
+
+/// Remove position `pos` (whose key hashes to `hash`) from the index, and
+/// shift every recorded position after it down by one to match the backing
+/// vector's `remove`. Keeps insertion order intact; removal is O(n) over the
+/// index while lookups stay O(1).
+fn index_remove(index: &mut HashMap<i32, Vec<u32>>, hash: i32, pos: u32) {
+    if let Some(bucket) = index.get_mut(&hash) {
+        bucket.retain(|p| *p != pos);
+        if bucket.is_empty() {
+            index.remove(&hash);
+        }
+    }
+    for bucket in index.values_mut() {
+        for p in bucket.iter_mut() {
+            if *p > pos {
+                *p -= 1;
+            }
+        }
     }
 }

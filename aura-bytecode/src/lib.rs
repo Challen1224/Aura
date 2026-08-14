@@ -148,16 +148,26 @@ pub enum AuraObject {
         elements: Vec<Value>,
     },
     /// Key/value map in insertion order (backing store for the stdlib
-    /// `Map<K, V>`). Key lookup uses the VM's structural `value_eq`.
+    /// `Map<K, V>`). Key lookup uses the VM's structural hash with
+    /// `value_eq` for collision resolution.
     Map {
         /// Entries in insertion order; keys are unique under `value_eq`.
         entries: Vec<(Value, Value)>,
+        /// Hash index: structural key hash -> positions in `entries`
+        /// (ascending). Maintained by the VM's native implementations;
+        /// holds no heap references.
+        index: HashMap<i32, Vec<u32>>,
     },
     /// Unique element collection in insertion order (backing store for the
-    /// stdlib `Set<T>`). Membership uses the VM's structural `value_eq`.
+    /// stdlib `Set<T>`). Membership uses the VM's structural hash with
+    /// `value_eq` for collision resolution.
     Set {
         /// Elements in insertion order; unique under `value_eq`.
         elements: Vec<Value>,
+        /// Hash index: structural hash -> positions in `elements`
+        /// (ascending). Maintained by the VM's native implementations;
+        /// holds no heap references.
+        index: HashMap<i32, Vec<u32>>,
     },
     /// Enum value payload.
     Enum(EnumValue),
@@ -186,12 +196,12 @@ impl AuraObject {
             AuraObject::String(_) => {}
             AuraObject::Instance { fields, .. }
             | AuraObject::Array { elements: fields }
-            | AuraObject::Set { elements: fields } => {
+            | AuraObject::Set { elements: fields, .. } => {
                 for v in fields {
                     refs.extend(v.contained_refs());
                 }
             }
-            AuraObject::Map { entries } => {
+            AuraObject::Map { entries, .. } => {
                 for (k, v) in entries {
                     refs.extend(k.contained_refs());
                     refs.extend(v.contained_refs());

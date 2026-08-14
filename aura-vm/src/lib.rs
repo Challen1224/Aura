@@ -110,7 +110,7 @@ pub(crate) fn describe_value(vm: &Vm, v: &Value) -> String {
                 AuraObject::Instance { class_id, .. } => {
                     vm.module.classes.get(class_id).map(|c| c.name.clone())
                 }
-                AuraObject::Array { elements } | AuraObject::Set { elements } => {
+                AuraObject::Array { elements } | AuraObject::Set { elements, .. } => {
                     let inner = elements
                         .iter()
                         .map(|e| describe_value(vm, e))
@@ -122,7 +122,7 @@ pub(crate) fn describe_value(vm: &Vm, v: &Value) -> String {
                         format!("[{}]", inner)
                     })
                 }
-                AuraObject::Map { entries } => {
+                AuraObject::Map { entries, .. } => {
                     let inner = entries
                         .iter()
                         .map(|(k, v)| {
@@ -1232,7 +1232,10 @@ impl Vm {
     pub(crate) fn value_hash(&self, v: &Value) -> i32 {
         match v {
             Value::Int(i) => *i as i32,
-            Value::Float(f) => f.to_bits() as i32,
+            // Normalize negative zero: value_eq uses f64 `==`, under which
+            // 0.0 == -0.0, so both must hash alike (hash/eq agreement is
+            // load-bearing for the Map/Set hash index).
+            Value::Float(f) => (if *f == 0.0 { 0.0f64 } else { *f }).to_bits() as i32,
             Value::Bool(b) => *b as i32,
             Value::Char(c) => *c as i32,
             Value::Null | Value::Unit => 0,

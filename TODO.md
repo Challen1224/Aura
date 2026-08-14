@@ -916,11 +916,13 @@
 #### ✅ Completed (v1, native-backed intrinsics)
 
 Implemented as VM natives behind a generic `NativeCall` opcode; typed
-generically by the compiler (`List<T>`, `Map<K, V>`, `Set<T>`). Caveats:
-`Map`/`Set` lookups are linear scans over insertion-ordered vectors using
-structural `value_eq` (fine for small collections, no hashing yet), and
-out-of-range/missing-key errors are VM runtime errors, not catchable Aura
-exceptions.
+generically by the compiler (`List<T>`, `Map<K, V>`, `Set<T>`). `Map`/`Set`
+lookups are hash-indexed (structural `value_hash` buckets over the
+insertion-ordered vector, `value_eq` on collision): measured ~10x faster at
+4k entries with linear-in-N scaling, verified under interpreter and JIT
+(aura-vm/tests/map_perf.rs, stdlib_hash.rs). Removal is still O(n) (index
+fixup). Out-of-range/missing-key errors remain VM runtime errors, not
+catchable Aura exceptions.
 
 - [x] **List** — `Add`, `Get`, `Set`, `Insert`, `RemoveAt`, `IndexOf`,
       `Contains`, `Clear`, `Count`
@@ -936,8 +938,11 @@ exceptions.
 #### ⏳ Planned
 
 **P0 - Critical**
-- [ ] Hash-based `Map`/`Set` lookup (replace linear scan; `value_hash`
-      already exists in the VM)
+- [x] Hash-based `Map`/`Set` lookup — `value_hash` bucket index with
+      `value_eq` collision resolution; insertion order preserved; float
+      `-0.0`/`0.0` hash/eq mismatch fixed as a prerequisite. Measured:
+      4k-entry build+lookup dropped from 0.313s to 0.031s (interpreter,
+      host), scaling ratio for 8x workload fell from ~33x to ~7-8x.
 - [ ] Iteration support (`foreach` over collections)
 - [ ] Sorted variants (TreeMap/TreeSet), LinkedList
 
