@@ -225,9 +225,13 @@ impl Asm {
     pub fn assemble(self) -> Vec<u8> {
         assert!(
             self.fixups.is_empty(),
-            "{} unbound fixups",
-            self.fixups.len()
+            "{} unbound fixups: {:?}",
+            self.fixups.len(),
+            self.fixups.iter().map(|f| (f.offset, f.label, f.kind)).collect::<Vec<_>>()
         );
+        if let Ok(path) = std::env::var("AURA_DUMP_JIT") {
+            let _ = std::fs::write(path, &self.code);
+        }
         self.code
     }
 
@@ -624,9 +628,9 @@ impl Asm {
 
     /// `imul r64, r64` (dst *= src)
     pub fn imul_rr(&mut self, dst: Gpr, src: Gpr) {
-        self.rex(true, (src.0 >> 3) != 0, false, (dst.0 >> 3) != 0);
+        self.rex(true, (dst.0 >> 3) != 0, false, (src.0 >> 3) != 0);
         self.opcode2(0xAF);
-        self.modrm(3, src.0, dst.0);
+        self.modrm(3, dst.0, src.0);
     }
 
     /// `neg r64`
@@ -772,25 +776,13 @@ impl Asm {
         // Emit rel32 form always; simplest and correct.
         self.emit(0x0F);
         self.emit(0x80 + cond_code(cond));
-        let offset = self.code.len();
-        self.code.extend_from_slice(&[0; 4]);
-        self.fixups.push(Fixup {
-            offset,
-            label: target.0,
-            kind: FixupKind::Rel32,
-        });
+        self.emit_rel32(target);
     }
 
     /// `jmp label`
     pub fn jmp(&mut self, target: Label) {
         self.emit(0xE9);
-        let offset = self.code.len();
-        self.code.extend_from_slice(&[0; 4]);
-        self.fixups.push(Fixup {
-            offset,
-            label: target.0,
-            kind: FixupKind::Rel32,
-        });
+        self.emit_rel32(target);
     }
 
     /// `call r64` (indirect, for helper addresses).
@@ -803,13 +795,30 @@ impl Asm {
     /// `call rel32` (direct, to a label).
     pub fn call_label(&mut self, target: Label) {
         self.emit(0xE8);
+        self.emit_rel32(target);
+    }
+
+    /// Emit a rel32 operand for `label`, recording a fixup if it is not bound
+    /// yet or patching it directly for backward jumps to an already-bound label.
+    fn emit_rel32(&mut self, target: Label) {
         let offset = self.code.len();
         self.code.extend_from_slice(&[0; 4]);
-        self.fixups.push(Fixup {
-            offset,
-            label: target.0,
-            kind: FixupKind::Rel32,
-        });
+        if let Some(&pos) = self.label_offsets.get(&target.0) {
+            let from = offset + 4;
+            let delta = pos as i64 - from as i64;
+            assert!(
+                (i32::MIN as i64..=i32::MAX as i64).contains(&delta),
+                "rel32 out of range"
+            );
+            let bytes = (delta as i32).to_le_bytes();
+            self.code[offset..offset + 4].copy_from_slice(&bytes);
+        } else {
+            self.fixups.push(Fixup {
+                offset,
+                label: target.0,
+                kind: FixupKind::Rel32,
+            });
+        }
     }
 
     /// `jmp r64`
@@ -1047,7 +1056,7 @@ impl Asm {
     /// Move the low 64 bits of an XMM into a GPR (`movq r64, xmm`).
     pub fn movq_rr_xmm(&mut self, dst: Gpr, src: Xmm) {
         self.emit(0x66);
-        self.rex(true, (dst.0 >> 3) != 0, false, (src.0 >> 3) != 0);
+        self.rex(true, (src.0 >> 3) != 0, false, (dst.0 >> 3) != 0);
         self.emit(0x0F);
         self.emit(0x7E);
         self.modrm(3, src.0, dst.0);

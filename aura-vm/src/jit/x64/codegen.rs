@@ -176,7 +176,7 @@ impl<'a> Codegen<'a> {
     }
 
     fn emit_epilogue(&mut self) {
-        self.asm.mov_rr(RSP, R13);
+        self.asm.add_ri(RSP, self.frame as i64);
         self.asm.pop(RBX);
         self.asm.pop(R15);
         self.asm.pop(R14);

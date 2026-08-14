@@ -116,31 +116,43 @@ pub fn gc_ref(tag: u64, payload: u64) -> GcRef {
     GcRef(payload as usize)
 }
 
-/// Verify the layout constants against real `Value` instances. Called from a
-/// unit test so the JIT's assumptions are checked on every build.
+/// Verify the boxed slot layout the JIT relies on: a 16-byte `Value` with an
+/// 8-byte tag word at offset 0 and an 8-byte payload word at offset 8. The
+/// canonical representation is what `write_parts` produces and `read_value`
+/// reconstructs. (The in-memory layout of a stack `Value` enum is not
+/// meaningful here: repr(Rust) padding and niche words are unspecified, so we
+/// round-trip through a slot instead of inspecting raw enum bytes.) Called
+/// from a unit test so the JIT's assumptions are checked on every build.
 pub fn verify_layout() -> Result<(), String> {
-    let check = |name: &str, v: Value, tag: u64, payload: u64| -> Result<(), String> {
-        unsafe {
-            let p = &v as *const Value;
-            let t = read_tag(p);
-            let pay = read_payload(p);
+    unsafe {
+        let roundtrip = |name: &str, tag: u64, payload: u64, expected: Value| -> Result<(), String> {
+            let mut slot = Value::Unit;
+            write_parts(&mut slot, tag, payload);
+            let t = read_tag(&slot);
+            let pay = read_payload(&slot);
             if t != tag || pay != payload {
                 return Err(format!(
                     "layout mismatch for {name}: expected tag {tag:#x} payload {payload:#x}, got tag {t:#x} payload {pay:#x}"
                 ));
             }
-        }
-        Ok(())
-    };
-    check("Unit", Value::Unit, TAG_UNIT, 0)?;
-    check("Int", Value::Int(0x1122334455667788), TAG_INT, 0x1122334455667788)?;
-    check("Float", Value::Float(3.5), TAG_FLOAT, 3.5f64.to_bits())?;
-    check("Bool(true)", Value::Bool(true), TAG_BOOL | (1 << 8), 0)?;
-    check("Bool(false)", Value::Bool(false), TAG_BOOL, 0)?;
-    check("Char", Value::Char('A'), TAG_CHAR | ('A' as u64) << 32, 0)?;
-    check("String", Value::String(GcRef(7)), TAG_STRING, 7)?;
-    check("Object", Value::Object(GcRef(9)), TAG_OBJECT, 9)?;
-    check("Null", Value::Null, TAG_NULL, 0)?;
+            let v = read_value(&slot);
+            if v != expected {
+                return Err(format!(
+                    "round-trip mismatch for {name}: wrote tag {tag:#x} payload {payload:#x}, read back {v:?}"
+                ));
+            }
+            Ok(())
+        };
+        roundtrip("Unit", TAG_UNIT, 0, Value::Unit)?;
+        roundtrip("Int", TAG_INT, 0x1122334455667788, Value::Int(0x1122334455667788))?;
+        roundtrip("Float", TAG_FLOAT, 3.5f64.to_bits(), Value::Float(3.5))?;
+        roundtrip("Bool(true)", TAG_BOOL | (1 << 8), 0, Value::Bool(true))?;
+        roundtrip("Bool(false)", TAG_BOOL, 0, Value::Bool(false))?;
+        roundtrip("Char", TAG_CHAR | ('A' as u64) << 32, 0, Value::Char('A'))?;
+        roundtrip("String", TAG_STRING, 7, Value::String(GcRef(7)))?;
+        roundtrip("Object", TAG_OBJECT, 9, Value::Object(GcRef(9)))?;
+        roundtrip("Null", TAG_NULL, 0, Value::Null)?;
+    }
     if std::mem::size_of::<Value>() != 16 {
         return Err(format!("Value is {} bytes, expected 16", std::mem::size_of::<Value>()));
     }

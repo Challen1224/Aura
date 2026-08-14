@@ -190,6 +190,9 @@ impl JitFunction {
     pub fn new(code: Vec<u8>) -> Result<Self, MemoryError> {
         let mut memory = ExecutableMemory::allocate(code.len())?;
         memory.finalize(&code)?;
+        if let Ok(p) = std::env::var("AURA_DUMP_JIT_PTR") {
+            eprintln!("JIT code ptr = {:#x}", memory.ptr() as usize);
+        }
         Ok(Self { memory })
     }
 

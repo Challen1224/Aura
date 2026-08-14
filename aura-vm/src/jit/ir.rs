@@ -58,7 +58,11 @@ impl KType {
 /// Join of two abstract types: equal types join to themselves; anything mixed
 /// with a different type degrades to [`KType::Unknown`].
 pub fn kjoin(a: KType, b: KType) -> KType {
-    if a == b {
+    if a == KType::Unknown {
+        b
+    } else if b == KType::Unknown {
+        a
+    } else if a == b {
         a
     } else {
         KType::Unknown
@@ -377,7 +381,8 @@ impl<'a> Lowerer<'a> {
             .map(|m| m.name.clone())
             .unwrap_or_else(|| format!("{:?}", self.method_id));
         self.func.locals = self.method.locals;
-        self.func.params = self.method.params.len() as u16;
+        self.func.params = self.method.params.len() as u16
+            + if self.method.is_instance { 1 } else { 0 };
         self.func.max_stack = self.method.max_stack;
         self.build_cfg()?;
         self.analyze()?;
@@ -435,22 +440,29 @@ impl<'a> Lowerer<'a> {
         self.preds = vec![Vec::new(); self.ranges.len()];
         for (id, &(s, e)) in self.ranges.iter().enumerate() {
             let t = self.find_terminator(s, e);
-            let succs: Vec<usize> = match &body[t] {
-                Op::Br(off) => vec![self.block((*off) as usize)?],
-                Op::BrFalse(off) | Op::BrTrue(off) => {
-                    let target = self.block((*off) as usize)?;
-                    let mut v = vec![target];
-                    let fall = t + 1;
-                    if fall < n {
-                        if let Some(f) = self.block_at.get(&fall).copied() {
-                            if f != target {
-                                v.push(f);
+            let succs: Vec<usize> = if t >= e {
+                match self.block_at.get(&e) {
+                    Some(&f) => vec![f],
+                    None => Vec::new(),
+                }
+            } else {
+                match &body[t] {
+                    Op::Br(off) => vec![self.block((*off) as usize)?],
+                    Op::BrFalse(off) | Op::BrTrue(off) => {
+                        let target = self.block((*off) as usize)?;
+                        let mut v = vec![target];
+                        let fall = t + 1;
+                        if fall < n {
+                            if let Some(f) = self.block_at.get(&fall).copied() {
+                                if f != target {
+                                    v.push(f);
+                                }
                             }
                         }
+                        v
                     }
-                    v
+                    _ => Vec::new(),
                 }
-                _ => Vec::new(),
             };
             self.succs[id] = succs.clone();
             for &s2 in &succs {
@@ -467,11 +479,15 @@ impl<'a> Lowerer<'a> {
     /// Index of the control-flow instruction terminating block `[s, e)`.
     fn find_terminator(&self, s: usize, e: usize) -> usize {
         let body = &self.method.body;
-        let mut t = e.saturating_sub(1);
-        while t > s && !is_control(&body[t]) {
+        let mut t = e;
+        while t > s && !is_control(&body[t - 1]) {
             t -= 1;
         }
-        t
+        if t == s {
+            // No control op in [s, e): the block falls through to the next one.
+            return e;
+        }
+        t - 1
     }
 
     // ------------------------------------------------------------------
@@ -483,8 +499,9 @@ impl<'a> Lowerer<'a> {
         self.state = (0..nb).map(|_| BlockState::default()).collect();
         self.local_types = (0..self.method.locals as usize)
             .map(|i| {
-                if i < self.method.params.len() {
-                    KType::from_typedesc(&self.method.params[i])
+                let param_idx = i as i64 - if self.method.is_instance { 1 } else { 0 };
+                if param_idx >= 0 && (param_idx as usize) < self.method.params.len() {
+                    KType::from_typedesc(&self.method.params[param_idx as usize])
                 } else {
                     KType::Unknown
                 }
@@ -513,29 +530,36 @@ impl<'a> Lowerer<'a> {
                 for i in s..t {
                     self.sim_op(&mut stack, &mut h, &self.method.body[i].clone())?;
                 }
-                let term_op = self.method.body[t].clone();
-                // A conditional branch pops its condition before either edge.
-                if matches!(term_op, Op::BrFalse(_) | Op::BrTrue(_)) {
-                    if stack.is_empty() {
-                        return Err("stack underflow at branch".into());
-                    }
-                    stack.pop();
-                    h -= 1;
-                }
                 let mut candidates: Vec<(usize, usize, Vec<KType>)> = Vec::new();
-                match &term_op {
-                    Op::Br(off) => candidates.push((self.block((*off) as usize)?, h, stack.clone())),
-                    Op::BrFalse(off) | Op::BrTrue(off) => {
-                        let target = self.block((*off) as usize)?;
-                        candidates.push((target, h, stack.clone()));
-                        let fall = t + 1;
-                        if let Some(f) = self.block_at.get(&fall).copied() {
-                            if f != target {
-                                candidates.push((f, h, stack.clone()));
+                if t >= e {
+                    // Straight-line block that falls through to the next one.
+                    if let Some(f) = self.block_at.get(&e).copied() {
+                        candidates.push((f, h, stack.clone()));
+                    }
+                } else {
+                    let term_op = self.method.body[t].clone();
+                    // A conditional branch pops its condition before either edge.
+                    if matches!(term_op, Op::BrFalse(_) | Op::BrTrue(_)) {
+                        if stack.is_empty() {
+                            return Err("stack underflow at branch".into());
+                        }
+                        stack.pop();
+                        h -= 1;
+                    }
+                    match &term_op {
+                        Op::Br(off) => candidates.push((self.block((*off) as usize)?, h, stack.clone())),
+                        Op::BrFalse(off) | Op::BrTrue(off) => {
+                            let target = self.block((*off) as usize)?;
+                            candidates.push((target, h, stack.clone()));
+                            let fall = t + 1;
+                            if let Some(f) = self.block_at.get(&fall).copied() {
+                                if f != target {
+                                    candidates.push((f, h, stack.clone()));
+                                }
                             }
                         }
+                        _ => {}
                     }
-                    _ => {}
                 }
                 for (succ, hh, types) in candidates {
                     let changed = self.merge_state(succ, hh, types)?;
@@ -828,34 +852,44 @@ impl<'a> Lowerer<'a> {
                 self.lower_op(&mut block, &mut stack, &self.method.body[i].clone())?;
             }
 
-            let term_op = self.method.body[t].clone();
-            let term = match &term_op {
-                Op::Br(off) => {
-                    let target = self.block((*off) as usize)?;
-                    self.finish_edge(&mut block, &mut stack, target);
-                    Term::Br(target)
+            let term = if t >= e {
+                match self.block_at.get(&e) {
+                    Some(&f) => {
+                        self.finish_edge(&mut block, &mut stack, f);
+                        Term::Br(f)
+                    }
+                    None => Term::Unreachable,
                 }
-                Op::BrFalse(off) | Op::BrTrue(off) => {
-                    let target = self.block((*off) as usize)?;
-                    let cond = stack.pop().ok_or("stack underflow at branch")?;
-                    self.finish_edge(&mut block, &mut stack, target);
-                    let fall = t + 1;
-                    if let Some(f) = self.block_at.get(&fall).copied() {
-                        if f != target {
-                            self.finish_edge(&mut block, &mut stack, f);
+            } else {
+                let term_op = self.method.body[t].clone();
+                match &term_op {
+                    Op::Br(off) => {
+                        let target = self.block((*off) as usize)?;
+                        self.finish_edge(&mut block, &mut stack, target);
+                        Term::Br(target)
+                    }
+                    Op::BrFalse(off) | Op::BrTrue(off) => {
+                        let target = self.block((*off) as usize)?;
+                        let cond = stack.pop().ok_or("stack underflow at branch")?;
+                        self.finish_edge(&mut block, &mut stack, target);
+                        let fall = t + 1;
+                        if let Some(f) = self.block_at.get(&fall).copied() {
+                            if f != target {
+                                self.finish_edge(&mut block, &mut stack, f);
+                            }
+                        }
+                        if matches!(term_op, Op::BrTrue(_)) {
+                            Term::BrTrue(cond, target)
+                        } else {
+                            Term::BrFalse(cond, target)
                         }
                     }
-                    if matches!(term_op, Op::BrTrue(_)) {
-                        Term::BrTrue(cond, target)
-                    } else {
-                        Term::BrFalse(cond, target)
+                    Op::Ret => {
+                        let result = stack.pop().ok_or("stack underflow at return")?;
+                        Term::Ret(result)
                     }
+                    _ => Term::Unreachable,
                 }
-                Op::Ret => {
-                    let result = stack.pop().ok_or("stack underflow at return")?;
-                    Term::Ret(result)
-                }
-                _ => Term::Unreachable,
             };
             block.term = term;
             self.func.blocks.push(block);
@@ -1704,6 +1738,117 @@ mod tests {
         Lowerer::new(&m, MethodId(1), false).unwrap().lower().unwrap()
     }
 
+    fn instance_module(body: Vec<Op>, params: Vec<TypeDesc>, locals: u16, max_stack: u16) -> Module {
+        let mut methods = HashMap::new();
+        methods.insert(
+            MethodId(1),
+            MethodDef {
+                name: "test".into(),
+                return_ty: TypeDesc::Unit,
+                params,
+                generic_params: Vec::new(),
+                is_instance: true,
+                body,
+                handlers: Vec::new(),
+                max_stack,
+                locals,
+            },
+        );
+        let mut classes = HashMap::new();
+        classes.insert(
+            ClassId(0),
+            ClassDef {
+                name: "Test".into(),
+                generic_params: Vec::new(),
+                super_class: None,
+                interfaces: Vec::new(),
+                is_interface: false,
+                is_abstract: false,
+                is_record: false,
+                fields: Vec::new(),
+                static_fields: Vec::new(),
+                methods,
+                static_methods: HashMap::new(),
+            },
+        );
+        Module {
+            name: "test".into(),
+            classes,
+            enums: HashMap::new(),
+            entrypoint: None,
+            constant_pool: vec![],
+        }
+    }
+
+    #[test]
+    fn instance_param_local_types_include_this() {
+        let m = instance_module(
+            vec![Op::Ldarg(0), Op::Ldarg(1), Op::Mul, Op::Ret],
+            vec![TypeDesc::Float64, TypeDesc::Int64],
+            3,
+            2,
+        );
+        let f = Lowerer::new(&m, MethodId(1), false).unwrap().lower().unwrap();
+        assert_eq!(f.params, 3, "this + two params");
+        assert_eq!(f.local_types[0], KType::Unknown, "local 0 is `this`");
+        assert_eq!(f.local_types[1], KType::Float, "local 1 is the float param");
+        assert_eq!(f.local_types[2], KType::Int, "local 2 is the int param");
+        // Mixed float x int cannot inline; it must route through a helper.
+        assert!(!f.helper_ops.is_empty());
+    }
+
+    #[test]
+    fn lowers_loop_with_fallthrough_block() {
+        // int r = 0; while (r < 2) { r = r + 1; } return r;
+        let body = vec![
+            Op::LdInt(0),
+            Op::Stloc(0),
+            Op::Ldloc(0),
+            Op::LdInt(2),
+            Op::Lt,
+            Op::BrFalse(11),
+            Op::Ldloc(0),
+            Op::LdInt(1),
+            Op::Add,
+            Op::Stloc(0),
+            Op::Br(2),
+            Op::Ldloc(0),
+            Op::Ret,
+        ];
+        let f = lower(body, vec![], 1, 2);
+        let reachable: Vec<_> = f.blocks.iter().filter(|b| b.reachable).collect();
+        assert_eq!(reachable.len(), 4);
+        // b0 is the pre-header; it ends without a control op and must fall
+        // through to b1 (the loop head) instead of dropping its instructions.
+        assert_eq!(f.blocks[0].insns.len(), 2);
+        assert!(matches!(f.blocks[0].term, Term::Br(1)));
+        assert_eq!(f.blocks[0].succs, vec![1]);
+        assert_eq!(f.blocks[0].preds, vec![]);
+        // b1 (loop head) branches to b3 (exit) or falls into b2 (body).
+        assert!(matches!(f.blocks[1].term, Term::BrFalse(_, 3)));
+        assert_eq!(f.blocks[1].succs, vec![3, 2]);
+        assert_eq!(f.blocks[2].preds, vec![1]);
+        assert_eq!(f.blocks[2].succs, vec![1], "body loops back to the head");
+        assert!(matches!(f.blocks[3].term, Term::Ret(_)));
+        assert_eq!(f.blocks[3].preds, vec![1]);
+    }
+
+    #[test]
+    fn int_mul_inlines() {
+        let f = lower(vec![Op::LdInt(7), Op::LdInt(2), Op::Mul, Op::Ret], vec![], 0, 2);
+        assert!(f.helper_ops.is_empty(), "int mul must not route to a helper");
+        let muls = f.blocks[0]
+            .insns
+            .iter()
+            .filter(|i| matches!(i, Insn::Bin { op: BinOp::Mul, .. }))
+            .count();
+        assert_eq!(muls, 1);
+        match &f.blocks[0].term {
+            Term::Ret(v) => assert_eq!(f.vtype(*v), KType::Int),
+            other => panic!("expected Ret, got {other:?}"),
+        }
+    }
+
     #[test]
     fn lowers_int_add() {
         let f = lower(vec![Op::LdInt(3), Op::LdInt(4), Op::Add, Op::Ret], vec![], 0, 2);
@@ -1745,9 +1890,11 @@ mod tests {
         assert_eq!(f.locals, 3);
         assert_eq!(f.local_types[0], KType::Int);
         assert_eq!(f.local_types[1], KType::Int);
-        // Slot 2 starts Unknown and receives an Int store, so it stays Unknown
-        // (conservative join: it may be read before ever being written).
-        assert_eq!(f.local_types[2], KType::Unknown);
+        // Slot 2 starts Unknown and receives an Int store, so it becomes Int
+        // (Unknown is the lattice bottom: `Unknown ⊔ Int = Int`). Reads after a
+        // store therefore see the stored type instead of routing every local op
+        // through the dispatcher as an untyped box.
+        assert_eq!(f.local_types[2], KType::Int);
         let loads: Vec<u16> = f.blocks[0]
             .insns
             .iter()

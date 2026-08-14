@@ -214,7 +214,7 @@ pub fn allocate(func: &mut Function) -> Allocation {
     let mut taken_gpr: Vec<Vec<VReg>> = vec![Vec::new(); 16];
     let mut taken_xmm: Vec<Vec<VReg>> = vec![Vec::new(); 16];
 
-    let mut homes: Vec<Home> = Vec::with_capacity(nv);
+    let mut homes: Vec<Option<Home>> = vec![None; nv];
     let mut slot_for = vec![None; nv];
     let mut next_slot = 0usize;
     let mut take_slot = |v: VReg,
@@ -249,7 +249,7 @@ pub fn allocate(func: &mut Function) -> Allocation {
         // Dead value (defined, never used): don't waste a register.
         if ve == 0 {
             let s = take_slot(v, &mut slot_for, &mut next_slot);
-            homes.push(Home::Slot(s));
+            homes[v as usize] = Some(Home::Slot(s));
             continue;
         }
         let mut chosen: Option<Home> = None;
@@ -281,10 +281,10 @@ pub fn allocate(func: &mut Function) -> Allocation {
             }
         }
         match chosen {
-            Some(h) => homes.push(h),
+            Some(h) => homes[v as usize] = Some(h),
             None => {
                 let s = take_slot(v, &mut slot_for, &mut next_slot);
-                homes.push(Home::Slot(s));
+                homes[v as usize] = Some(Home::Slot(s));
             }
         }
     }
@@ -294,9 +294,13 @@ pub fn allocate(func: &mut Function) -> Allocation {
     unknown.sort_by_key(|v| *v);
     for v in unknown {
         let s = take_slot(v, &mut slot_for, &mut next_slot);
-        homes.push(Home::Slot(s));
+        homes[v as usize] = Some(Home::Slot(s));
     }
 
+    let homes: Vec<Home> = homes
+        .into_iter()
+        .map(|h| h.expect("every vreg is assigned a home"))
+        .collect();
     debug_assert_eq!(homes.len(), nv);
     func.spill_bytes = next_slot * SLOT_BYTES;
     Allocation { homes, slot_count: next_slot }
