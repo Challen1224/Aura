@@ -477,6 +477,10 @@ pub enum Stmt {
         body: Vec<Stmt>,
         condition: Expr,
     },
+    /// Source-line marker injected by the parser before each statement so
+    /// the type checker and emitter can report error locations. No runtime
+    /// effect.
+    Mark(usize),
     /// Break statement with optional label.
     Break(Option<String>),
     /// Continue statement with optional label.

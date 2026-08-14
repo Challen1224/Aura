@@ -161,6 +161,72 @@ pub fn structurally_satisfies(
     true
 }
 
+/// Explain why `class_name` does not structurally satisfy `iface_name`:
+/// the first missing or mismatched abstract method, with both signatures.
+fn explain_structural_failure(
+    classes: &HashMap<String, ClassInfo>,
+    class_name: &str,
+    iface_name: &str,
+) -> Option<String> {
+    let iface = classes.get(iface_name)?;
+    if !iface.is_interface {
+        return None;
+    }
+    let sig = |params: &[Type], ret: &Type| {
+        format!(
+            "({}) -> {}",
+            params.iter().map(|p| p.name()).collect::<Vec<_>>().join(", "),
+            ret.name()
+        )
+    };
+    let find_on_class = |method: &str| -> Option<&MethodInfo> {
+        let mut cur = Some(class_name);
+        while let Some(c) = cur {
+            let info = classes.get(c)?;
+            if let Some(mi) = info.methods.get(method) {
+                return Some(mi);
+            }
+            cur = info.super_class.as_deref();
+        }
+        None
+    };
+    for (name, im) in &iface.methods {
+        if !im.is_abstract {
+            continue;
+        }
+        let required = sig(&im.params, &im.return_ty);
+        let Some(found) = find_on_class(name) else {
+            return Some(format!(
+                "`{}` is missing method `{} {}` required by `{}`",
+                class_name, name, required, iface_name
+            ));
+        };
+        if !found.is_instance {
+            return Some(format!(
+                "`{}.{}` is static but `{}` requires an instance method",
+                class_name, name, iface_name
+            ));
+        }
+        if found.visibility != Visibility::Public {
+            return Some(format!(
+                "`{}.{}` is not public but `{}` requires it to be",
+                class_name, name, iface_name
+            ));
+        }
+        if found.params != im.params || found.return_ty != im.return_ty {
+            return Some(format!(
+                "`{}.{}` has signature {} but `{}` requires {}",
+                class_name,
+                name,
+                sig(&found.params, &found.return_ty),
+                iface_name,
+                required
+            ));
+        }
+    }
+    None
+}
+
 /// Human-readable name for a visibility level, used in diagnostics.
 fn visibility_name(v: Visibility) -> &'static str {
     match v {
@@ -355,6 +421,11 @@ pub struct TypeChecker {
     /// their declared (nullable) type. Assigning to a narrowed local widens
     /// it back to the declared type (see `Stmt::Assign`).
     narrowed: std::cell::RefCell<HashMap<String, Type>>,
+    /// Source line of the statement currently being checked (from the
+    /// parser's `Stmt::Mark` markers); 0 when outside statement context.
+    current_line: std::cell::Cell<usize>,
+    /// `Class.Method` currently being checked, for error prefixes.
+    current_context: std::cell::RefCell<String>,
 }
 
 impl TypeChecker {
@@ -365,11 +436,39 @@ impl TypeChecker {
             enums: HashMap::new(),
             newtypes: HashMap::new(),
             narrowed: std::cell::RefCell::new(HashMap::new()),
+            current_line: std::cell::Cell::new(0),
+            current_context: std::cell::RefCell::new(String::new()),
         }
     }
 
     /// Type-check a program and return a typed view.
-    pub fn check(mut self, program: &Program) -> Result<TypedProgram, TypeError> {
+    pub fn check(self, program: &Program) -> Result<TypedProgram, TypeError> {
+        let line = std::cell::Cell::new(0usize);
+        let ctx = std::cell::RefCell::new(String::new());
+        // The checker walks statements sequentially, updating
+        // current_line/current_context as it goes; when an error surfaces,
+        // those cells still hold the location of the failing statement.
+        let result = {
+            let mut me = self;
+            let r = me.check_inner(program);
+            line.set(me.current_line.get());
+            *ctx.borrow_mut() = me.current_context.borrow().clone();
+            r
+        };
+        result.map_err(|TypeError(msg)| {
+            let l = line.get();
+            let c = ctx.borrow();
+            if l > 0 && !c.is_empty() {
+                TypeError(format!("line {}, in `{}`: {}", l, c, msg))
+            } else if !c.is_empty() {
+                TypeError(format!("in `{}`: {}", c, msg))
+            } else {
+                TypeError(msg)
+            }
+        })
+    }
+
+    fn check_inner(&mut self, program: &Program) -> Result<TypedProgram, TypeError> {
         self.inject_intrinsics();
         self.gather_decls(program)?;
         for decl in &program.decls {
@@ -384,9 +483,9 @@ impl TypeChecker {
         }
         Ok(TypedProgram {
             program: program.clone(),
-            classes: self.classes,
-            enums: self.enums,
-            newtypes: self.newtypes,
+            classes: std::mem::take(&mut self.classes),
+            enums: std::mem::take(&mut self.enums),
+            newtypes: std::mem::take(&mut self.newtypes),
         })
     }
 
@@ -1406,6 +1505,8 @@ impl TypeChecker {
 
         for member in &class.members {
             if let Member::Method(m) = member {
+                self.current_line.set(0);
+                *self.current_context.borrow_mut() = format!("{}.{}", class.name, m.name);
                 let mut locals: HashMap<String, Type> = HashMap::new();
                 let mut all_generic_params = class_generic_params.clone();
                 all_generic_params.extend(m.generic_params.clone());
@@ -1504,6 +1605,79 @@ impl TypeChecker {
 
     /// The (name, non-null inner, declared nullable) triple for a condition
     /// that null-tests a nullable local, if any.
+    /// A one-line hint explaining WHY `source` does not flow into `target`,
+    /// when the pair matches a known pattern with a known fix. Appended to
+    /// assignment/argument/return mismatch errors.
+    fn mismatch_hint(&self, target: &Type, source: &Type) -> Option<String> {
+        match (target, source) {
+            (t, Type::Nullable(inner)) if self.is_assignable(t, inner) => Some(
+                "the value may be null: narrow with `if (x != null)`, or use `!` / `??`".to_string(),
+            ),
+            (Type::Newtype(n, u), s) if self.is_assignable(u, s) => {
+                Some(format!("wrap the value: `{}(...)`", n))
+            }
+            (t, Type::Newtype(_, u)) if self.is_assignable(t, u) => {
+                Some("unwrap the value with `.Value`".to_string())
+            }
+            (Type::LiteralUnion(n, members), Type::StringLit(v)) => {
+                let shown: Vec<String> =
+                    members.iter().take(6).map(|m| format!("{:?}", m)).collect();
+                let more = if members.len() > 6 { " | ..." } else { "" };
+                Some(format!(
+                    "{:?} is not a member of `{}` (members: {}{})",
+                    v,
+                    n,
+                    shown.join(" | "),
+                    more
+                ))
+            }
+            (Type::LiteralUnion(tn, tm), Type::LiteralUnion(sn, sm)) => {
+                let extra: Vec<String> = sm
+                    .iter()
+                    .filter(|m| !tm.contains(*m))
+                    .take(4)
+                    .map(|m| format!("{:?}", m))
+                    .collect();
+                if extra.is_empty() {
+                    None
+                } else {
+                    Some(format!(
+                        "`{}` can hold {} which `{}` cannot",
+                        sn,
+                        extra.join(", "),
+                        tn
+                    ))
+                }
+            }
+            (Type::Class(tn, ta), Type::Class(sn, _)) if ta.is_empty() => {
+                let target_is_iface = self
+                    .classes
+                    .get(tn)
+                    .map(|i| i.is_interface)
+                    .unwrap_or(false);
+                if target_is_iface {
+                    explain_structural_failure(&self.classes, sn, tn)
+                } else {
+                    None
+                }
+            }
+            (t, s) if self.is_numeric(t) && self.is_numeric(s) => Some(format!(
+                "narrowing conversion from {} to {} can lose range; widen the target or convert explicitly",
+                s.name(),
+                t.name()
+            )),
+            _ => None,
+        }
+    }
+
+    /// Format a mismatch error with the hint appended when one applies.
+    fn mismatch_error(&self, base: String, target: &Type, source: &Type) -> TypeError {
+        match self.mismatch_hint(target, source) {
+            Some(hint) => TypeError(format!("{base}; hint: {hint}")),
+            None => TypeError(base),
+        }
+    }
+
     fn narrowable(&self, cond: &Expr, locals: &HashMap<String, Type>) -> Option<(String, bool, Type, Type)> {
         let (name, is_ne) = Self::null_comparison(cond)?;
         match locals.get(&name) {
@@ -1689,12 +1863,16 @@ impl TypeChecker {
                 if let Some(init) = init {
                     let init_ty = self.infer_expr(init, class, locals, in_instance, return_ty, generic_params)?;
                     if !self.is_assignable(ty, &init_ty) {
-                        return Err(TypeError(format!(
-                            "cannot assign {} to variable `{}` of type {}",
-                            init_ty.name(),
-                            name,
-                            ty.name()
-                        )));
+                        return Err(self.mismatch_error(
+                            format!(
+                                "cannot assign {} to variable `{}` of type {}",
+                                init_ty.name(),
+                                name,
+                                ty.name()
+                            ),
+                            ty,
+                            &init_ty,
+                        ));
                     }
                 }
                 locals.insert(name.clone(), ty.clone());
@@ -1730,12 +1908,16 @@ impl TypeChecker {
                     if let Some(declared) = declared {
                         let value_ty = self.infer_expr(value, class, locals, in_instance, return_ty, generic_params)?;
                         if !self.is_assignable(&declared, &value_ty) {
-                            return Err(TypeError(format!(
-                                "cannot assign {} to `{}` of type {}",
-                                value_ty.name(),
-                                name,
-                                declared.name()
-                            )));
+                            return Err(self.mismatch_error(
+                                format!(
+                                    "cannot assign {} to `{}` of type {}",
+                                    value_ty.name(),
+                                    name,
+                                    declared.name()
+                                ),
+                                &declared,
+                                &value_ty,
+                            ));
                         }
                         locals.insert(name.clone(), declared);
                         self.narrowed.borrow_mut().remove(name);
@@ -1755,11 +1937,15 @@ impl TypeChecker {
             Stmt::Return(Some(e)) => {
                 let ty = self.infer_expr(e, class, locals, in_instance, return_ty, generic_params)?;
                 if !self.is_assignable(return_ty, &ty) {
-                    return Err(TypeError(format!(
-                        "return type mismatch: expected {}, got {}",
-                        return_ty.name(),
-                        ty.name()
-                    )));
+                    return Err(self.mismatch_error(
+                        format!(
+                            "return type mismatch: expected {}, got {}",
+                            return_ty.name(),
+                            ty.name()
+                        ),
+                        return_ty,
+                        &ty,
+                    ));
                 }
             }
             Stmt::Return(None) => {
@@ -1936,6 +2122,9 @@ impl TypeChecker {
                         cond_ty.name()
                     )));
                 }
+            }
+            Stmt::Mark(line) => {
+                self.current_line.set(*line);
             }
             Stmt::Break(_) | Stmt::Continue(_) => {
                 // These are valid inside loops, checked by the emitter
@@ -3581,12 +3770,16 @@ impl TypeChecker {
             .collect();
         for (arg_ty, expected) in arg_tys.iter().zip(substituted_params.iter()) {
             if !self.is_assignable(expected, arg_ty) {
-                return Err(TypeError(format!(
-                    "argument type mismatch in `{}`: expected {}, got {}",
-                    call.method,
-                    expected.name(),
-                    arg_ty.name()
-                )));
+                return Err(self.mismatch_error(
+                    format!(
+                        "argument type mismatch in `{}`: expected {}, got {}",
+                        call.method,
+                        expected.name(),
+                        arg_ty.name()
+                    ),
+                    expected,
+                    arg_ty,
+                ));
             }
         }
         Ok(substitute_type(&method_info.return_ty, &subst))

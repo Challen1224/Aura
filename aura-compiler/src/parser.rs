@@ -487,6 +487,7 @@ fn expand_stmt(stmt: &mut Stmt, aliases: &HashMap<String, TypeAliasDecl>) -> Res
                 expand_stmt(s, aliases)?;
             }
         }
+        Stmt::Mark(_) => {}
         Stmt::Break(_) | Stmt::Continue(_) => {}
     }
     Ok(())
@@ -664,13 +665,23 @@ pub fn numeric_type_from_name(name: &str) -> Option<Type> {
 /// Parser state.
 pub struct Parser<'a> {
     tokens: &'a [Token],
+    /// 1-based source line of each token (parallel to `tokens`).
+    lines: &'a [usize],
     pos: usize,
 }
 
 impl<'a> Parser<'a> {
     /// Create a parser over a token slice.
-    pub fn new(tokens: &'a [Token]) -> Self {
-        Self { tokens, pos: 0 }
+    pub fn new(tokens: &'a [Token], lines: &'a [usize]) -> Self {
+        Self { tokens, lines, pos: 0 }
+    }
+
+    /// Source line of the current token (or the last one at EOF).
+    fn cur_line(&self) -> usize {
+        self.lines
+            .get(self.pos.min(self.lines.len().saturating_sub(1)))
+            .copied()
+            .unwrap_or(0)
     }
 
     /// Parse the token stream into a program AST.
@@ -1272,6 +1283,7 @@ impl<'a> Parser<'a> {
             if self.check(Token::RBrace) {
                 break;
             }
+            stmts.push(Stmt::Mark(self.cur_line()));
             stmts.push(self.parse_stmt()?);
         }
         self.consume(Token::RBrace, "expected `}`")?;
@@ -1762,7 +1774,8 @@ impl<'a> Parser<'a> {
         if self.match_token(Token::LBrace) {
             self.parse_block()
         } else {
-            Ok(vec![self.parse_stmt()?])
+            let line = self.cur_line();
+            Ok(vec![Stmt::Mark(line), self.parse_stmt()?])
         }
     }
 
@@ -2296,7 +2309,7 @@ impl<'a> Parser<'a> {
                     Ok(expr)
                 }
             }
-            Some(t) => Err(format!("unexpected token {}", t)),
+            Some(t) => Err(format!("line {}: unexpected token {}", self.cur_line(), t)),
             None => Err("unexpected end of input".to_string()),
         }
     }
@@ -2620,7 +2633,7 @@ impl<'a> Parser<'a> {
             self.advance();
             Ok(())
         } else {
-            Err(format!("{} (found {})", msg, self.peek_desc()))
+            Err(format!("line {}: {} (found {})", self.cur_line(), msg, self.peek_desc()))
         }
     }
 
@@ -2631,7 +2644,7 @@ impl<'a> Parser<'a> {
                 self.advance();
                 Ok(s)
             }
-            _ => Err(format!("{} (found {})", msg, self.peek_desc())),
+            _ => Err(format!("line {}: {} (found {})", self.cur_line(), msg, self.peek_desc())),
         }
     }
 

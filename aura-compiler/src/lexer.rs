@@ -296,17 +296,21 @@ impl<'a> Lexer<'a> {
     }
 
     /// Tokenize the entire source.
-    pub fn lex(mut self) -> Result<Vec<Token>, String> {
+    /// Tokenize the source. Returns the tokens plus, for each token, the
+    /// 1-based line it starts on (used for error locations).
+    pub fn lex(mut self) -> Result<(Vec<Token>, Vec<usize>), String> {
         let mut tokens = Vec::new();
+        let mut lines = Vec::new();
         loop {
             let tok = self.next_token()?;
-            if tok == Token::Eof {
-                tokens.push(tok);
+            let done = tok == Token::Eof;
+            tokens.push(tok);
+            lines.push(self.line);
+            if done {
                 break;
             }
-            tokens.push(tok);
         }
-        Ok(tokens)
+        Ok((tokens, lines))
     }
 
     fn next_token(&mut self) -> Result<Token, String> {

@@ -40,6 +40,9 @@ struct MethodEmitter<'a> {
     break_targets: Vec<(Option<String>, Vec<usize>)>,
     continue_targets: Vec<(Option<String>, Vec<usize>)>,
     handlers: Vec<ExceptionHandler>,
+    /// Source line of the statement currently being emitted (from the
+    /// parser's `Stmt::Mark` markers), for error locations.
+    current_line: usize,
 }
 
 impl Emitter {
@@ -630,10 +633,26 @@ impl<'a> MethodEmitter<'a> {
             break_targets: Vec::new(),
             continue_targets: Vec::new(),
             handlers: Vec::new(),
+            current_line: 0,
         }
     }
 
     fn emit_body(&mut self) -> Result<(), String> {
+        self.emit_body_inner().map_err(|e| {
+            if self.current_line > 0 && !e.starts_with("line ") {
+                format!(
+                    "line {}, in `{}.{}`: {}",
+                    self.current_line, self.class_name, self.method.name, e
+                )
+            } else if !e.starts_with("line ") {
+                format!("in `{}.{}`: {}", self.class_name, self.method.name, e)
+            } else {
+                e
+            }
+        })
+    }
+
+    fn emit_body_inner(&mut self) -> Result<(), String> {
         if self.method.is_constructor {
             match &self.method.constructor_chain {
                 Some(chain) => {
@@ -791,6 +810,9 @@ impl<'a> MethodEmitter<'a> {
                         }
                     }
                 }
+            }
+            Stmt::Mark(line) => {
+                self.current_line = *line;
             }
             Stmt::Return(Some(e)) => {
                 self.emit_expr(e)?;

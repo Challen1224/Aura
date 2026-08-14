@@ -37,8 +37,8 @@ pub enum CompileError {
 
 /// Compile source text into an Aura [`Module`].
 pub fn compile(source: &str, module_name: &str) -> Result<Module, CompileError> {
-    let tokens = Lexer::new(source).lex().map_err(CompileError::Lex)?;
-    let ast = Parser::new(&tokens).parse().map_err(CompileError::Parse)?;
+    let (tokens, lines) = Lexer::new(source).lex().map_err(CompileError::Lex)?;
+    let ast = Parser::new(&tokens, &lines).parse().map_err(CompileError::Parse)?;
     let ast = parser::expand_type_aliases(&ast).map_err(CompileError::Parse)?;
     let typed = TypeChecker::new().check(&ast).map_err(|e| CompileError::Type(e.0))?;
     let module = Emitter::new(module_name)

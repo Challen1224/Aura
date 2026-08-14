@@ -227,7 +227,20 @@
         call-site type arguments (`Pick<int>(...)`) are not implemented —
         inference only. Verified under both tiers
         (aura-vm/tests/inference.rs).
-  - [ ] Better error messages for type mismatches
+  - [x] Better error messages for type mismatches — two halves. (1)
+        Locations: type/emit errors now carry `line N, in
+        `Class.Method`:` (per-token lexer lines -> parser-injected
+        `Stmt::Mark` markers -> one central prefix wrapper; parse errors
+        report their line via the consume helpers). Signature-level errors
+        outside statement context still lack lines. (2) Hints: known
+        mismatch patterns append a one-line fix — nullable (narrow or
+        `!`/`??`), newtype (wrap with `Name(...)` / unwrap with
+        `.Value`), literal unions (non-member literal lists the members;
+        union-into-subset names the members that don't fit), structural
+        interface near-misses (the exact missing/mismatched method with
+        both signatures), and numeric narrowing. Hints fire on
+        assignments, arguments, and returns. Markers are proven
+        behavior-neutral by the full suite (aura-vm/tests/diagnostics.rs).
   - [ ] Type hole suggestions
 
 **P3 - Nice to Have**
