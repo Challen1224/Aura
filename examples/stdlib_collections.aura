@@ -18,6 +18,8 @@ class Program {
         print(primes.Get(2));
         println();
 
+        // Manual index loop and for-in are equivalent; for-in is the
+        // idiomatic form.
         int total = 0;
         int i = 0;
         while (i < primes.Count) {
@@ -26,6 +28,12 @@ class Program {
         }
         print("sum: ");
         print(total);
+        println();
+
+        int total2 = 0;
+        for (int p in primes) { total2 = total2 + p; }
+        print("sum via for-in: ");
+        print(total2);
         println();
 
         // Map<K, V>: insertion-ordered key/value pairs.
@@ -39,15 +47,11 @@ class Program {
         print(ages.ContainsKey("grace"));
         println();
 
-        List<string> names = ages.Keys();
-        int n = 0;
-        while (n < names.Count) {
-            string name = names.Get(n);
+        for (string name in ages.Keys()) {
             print(name);
             print(" -> ");
             print(ages.Get(name));
             println();
-            n = n + 1;
         }
 
         // Set<T>: unique values; Add reports whether the value was new.

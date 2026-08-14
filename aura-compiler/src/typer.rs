@@ -1407,20 +1407,36 @@ impl TypeChecker {
             }
             Stmt::ForIn { label: _, var_type, var_name, iterable, body } => {
                 self.validate_type_with_generics(var_type, generic_params)?;
-                let range_ty = self.infer_expr(iterable, class, locals, in_instance, return_ty, generic_params)?;
-                // For now, only support Range type
-                if range_ty != Type::Class("Range".to_string(), vec![]) {
-                    return Err(TypeError(format!(
-                        "for-in requires a range expression, got {}",
-                        range_ty.name()
-                    )));
-                }
-                // The loop variable must be an integer type.
-                if !var_type.is_int() {
-                    return Err(TypeError(format!(
-                        "for-in loop variable must be an integer, got {}",
-                        var_type.name()
-                    )));
+                let iter_ty = self.infer_expr(iterable, class, locals, in_instance, return_ty, generic_params)?;
+                match &iter_ty {
+                    // Ranges iterate integers.
+                    Type::Class(name, _) if name == "Range" => {
+                        if !var_type.is_int() {
+                            return Err(TypeError(format!(
+                                "for-in loop variable must be an integer, got {}",
+                                var_type.name()
+                            )));
+                        }
+                    }
+                    // Collections iterate their element type.
+                    Type::Class(name, type_args) if name == "List" || name == "Set" => {
+                        if let Some(elem_ty) = type_args.first() {
+                            if !self.is_assignable(var_type, elem_ty) {
+                                return Err(TypeError(format!(
+                                    "for-in loop variable of type {} cannot hold {} elements of type {}",
+                                    var_type.name(),
+                                    name,
+                                    elem_ty.name()
+                                )));
+                            }
+                        }
+                    }
+                    _ => {
+                        return Err(TypeError(format!(
+                            "for-in requires a range, List, or Set expression, got {}",
+                            iter_ty.name()
+                        )));
+                    }
                 }
                 locals.insert(var_name.clone(), var_type.clone());
                 for s in body {

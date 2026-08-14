@@ -1,0 +1,68 @@
+// for-in iteration over collections.
+//
+// The same `for (T x in ...)` syntax that works over ranges works over
+// List<T> and Set<T>. Map iterates through Keys()/Values(). The element
+// count is snapshotted when the loop starts: appending to a List inside
+// its own foreach does not extend the loop, and Set iteration walks a
+// snapshot copy, so Set mutations never affect an iteration in progress.
+
+class Program {
+    static void Main() {
+        // Ranges (unchanged).
+        print("range: ");
+        for (int i in 1..=5) { print(i); print(" "); }
+        println();
+
+        // List<T>.
+        List<string> crew = new List<string>();
+        crew.Add("ada");
+        crew.Add("grace");
+        crew.Add("edsger");
+        print("crew: ");
+        for (string name in crew) { print(name); print(" "); }
+        println();
+
+        int total = 0;
+        List<int> primes = new List<int>();
+        primes.Add(2); primes.Add(3); primes.Add(5); primes.Add(7);
+        for (int p in primes) { total = total + p; }
+        print("prime sum: ");
+        print(total);
+        println();
+
+        // Set<T>.
+        Set<int> unique = new Set<int>();
+        unique.Add(4); unique.Add(2); unique.Add(4); unique.Add(1);
+        print("unique: ");
+        for (int u in unique) { print(u); print(" "); }
+        println();
+
+        // Map<K, V> via Keys()/Values().
+        Map<string, int> ages = new Map<string, int>();
+        ages.Put("ada", 36);
+        ages.Put("grace", 45);
+        for (string name in ages.Keys()) {
+            print(name);
+            print(" is ");
+            print(ages.Get(name));
+            println();
+        }
+        int age_total = 0;
+        for (int a in ages.Values()) { age_total = age_total + a; }
+        print("combined: ");
+        print(age_total);
+        println();
+
+        // break/continue work as in every other loop.
+        print("odds until 7: ");
+        List<int> nums = new List<int>();
+        for (int n in 1..=10) { nums.Add(n); }
+        for (int n in nums) {
+            if (n - (n / 2) * 2 == 0) { continue; }
+            if (n > 7) { break; }
+            print(n);
+            print(" ");
+        }
+        println();
+    }
+}

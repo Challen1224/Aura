@@ -896,12 +896,17 @@ impl<'a> MethodEmitter<'a> {
                     self.ops[jump] = Op::Br(update_start);
                 }
             }
-            Stmt::ForIn { label, var_type: _, var_name, iterable, body } => {
+            Stmt::ForIn { label, var_type, var_name, iterable, body } => {
+                // Collection iteration desugars to the index loop below;
+                // range iteration keeps its original lowering further down.
+                if !matches!(iterable, Expr::Range(..)) {
+                    return self.emit_for_in_collection(label, var_type, var_name, iterable, body);
+                }
                 // Desugar `for (int i in start..end)` to:
                 // int i = start;
                 // while (i < end) { body; i = i + 1; }
                 // or for inclusive: while (i <= end)
-                
+
                 // Extract start and end from the range expression
                 let (start, end, inclusive) = match iterable {
                     Expr::Range(start, end, inclusive) => (start, end, *inclusive),
@@ -2009,6 +2014,108 @@ impl<'a> MethodEmitter<'a> {
     }
 
     /// Static class name of an object expression, used to resolve field indices.
+    /// Desugar `for (T x in <list-or-set>)` into an index loop over the
+    /// existing List natives:
+    ///
+    /// ```text
+    /// __it = <iterable>          // Set: <iterable>.ToList() snapshot copy
+    /// __n  = __it.Count          // count snapshot, taken once
+    /// __i  = 0
+    /// while (__i < __n) { T x = __it.Get(__i); body; __i = __i + 1 }
+    /// ```
+    ///
+    /// Mutation-during-iteration semantics (documented in TODO.md §4.2):
+    /// the element count is snapshotted when the loop starts, so elements
+    /// appended to a List during iteration are not visited; removing List
+    /// elements during iteration may make a later `Get` fail with an
+    /// index-out-of-range runtime error. Iterating a Set walks a `ToList()`
+    /// snapshot copy, so Set mutations never affect an iteration in
+    /// progress.
+    fn emit_for_in_collection(
+        &mut self,
+        label: &Option<String>,
+        var_type: &Type,
+        var_name: &str,
+        iterable: &Expr,
+        body: &[Stmt],
+    ) -> Result<(), String> {
+        use aura_bytecode::natives::NativeId;
+        let iter_ty = self.expr_ty(iterable)?;
+        let is_set = matches!(&iter_ty, Type::Class(n, _) if n == "Set");
+        if !matches!(&iter_ty, Type::Class(n, _) if n == "List" || n == "Set") {
+            return Err(format!(
+                "for-in requires a range, List, or Set expression, got {}",
+                iter_ty.name()
+            ));
+        }
+
+        // __it = iterable (Sets snapshot into a fresh List)
+        self.emit_expr(iterable)?;
+        if is_set {
+            self.ops.push(Op::NativeCall(NativeId::SetToList as u16));
+        }
+        self.push_local("__foreach_it".to_string());
+        let it_idx = (self.locals.len() - 1) as u16;
+        self.ops.push(Op::Stloc(it_idx));
+
+        // __n = __it.Count
+        self.ops.push(Op::Ldloc(it_idx));
+        self.ops.push(Op::NativeCall(NativeId::ListCount as u16));
+        self.push_local("__foreach_n".to_string());
+        let n_idx = (self.locals.len() - 1) as u16;
+        self.ops.push(Op::Stloc(n_idx));
+
+        // __i = 0
+        self.ops.push(Op::LdInt(0));
+        self.push_local("__foreach_i".to_string());
+        let i_idx = (self.locals.len() - 1) as u16;
+        self.ops.push(Op::Stloc(i_idx));
+
+        let loop_start = self.ops.len() as u32;
+        self.break_targets.push((label.clone(), Vec::new()));
+        self.continue_targets.push((label.clone(), Vec::new()));
+
+        // while (__i < __n)
+        self.ops.push(Op::Ldloc(i_idx));
+        self.ops.push(Op::Ldloc(n_idx));
+        self.ops.push(Op::Lt);
+        let exit_jump = self.ops.len();
+        self.ops.push(Op::BrFalse(0));
+
+        // T x = __it.Get(__i)
+        self.ops.push(Op::Ldloc(it_idx));
+        self.ops.push(Op::Ldloc(i_idx));
+        self.ops.push(Op::NativeCall(NativeId::ListGet as u16));
+        self.push_local(var_name.to_string());
+        let var_idx = (self.locals.len() - 1) as u16;
+        self.local_types.insert(var_name.to_string(), var_type.clone());
+        self.ops.push(Op::Stloc(var_idx));
+
+        for s in body {
+            self.emit_stmt(s)?;
+        }
+
+        // Continue target: the increment.
+        let update_start = self.ops.len() as u32;
+        self.ops.push(Op::Ldloc(i_idx));
+        self.ops.push(Op::LdInt(1));
+        self.ops.push(Op::Add);
+        self.ops.push(Op::Stloc(i_idx));
+        self.ops.push(Op::Br(loop_start));
+
+        let end_pos = self.ops.len() as u32;
+        self.ops[exit_jump] = Op::BrFalse(end_pos);
+        let (_, breaks) = self.break_targets.pop().unwrap();
+        for jump in breaks {
+            self.ops[jump] = Op::Br(end_pos);
+        }
+        let (_, continues) = self.continue_targets.pop().unwrap();
+        for jump in continues {
+            self.ops[jump] = Op::Br(update_start);
+        }
+        Ok(())
+    }
+
     /// If `call` targets an intrinsic (static `Console`/`File` method, or an
     /// instance method of `List`/`Map`/`Set`/`string`), emit its receiver and
     /// arguments (receiver first, then arguments left to right) and return the

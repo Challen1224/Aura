@@ -943,7 +943,17 @@ catchable Aura exceptions.
       `-0.0`/`0.0` hash/eq mismatch fixed as a prerequisite. Measured:
       4k-entry build+lookup dropped from 0.313s to 0.031s (interpreter,
       host), scaling ratio for 8x workload fell from ~33x to ~7-8x.
-- [ ] Iteration support (`foreach` over collections)
+- [x] Iteration support — `for (T x in list)` / `for (T x in set)` reuse
+      the range for-in syntax; the emitter desugars to the proven
+      Count/Get native-call loop (Sets iterate a `ToList()` snapshot
+      copy), so the JIT path is the one already verified for native calls
+      in hot loops. Map iterates via `Keys()`/`Values()`.
+      **Mutation during iteration:** the element count is snapshotted at
+      loop entry — elements appended to a List during its own iteration
+      are not visited, and removing List elements during iteration may
+      fail a later `Get` with an index-out-of-range runtime error; Set
+      mutations never affect an iteration in progress (snapshot copy).
+      Each of these behaviors is pinned by aura-vm/tests/foreach.rs.
 - [ ] Sorted variants (TreeMap/TreeSet), LinkedList
 
 **P1 - High Priority**
