@@ -2005,7 +2005,7 @@ impl TypeChecker {
             }
             Expr::Bool(_) => Ok(Type::Bool),
             Expr::Char(_) => Ok(Type::Char),
-            Expr::String(_) => Ok(Type::String),
+            Expr::String(v) => Ok(Type::StringLit(v.clone())),
             Expr::InterpolatedString(parts) => {
                 // Type check all expressions in the interpolation
                 for part in parts {
@@ -2061,8 +2061,9 @@ impl TypeChecker {
             }
             Expr::Field(obj, name) => {
                 let obj_ty = self.infer_expr(obj, class, locals, in_instance, return_ty, generic_params)?;
-                // Intrinsic string properties (`s.Length`).
-                if obj_ty == Type::String {
+                // Intrinsic string properties (`s.Length`). Literals and
+                // literal-union values are strings at runtime.
+                if matches!(obj_ty, Type::String | Type::StringLit(_) | Type::LiteralUnion(..)) {
                     if let Some(p) = crate::intrinsics::string_property(name) {
                         return Ok(p.ty);
                     }
@@ -2183,7 +2184,21 @@ impl TypeChecker {
                         let lt_u = if let Type::Nullable(t) = &lt { (**t).clone() } else { lt.clone() };
                         let rt_u = if let Type::Nullable(t) = &rt { (**t).clone() } else { rt.clone() };
                         if !self.is_numeric(&lt_u) || !self.is_numeric(&rt_u) {
-                            if lt_u != rt_u {
+                            // String literals compare with strings, and with
+                            // literal unions when the literal is a member.
+                            let string_compat = |a: &Type, b: &Type| -> bool {
+                                match (a, b) {
+                                    (Type::String, Type::StringLit(_)) => true,
+                                    (Type::StringLit(_), Type::StringLit(_)) => true,
+                                    (Type::String, Type::LiteralUnion(..)) => true,
+                                    (Type::LiteralUnion(_, m), Type::StringLit(v)) => m.contains(v),
+                                    _ => false,
+                                }
+                            };
+                            if lt_u != rt_u
+                                && !string_compat(&lt_u, &rt_u)
+                                && !string_compat(&rt_u, &lt_u)
+                            {
                                 return Err(TypeError(format!(
                                     "cannot compare {} and {}",
                                     lt.name(),
@@ -2331,6 +2346,10 @@ impl TypeChecker {
                         t => Type::Nullable(Box::new(t.clone())),
                     });
                 }
+                // String literals widen to `string` so branches with
+                // different literals unify.
+                let then_ty = if matches!(then_ty, Type::StringLit(_)) { Type::String } else { then_ty };
+                let else_ty = if matches!(else_ty, Type::StringLit(_)) { Type::String } else { else_ty };
                 if !self.is_assignable(&then_ty, &else_ty) && !self.is_assignable(&else_ty, &then_ty) {
                     return Err(TypeError(format!(
                         "ternary branches must have compatible types, got {} and {}",
@@ -2453,8 +2472,12 @@ impl TypeChecker {
                         }
                     }
                     
-                    // Type check body
-                    let body_ty = self.infer_expr(&arm.body, class, &arm_locals, in_instance, return_ty, generic_params)?;
+                    // Type check body. String literals widen to `string` so
+                    // arms with different literals unify.
+                    let body_ty = match self.infer_expr(&arm.body, class, &arm_locals, in_instance, return_ty, generic_params)? {
+                        Type::StringLit(_) => Type::String,
+                        t => t,
+                    };
                     
                     // Check that all arms have compatible types
                     if let Some(ref expected) = result_ty {
@@ -3009,7 +3032,8 @@ impl TypeChecker {
                 t => t,
             };
             // Intrinsic string methods (`s.Substring(...)`, `s.Split(...)`).
-            if target_ty == Type::String {
+            // Literals and literal-union values are strings at runtime.
+            if matches!(target_ty, Type::String | Type::StringLit(_) | Type::LiteralUnion(..)) {
                 let Some(im) = crate::intrinsics::string_method(&call.method) else {
                     return Err(TypeError(format!(
                         "unknown method `{}` on `string`",
@@ -3256,6 +3280,7 @@ impl TypeChecker {
                 }
             }
             Type::FloatLit(_) => Type::Float64,
+            Type::StringLit(_) => Type::String,
             _ => ty.clone(),
         }
     }
@@ -3307,6 +3332,14 @@ impl TypeChecker {
                 return self.int_target_fits(target, *v);
             }
             (Type::Float32 | Type::Float64, Type::FloatLit(_)) => return true,
+            // A string literal is a `string`, and satisfies a literal union
+            // exactly when it is one of the declared members.
+            (Type::String, Type::StringLit(_)) => return true,
+            (Type::LiteralUnion(_, members), Type::StringLit(v)) => {
+                return members.contains(v);
+            }
+            // Widening: a literal-union value is always a valid string.
+            (Type::String, Type::LiteralUnion(..)) => return true,
             _ => {}
         }
         if self.is_numeric(target) && self.is_numeric(source) {

@@ -128,10 +128,20 @@
       each strictness rule).
   - [ ] Type guards beyond null checks (`is` checks, compound conditions)
 
-- [ ] **Literal types**
+- [x] **Literal types** (string-literal unions)
   ```aura
   type Direction = "north" | "south" | "east" | "west";
   ```
+  A literal is assignable to the union exactly when it is a declared
+  member; plain strings and other unions (even with overlapping members)
+  never flow in, and comparing against a non-member literal is a compile
+  error. Widening is free: a union value is a `string` at runtime (fully
+  erased — string methods, hashed Map keys, `foreach`, and `T?` narrowing
+  all work). Bare string literals now infer a transient literal type that
+  widens to `string` everywhere else (mirroring the existing int-literal
+  machinery). Int-literal unions and subset-widening between unions are
+  not implemented. Verified under both tiers
+  (aura-vm/tests/literal_types.rs).
 
 **P2 - Medium Priority**
 - [ ] **Advanced type features**

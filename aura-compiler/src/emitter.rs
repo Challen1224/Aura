@@ -1365,10 +1365,13 @@ impl<'a> MethodEmitter<'a> {
                     // Records compare by value (deep structural equality); strings
                     // compare by content (the identity-based `Eq` cannot handle
                     // string vs string).
+                    let stringish = |t: &Type| {
+                        matches!(t, Type::String | Type::StringLit(_) | Type::LiteralUnion(..))
+                    };
                     let value_eq = matches!((self.expr_ty(left), self.expr_ty(right)),
                         (Ok(l), Ok(r))
                             if self.is_record_type(&l) || self.is_record_type(&r)
-                                || matches!(&l, Type::String) || matches!(&r, Type::String));
+                                || stringish(&l) || stringish(&r));
                     if value_eq {
                         self.ops.push(Op::ValueEq);
                         if matches!(op, BinOp::Ne) {
@@ -2191,7 +2194,7 @@ impl<'a> MethodEmitter<'a> {
             return Ok(None);
         };
         let native = match &Self::strip_nullable(target_ty) {
-            Type::String => crate::intrinsics::string_method(&call.method).map(|m| m.native),
+            Type::String | Type::StringLit(_) | Type::LiteralUnion(..) => crate::intrinsics::string_method(&call.method).map(|m| m.native),
             Type::Class(name, _) => crate::intrinsics::method(name, &call.method).map(|m| m.native),
             _ => None,
         };
@@ -2214,7 +2217,7 @@ impl<'a> MethodEmitter<'a> {
             return Ok(None);
         };
         let native = match &Self::strip_nullable(obj_ty) {
-            Type::String => crate::intrinsics::string_property(name).map(|p| p.native),
+            Type::String | Type::StringLit(_) | Type::LiteralUnion(..) => crate::intrinsics::string_property(name).map(|p| p.native),
             Type::Class(cname, _) => crate::intrinsics::property(cname, name).map(|p| p.native),
             _ => None,
         };
@@ -2386,7 +2389,7 @@ impl<'a> MethodEmitter<'a> {
                         }
                     }
                     let prop = match &stripped {
-                        Type::String => crate::intrinsics::string_property(name),
+                        Type::String | Type::StringLit(_) | Type::LiteralUnion(..) => crate::intrinsics::string_property(name),
                         Type::Class(cname, _) => crate::intrinsics::property(cname, name),
                         _ => None,
                     };
@@ -2503,7 +2506,7 @@ impl<'a> MethodEmitter<'a> {
                     is_instance = false;
                 } else {
                     let obj_ty = Self::strip_nullable(self.expr_ty(target)?);
-                    if obj_ty == Type::String {
+                    if matches!(obj_ty, Type::String | Type::StringLit(_) | Type::LiteralUnion(..)) {
                         return crate::intrinsics::string_method(&call.method)
                             .map(|m| m.return_ty)
                             .ok_or_else(|| format!("unknown method `{}` on `string`", call.method));
@@ -2517,7 +2520,7 @@ impl<'a> MethodEmitter<'a> {
                 }
             } else {
                 let obj_ty = Self::strip_nullable(self.expr_ty(target)?);
-                if obj_ty == Type::String {
+                if matches!(obj_ty, Type::String | Type::StringLit(_) | Type::LiteralUnion(..)) {
                     return crate::intrinsics::string_method(&call.method)
                         .map(|m| m.return_ty)
                         .ok_or_else(|| format!("unknown method `{}` on `string`", call.method));
@@ -2764,6 +2767,9 @@ fn map_type(ty: &Type, class_ids: &HashMap<String, ClassId>, enum_ids: &HashMap<
         // Newtypes are fully erased: at runtime a value of `Newtype` IS its
         // underlying primitive.
         Type::Newtype(_, inner) => map_type(inner, class_ids, enum_ids, generic_params),
+        // Literal unions (and transient literal markers) are strings at
+        // runtime.
+        Type::LiteralUnion(..) | Type::StringLit(_) => TypeDesc::String,
         Type::Unit => TypeDesc::Unit,
         // Literal marker types only exist transiently during type checking and
         // never reach code emission.

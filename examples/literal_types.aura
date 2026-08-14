@@ -1,0 +1,64 @@
+// Literal types: unions of string literals.
+//
+// `type Direction = "north" | ...;` declares a type whose values can only
+// be the listed literals. A literal flows in only if it is a member; any
+// other literal, a plain string, or a different union is a compile error.
+// Widening is free: a Direction is a string at runtime (fully erased), so
+// it works with string methods and as collection keys.
+
+type Direction = "north" | "south" | "east" | "west";
+type Level = "debug" | "info" | "warn" | "error";
+
+class Program {
+    static string Arrow(Direction d) {
+        if (d == "north") { return "^"; }
+        if (d == "south") { return "v"; }
+        if (d == "east") { return ">"; }
+        return "<";
+    }
+
+    static void Log(Level level, string message) {
+        print("[");
+        print(level.ToUpper());
+        print("] ");
+        print(message);
+        println();
+    }
+
+    static void Main() {
+        Direction heading = "east";
+        print("heading ");
+        print(heading);
+        print(" ");
+        print(Arrow(heading));
+        println();
+
+        // Literal members pass directly as arguments.
+        Log("info", "engine started");
+        Log("warn", "low fuel");
+
+        // Widening: a Direction is a string.
+        string s = heading;
+        print("as string: ");
+        print(s.ToUpper());
+        println();
+
+        // Unions as map keys and foreach elements.
+        Map<Direction, int> paces = new Map<Direction, int>();
+        paces.Put("north", 3);
+        paces.Put("east", 5);
+        List<Direction> route = new List<Direction>();
+        route.Add("north");
+        route.Add("east");
+        route.Add("north");
+        int total = 0;
+        for (Direction step in route) {
+            print(Arrow(step));
+            total = total + paces.Get(step);
+        }
+        println();
+        print("total paces: ");
+        print(total);
+        println();
+    }
+}

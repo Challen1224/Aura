@@ -732,6 +732,43 @@ impl<'a> Parser<'a> {
             Vec::new()
         };
         self.consume(Token::Assign, "expected `=` in type declaration")?;
+        // A string-literal union: `type Direction = "north" | "south";`.
+        // Stored as an alias whose target is the opaque `Type::LiteralUnion`,
+        // so the existing alias-expansion pass resolves every use of the name.
+        if matches!(self.tokens.get(self.pos), Some(Token::StringLit(_))) {
+            if !generic_params.is_empty() {
+                return Err(format!(
+                    "literal type `{}` cannot have generic parameters",
+                    name
+                ));
+            }
+            let mut members = Vec::new();
+            loop {
+                let Some(Token::StringLit(v)) = self.peek().cloned() else {
+                    return Err(format!(
+                        "expected string literal in literal type `{}`",
+                        name
+                    ));
+                };
+                self.advance();
+                if members.contains(&v) {
+                    return Err(format!(
+                        "duplicate literal {:?} in literal type `{}`",
+                        v, name
+                    ));
+                }
+                members.push(v);
+                if !self.match_token(Token::Pipe) {
+                    break;
+                }
+            }
+            self.consume(Token::Semi, "expected `;` after type declaration")?;
+            return Ok(Decl::TypeAlias(TypeAliasDecl {
+                name: name.clone(),
+                generic_params: Vec::new(),
+                target: Type::LiteralUnion(name, members),
+            }));
+        }
         // A `type` declaration is either a sum type (`type Result<T,E> = Ok(T) | Err(E);`)
         // or an alias to a single type (`type UserId = int;`). A sum type starts
         // with a variant name followed by `(` (fields) or `|` (bare variants).

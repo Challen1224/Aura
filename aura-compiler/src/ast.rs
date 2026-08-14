@@ -315,6 +315,14 @@ pub enum Type {
     /// A declared newtype: distinct nominal wrapper carrying its name and
     /// underlying primitive type. Erased to the underlying type at runtime.
     Newtype(String, Box<Type>),
+    /// A string-literal union type: `type Direction = "north" | "south";`.
+    /// Carries the declared name and the allowed literal values. Erased to
+    /// `string` at runtime.
+    LiteralUnion(String, Vec<String>),
+    /// Untyped string literal carrying its value. Only ever inferred; never
+    /// written in source. Lets a literal satisfy a `LiteralUnion` whose
+    /// members include it, and widens to `string` everywhere else.
+    StringLit(String),
     /// Untyped integer literal carrying its value. Only ever inferred; never
     /// written in source. Used to allow literals to coerce to any integer type
     /// whose range fits the value.
@@ -355,6 +363,8 @@ impl Type {
             }
             Type::Nullable(inner) => format!("{}?", inner.name()),
             Type::Newtype(name, _) => name.clone(),
+            Type::LiteralUnion(name, _) => name.clone(),
+            Type::StringLit(v) => format!("string literal {:?}", v),
             Type::IntLit(v) => format!("int literal {}", v),
             Type::FloatLit(_) => "float literal".to_string(),
         }
