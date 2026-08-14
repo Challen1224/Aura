@@ -6,6 +6,54 @@ use std::collections::{HashMap, HashSet};
 /// Type substitution map: generic parameter name -> concrete type
 pub type TypeSubst = HashMap<String, Type>;
 
+/// Structurally match a declared parameter type against an argument type,
+/// binding the type variables named in `vars` (method-level generic
+/// parameters appear both as `Type::GenericParam` and as bare
+/// `Type::Class(name, [])` references). When a variable is already bound,
+/// `join` decides the merged binding (returning `None` keeps the previous
+/// one; the caller records the conflict). Positions without variables are
+/// left to ordinary assignability checking afterwards.
+pub fn unify_generic_types(
+    param: &Type,
+    arg: &Type,
+    vars: &HashSet<String>,
+    bindings: &mut HashMap<String, Type>,
+    join: &mut dyn FnMut(&str, Type, Type) -> Option<Type>,
+) {
+    let bind = |name: &str, arg: &Type, bindings: &mut HashMap<String, Type>, join: &mut dyn FnMut(&str, Type, Type) -> Option<Type>| {
+        match bindings.get(name).cloned() {
+            None => {
+                bindings.insert(name.to_string(), arg.clone());
+            }
+            Some(prev) => {
+                if prev != *arg {
+                    if let Some(merged) = join(name, prev, arg.clone()) {
+                        bindings.insert(name.to_string(), merged);
+                    }
+                }
+            }
+        }
+    };
+    match (param, arg) {
+        (Type::GenericParam(n), _) if vars.contains(n) => bind(n, arg, bindings, join),
+        (Type::Class(n, a), _) if a.is_empty() && vars.contains(n) => bind(n, arg, bindings, join),
+        (Type::Class(pn, pa), Type::Class(an, aa)) if pn == an && pa.len() == aa.len() => {
+            for (p, a) in pa.iter().zip(aa.iter()) {
+                unify_generic_types(p, a, vars, bindings, join);
+            }
+        }
+        (Type::Nullable(p), Type::Nullable(a)) => unify_generic_types(p, a, vars, bindings, join),
+        // `T?` accepts a non-null argument: bind against the inner type.
+        (Type::Nullable(p), a) => unify_generic_types(p, a, vars, bindings, join),
+        (Type::Tuple(ps), Type::Tuple(as_)) if ps.len() == as_.len() => {
+            for (p, a) in ps.iter().zip(as_.iter()) {
+                unify_generic_types(p, a, vars, bindings, join);
+            }
+        }
+        _ => {}
+    }
+}
+
 /// A single narrowing fact derived from a condition (see
 /// `TypeChecker::condition_facts`).
 #[derive(Debug, Clone)]
@@ -1603,6 +1651,30 @@ impl TypeChecker {
     ) -> Result<(), TypeError> {
         match stmt {
             Stmt::VarDecl(ty, name, init) => {
+                // `var` infers the declared type from the initializer;
+                // literal markers resolve to their carrier types so
+                // `var x = 5` is an int32, `var s = "hi"` a string.
+                if matches!(ty, Type::Infer) {
+                    let Some(init) = init else {
+                        return Err(TypeError(format!(
+                            "`var {}` requires an initializer to infer from",
+                            name
+                        )));
+                    };
+                    let init_ty = self.infer_expr(init, class, locals, in_instance, return_ty, generic_params)?;
+                    let inferred = self.resolve_literal(&init_ty);
+                    if matches!(&inferred, Type::Unit)
+                        || matches!(&inferred, Type::Class(n, _) if n == "null")
+                    {
+                        return Err(TypeError(format!(
+                            "cannot infer a type for `{}` from {}; annotate the type",
+                            name,
+                            inferred.name()
+                        )));
+                    }
+                    locals.insert(name.clone(), inferred);
+                    return Ok(());
+                }
                 self.validate_type_with_generics(ty, generic_params)?;
                 if init.is_none()
                     && matches!(ty, Type::Class(_, _) | Type::String | Type::Enum(_) | Type::Tuple(_) | Type::GenericParam(_))
@@ -1803,27 +1875,42 @@ impl TypeChecker {
             Stmt::ForIn { label: _, var_type, var_name, iterable, body } => {
                 self.validate_type_with_generics(var_type, generic_params)?;
                 let iter_ty = self.infer_expr(iterable, class, locals, in_instance, return_ty, generic_params)?;
-                match &iter_ty {
-                    // Ranges iterate integers.
+                let effective_ty = match &iter_ty {
+                    // Ranges iterate integers; `var` infers int.
                     Type::Class(name, _) if name == "Range" => {
-                        if !var_type.is_int() {
+                        if matches!(var_type, Type::Infer) {
+                            Type::Int32
+                        } else if var_type.is_int() {
+                            var_type.clone()
+                        } else {
                             return Err(TypeError(format!(
                                 "for-in loop variable must be an integer, got {}",
                                 var_type.name()
                             )));
                         }
                     }
-                    // Collections iterate their element type.
+                    // Collections iterate their element type; `var` infers it.
                     Type::Class(name, type_args) if name == "List" || name == "Set" => {
-                        if let Some(elem_ty) = type_args.first() {
-                            if !self.is_assignable(var_type, elem_ty) {
-                                return Err(TypeError(format!(
-                                    "for-in loop variable of type {} cannot hold {} elements of type {}",
-                                    var_type.name(),
-                                    name,
-                                    elem_ty.name()
-                                )));
+                        let elem_ty = type_args.first();
+                        if matches!(var_type, Type::Infer) {
+                            elem_ty.cloned().ok_or_else(|| {
+                                TypeError(format!(
+                                    "cannot infer the element type of this {}; annotate the loop variable",
+                                    name
+                                ))
+                            })?
+                        } else {
+                            if let Some(elem_ty) = elem_ty {
+                                if !self.is_assignable(var_type, elem_ty) {
+                                    return Err(TypeError(format!(
+                                        "for-in loop variable of type {} cannot hold {} elements of type {}",
+                                        var_type.name(),
+                                        name,
+                                        elem_ty.name()
+                                    )));
+                                }
                             }
+                            var_type.clone()
                         }
                     }
                     _ => {
@@ -1832,8 +1919,8 @@ impl TypeChecker {
                             iter_ty.name()
                         )));
                     }
-                }
-                locals.insert(var_name.clone(), var_type.clone());
+                };
+                locals.insert(var_name.clone(), effective_ty);
                 for s in body {
                     self.check_stmt(s, class, locals, return_ty, in_instance, generic_params)?;
                 }
@@ -3254,7 +3341,27 @@ impl TypeChecker {
                 return self.check_call_args(call, &info, class, locals, in_instance, return_ty, generic_params);
             }
             let (name, type_args) = if let Type::Class(name, args) = &target_ty {
-                (name.clone(), args.clone())
+                // Bounded polymorphism: a receiver typed as a generic
+                // parameter exposes its constraint's members
+                // (`static <T : Sized> ... x.Size()`); unconstrained
+                // parameters have no callable members.
+                if args.is_empty() {
+                    if let Some(gp) = generic_params.iter().find(|gp| gp.name == *name) {
+                        match &gp.constraint {
+                            Some(Type::Class(cn, cargs)) => (cn.clone(), cargs.clone()),
+                            _ => {
+                                return Err(TypeError(format!(
+                                    "cannot call `{}` on type parameter `{}` without a constraint",
+                                    call.method, name
+                                )));
+                            }
+                        }
+                    } else {
+                        (name.clone(), args.clone())
+                    }
+                } else {
+                    (name.clone(), args.clone())
+                }
             } else if in_instance && matches!(target.as_ref(), Expr::Var(n) if n == "this") {
                 // For `this`, use the current class with empty type args
                 // (we're inside the generic class definition)
@@ -3369,26 +3476,16 @@ impl TypeChecker {
         return_ty: &Type,
         generic_params: &[GenericParam],
     ) -> Result<Type, TypeError> {
-        if call.args.len() != method_info.params.len() {
-            return Err(TypeError(format!(
-                "method `{}` expects {} arguments, got {}",
-                call.method,
-                method_info.params.len(),
-                call.args.len()
-            )));
-        }
-        for (arg, expected) in call.args.iter().zip(method_info.params.iter()) {
-            let arg_ty = self.infer_expr(arg, class, locals, in_instance, return_ty, generic_params)?;
-            if !self.is_assignable(expected, &arg_ty) {
-                return Err(TypeError(format!(
-                    "argument type mismatch in `{}`: expected {}, got {}",
-                    call.method,
-                    expected.name(),
-                    arg_ty.name()
-                )));
-            }
-        }
-        Ok(method_info.return_ty.clone())
+        self.check_call_args_with_subst(
+            call,
+            method_info,
+            &TypeSubst::new(),
+            class,
+            locals,
+            in_instance,
+            return_ty,
+            generic_params,
+        )
     }
 
     fn check_call_args_with_subst(
@@ -3402,23 +3499,88 @@ impl TypeChecker {
         return_ty: &Type,
         generic_params: &[GenericParam],
     ) -> Result<Type, TypeError> {
-        // Substitute generic parameters in method signature
-        let substituted_params: Vec<Type> = method_info.params.iter()
-            .map(|p| substitute_type(p, subst))
-            .collect();
-        let substituted_return = substitute_type(&method_info.return_ty, subst);
-        
-        if call.args.len() != substituted_params.len() {
+        if call.args.len() != method_info.params.len() {
             return Err(TypeError(format!(
                 "method `{}` expects {} arguments, got {}",
                 call.method,
-                substituted_params.len(),
+                method_info.params.len(),
                 call.args.len()
             )));
         }
-        for (arg, expected) in call.args.iter().zip(substituted_params.iter()) {
-            let arg_ty = self.infer_expr(arg, class, locals, in_instance, return_ty, generic_params)?;
-            if !self.is_assignable(expected, &arg_ty) {
+        let arg_tys: Vec<Type> = call
+            .args
+            .iter()
+            .map(|arg| self.infer_expr(arg, class, locals, in_instance, return_ty, generic_params))
+            .collect::<Result<_, _>>()?;
+
+        // Method-level generics are inferred from the arguments by unifying
+        // each declared parameter type (after the receiver's class-level
+        // substitution) against the argument's type. When one variable is
+        // bound by several arguments, the bindings join through
+        // assignability — the more general type wins — and irreconcilable
+        // bindings are an error.
+        let mut subst = subst.clone();
+        if !method_info.generic_params.is_empty() {
+            let vars: HashSet<String> = method_info
+                .generic_params
+                .iter()
+                .map(|gp| gp.name.clone())
+                .collect();
+            let mut bindings: HashMap<String, Type> = HashMap::new();
+            let mut conflict: Option<(String, Type, Type)> = None;
+            for (param, arg_ty) in method_info.params.iter().zip(arg_tys.iter()) {
+                let p = substitute_type(param, &subst);
+                unify_generic_types(&p, &self.resolve_literal(arg_ty), &vars, &mut bindings, &mut |name, prev, new| {
+                    if self.is_assignable(&prev, &new) {
+                        Some(prev)
+                    } else if self.is_assignable(&new, &prev) {
+                        Some(new)
+                    } else {
+                        if conflict.is_none() {
+                            conflict = Some((name.to_string(), prev.clone(), new.clone()));
+                        }
+                        None
+                    }
+                });
+            }
+            if let Some((name, a, b)) = conflict {
+                return Err(TypeError(format!(
+                    "cannot infer `{}` in `{}`: conflicting argument types {} and {}",
+                    name,
+                    call.method,
+                    a.name(),
+                    b.name()
+                )));
+            }
+            for gp in &method_info.generic_params {
+                let Some(bound) = bindings.get(&gp.name) else {
+                    return Err(TypeError(format!(
+                        "cannot infer `{}` in `{}` from the arguments",
+                        gp.name, call.method
+                    )));
+                };
+                if let Some(constraint) = &gp.constraint {
+                    if !self.is_assignable(constraint, bound) {
+                        return Err(TypeError(format!(
+                            "inferred type {} for `{}` in `{}` does not satisfy constraint {}",
+                            bound.name(),
+                            gp.name,
+                            call.method,
+                            constraint.name()
+                        )));
+                    }
+                }
+                subst.insert(gp.name.clone(), bound.clone());
+            }
+        }
+
+        let substituted_params: Vec<Type> = method_info
+            .params
+            .iter()
+            .map(|p| substitute_type(p, &subst))
+            .collect();
+        for (arg_ty, expected) in arg_tys.iter().zip(substituted_params.iter()) {
+            if !self.is_assignable(expected, arg_ty) {
                 return Err(TypeError(format!(
                     "argument type mismatch in `{}`: expected {}, got {}",
                     call.method,
@@ -3427,7 +3589,7 @@ impl TypeChecker {
                 )));
             }
         }
-        Ok(substituted_return)
+        Ok(substitute_type(&method_info.return_ty, &subst))
     }
 
     fn arithmetic_type(&self, a: &Type, b: &Type) -> Result<Type, TypeError> {

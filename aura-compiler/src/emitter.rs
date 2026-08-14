@@ -680,8 +680,16 @@ impl<'a> MethodEmitter<'a> {
                 } else {
                     self.ops.push(Op::LdNull);
                 }
+                // `var` declarations record the initializer's inferred type
+                // (the typer has already validated it exists and resolves).
+                let ty = if matches!(ty, Type::Infer) {
+                    let init = init.as_ref().ok_or("`var` requires an initializer")?;
+                    self.expr_ty(init)?
+                } else {
+                    ty.clone()
+                };
                 self.push_local(name.clone());
-                self.local_types.insert(name.clone(), ty.clone());
+                self.local_types.insert(name.clone(), ty);
                 self.ops.push(Op::Stloc((self.locals.len() - 1) as u16));
             }
             Stmt::TupleDecl(names, expr) => {
@@ -2182,7 +2190,16 @@ impl<'a> MethodEmitter<'a> {
         self.ops.push(Op::NativeCall(NativeId::ListGet as u16));
         self.push_local(var_name.to_string());
         let var_idx = (self.locals.len() - 1) as u16;
-        self.local_types.insert(var_name.to_string(), var_type.clone());
+        // `var` loop variables take the collection's element type.
+        let var_type = if matches!(var_type, Type::Infer) {
+            match &iter_ty {
+                Type::Class(_, args) if !args.is_empty() => args[0].clone(),
+                _ => return Err("cannot infer foreach element type".to_string()),
+            }
+        } else {
+            var_type.clone()
+        };
+        self.local_types.insert(var_name.to_string(), var_type);
         self.ops.push(Op::Stloc(var_idx));
 
         for s in body {
@@ -2617,6 +2634,31 @@ impl<'a> MethodEmitter<'a> {
             })?;
             let table = if is_instance { &info.methods } else { &info.static_methods };
             if let Some(mi) = table.get(&method_name) {
+                // Mirror the typer's method-generic inference so dispatch on
+                // inferred return types works (`Util.Pick(a, b).Foo()`).
+                // First-binding-wins is enough here — the typer has already
+                // validated and joined the bindings.
+                let mut subst = subst.clone();
+                if !mi.generic_params.is_empty() {
+                    let vars: std::collections::HashSet<String> =
+                        mi.generic_params.iter().map(|gp| gp.name.clone()).collect();
+                    let mut bindings = HashMap::new();
+                    for (param, arg) in mi.params.iter().zip(call.args.iter()) {
+                        if let Ok(arg_ty) = self.expr_ty(arg) {
+                            let p = substitute_type(param, &subst);
+                            crate::typer::unify_generic_types(
+                                &p,
+                                &arg_ty,
+                                &vars,
+                                &mut bindings,
+                                &mut |_, prev, _| Some(prev),
+                            );
+                        }
+                    }
+                    for (name, ty) in bindings {
+                        subst.insert(name, ty);
+                    }
+                }
                 return Ok(substitute_type(&mi.return_ty, &subst));
             }
             cur = info.super_class.clone();
@@ -2818,6 +2860,9 @@ fn map_type(ty: &Type, class_ids: &HashMap<String, ClassId>, enum_ids: &HashMap<
         // Literal unions (and transient literal markers) are strings at
         // runtime.
         Type::LiteralUnion(..) | Type::StringLit(_) => TypeDesc::String,
+        // `var` markers are replaced with inferred types before any TypeDesc
+        // mapping; treat a stray one as a boxed reference slot.
+        Type::Infer => TypeDesc::Null,
         Type::Unit => TypeDesc::Unit,
         // Literal marker types only exist transiently during type checking and
         // never reach code emission.

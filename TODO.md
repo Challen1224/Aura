@@ -54,7 +54,12 @@
 - [x] Primitive types: `int8`–`int64`, `uint8`–`uint64`, `float32`/`float64`,
       `bool`, `char`, `string`, `void`
 - [x] Null reference type
-- [x] Type inference for local variables
+- [x] Type inference for local variables (`var`) — NOTE: this box was
+      checked long before it was true; `var` did not exist until
+      2026-08-14. It now infers from initializers (literals resolve to
+      carrier types; nullables narrow like annotated locals; works in
+      `for (var x in ...)`); `var` without an initializer or from
+      null/void is a compile error.
 - [x] Static type checking
 - [x] Enum types with pattern matching
 - [x] Tuple types with creation, access, and destructuring
@@ -207,7 +212,21 @@
       dependent-types research).
 
 - [ ] **Type inference improvements**
-  - [ ] Hindley-Milner style inference
+  - [x] Hindley-Milner style inference (scoped: local + call-site
+        unification) — full HM is deliberately out of scope (it does not
+        coexist with subtyping; that trade-off is why C#/Kotlin/Java do
+        local inference). What shipped: `var` locals (see 1.1), and
+        generic-method call-site type-argument inference by structural
+        unification of parameter types against arguments — nested shapes
+        (`List<T>`, `T?`, tuples) participate, bindings from several
+        arguments join through assignability to the more general type,
+        and conflicts / uninferable variables / unsatisfied constraints
+        are precise errors. Constrained method generics (`<T : Sized>`)
+        also gained bounded polymorphism: a constrained parameter's
+        members are callable in the body via the constraint. Explicit
+        call-site type arguments (`Pick<int>(...)`) are not implemented —
+        inference only. Verified under both tiers
+        (aura-vm/tests/inference.rs).
   - [ ] Better error messages for type mismatches
   - [ ] Type hole suggestions
 
@@ -883,7 +902,12 @@
 ### 3.2 Type Checking
 
 #### ✅ Completed
-- [x] Type inference for local variables
+- [x] Type inference for local variables (`var`) — NOTE: this box was
+      checked long before it was true; `var` did not exist until
+      2026-08-14. It now infers from initializers (literals resolve to
+      carrier types; nullables narrow like annotated locals; works in
+      `for (var x in ...)`); `var` without an initializer or from
+      null/void is a compile error.
 - [x] Generic type checking
 - [x] Type substitution
 - [x] Basic type compatibility checks

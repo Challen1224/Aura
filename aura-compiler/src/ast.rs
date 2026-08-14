@@ -347,6 +347,10 @@ pub enum Type {
     /// written in source. Lets a literal satisfy a `LiteralUnion` whose
     /// members include it, and widens to `string` everywhere else.
     StringLit(String),
+    /// The `var` marker: the declaration's type is inferred from its
+    /// initializer (or the element type in `for (var x in ...)`). Never a
+    /// runtime type; replaced during checking/emission.
+    Infer,
     /// Untyped integer literal carrying its value. Only ever inferred; never
     /// written in source. Used to allow literals to coerce to any integer type
     /// whose range fits the value.
@@ -389,6 +393,7 @@ impl Type {
             Type::Newtype(name, _) => name.clone(),
             Type::LiteralUnion(name, _) => name.clone(),
             Type::StringLit(v) => format!("string literal {:?}", v),
+            Type::Infer => "var".to_string(),
             Type::IntLit(v) => format!("int literal {}", v),
             Type::FloatLit(_) => "float literal".to_string(),
         }

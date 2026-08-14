@@ -86,6 +86,8 @@ pub enum Token {
     Newtype,
     /// `is`
     Is,
+    /// `var`
+    Var,
     /// `static`
     Static,
     /// `void`
@@ -218,6 +220,7 @@ impl fmt::Display for Token {
             Token::Type => "`type`",
             Token::Newtype => "`newtype`",
             Token::Is => "`is`",
+            Token::Var => "`var`",
             Token::Static => "`static`",
             Token::Void => "`void`",
             Token::Int => "`int`",
@@ -956,6 +959,7 @@ impl<'a> Lexer<'a> {
             "type" => Token::Type,
             "newtype" => Token::Newtype,
             "is" => Token::Is,
+            "var" => Token::Var,
             "static" => Token::Static,
             "void" => Token::Void,
             "int" => Token::Int,

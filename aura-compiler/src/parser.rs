@@ -1956,7 +1956,7 @@ impl<'a> Parser<'a> {
         }
         // A type is a keyword type or an identifier (class / numeric type name).
         let type_start = match self.tokens.get(pos) {
-            Some(Token::Void | Token::Int | Token::Float | Token::Bool | Token::String | Token::Ident(_)) => true,
+            Some(Token::Void | Token::Int | Token::Float | Token::Bool | Token::String | Token::Ident(_) | Token::Var) => true,
             _ => false,
         };
         if !type_start {
@@ -2485,6 +2485,10 @@ impl<'a> Parser<'a> {
                 self.advance();
                 Ok(Type::Unit)
             }
+            Some(Token::Var) => {
+                self.advance();
+                Ok(Type::Infer)
+            }
             Some(Token::Int) => {
                 self.advance();
                 Ok(Type::Int32)
@@ -2559,14 +2563,14 @@ impl<'a> Parser<'a> {
     fn check_type(&self) -> bool {
         matches!(
             self.peek(),
-            Some(Token::Void | Token::Int | Token::Float | Token::Bool | Token::String | Token::Ident(_) | Token::LParen)
+            Some(Token::Void | Token::Int | Token::Float | Token::Bool | Token::String | Token::Ident(_) | Token::LParen | Token::Var)
         )
     }
 
     fn check_type_token(&self, tok: &Token) -> bool {
         matches!(
             tok,
-            Token::Void | Token::Int | Token::Float | Token::Bool | Token::String | Token::Ident(_) | Token::LParen
+            Token::Void | Token::Int | Token::Float | Token::Bool | Token::String | Token::Ident(_) | Token::LParen | Token::Var
         )
     }
 

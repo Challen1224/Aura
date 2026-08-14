@@ -1,0 +1,73 @@
+// Type inference: `var` locals and generic method calls.
+//
+// `var` infers a local's type from its initializer — literals resolve to
+// their carrier types (int, string), and everything else keeps its full
+// type, including nullables, so inferred locals narrow and dispatch like
+// annotated ones. Generic methods infer their type arguments at each call
+// site by unifying parameter types against the arguments: nested shapes
+// like List<T> participate, bindings from several arguments join to the
+// more general type, and conflicts or unsatisfied constraints are compile
+// errors. Inference is local by design — whole-program Hindley-Milner
+// doesn't coexist with subtyping.
+
+interface Sized {
+    int Size();
+}
+
+class Crate {
+    int volume;
+    Crate(int v) { this.volume = v; }
+    int Size() { return this.volume; }
+}
+
+class Util {
+    static <T> T Last(T a, T b) { return b; }
+
+    static <T> List<T> Pair(T a, T b) {
+        List<T> xs = new List<T>();
+        xs.Add(a);
+        xs.Add(b);
+        return xs;
+    }
+
+    static <T : Sized> int Measure(T x) {
+        // Bounded polymorphism: T's members come from its constraint.
+        return x.Size();
+    }
+}
+
+class Program {
+    static void Main() {
+        // var: initializer decides the type.
+        var count = 41;
+        var name = "aura";
+        var box = new Crate(27);
+        print(count + 1);
+        print(" ");
+        print(name.ToUpper());
+        print(" ");
+        print(box.Size());
+        println();
+
+        // Inferred generic calls, chained straight into dispatch.
+        print(Util.Last("short", "longer").Length);
+        println();
+
+        // Nested unification: T flows out of List<T>.
+        var pair = Util.Pair(3, 4);
+        for (var p in pair) {
+            print(p);
+        }
+        println();
+
+        // Constraint checked against the inferred binding
+        // (satisfied structurally — Crate never declares `: Sized`).
+        print(Util.Measure(box));
+        println();
+
+        // These would be compile errors:
+        //   Util.Last(1, "s");     // conflicting argument types
+        //   Util.Measure(5);       // int does not satisfy Sized
+        //   var x = null;          // nothing to infer from
+    }
+}
