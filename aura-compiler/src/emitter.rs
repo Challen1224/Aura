@@ -1248,6 +1248,18 @@ impl<'a> MethodEmitter<'a> {
                 }
             }
             Expr::Field(obj, name) => {
+                // Newtype unwrap (`id.Value`) is fully erased. Strip the
+                // nullable wrapper: a narrowed `UserId?` local still types
+                // as nullable here, but the typer has already proven the
+                // access safe.
+                if name == "Value" {
+                    if let Ok(ty) = self.expr_ty(obj) {
+                        if matches!(Self::strip_nullable(ty), Type::Newtype(..)) {
+                            self.emit_expr(obj)?;
+                            return Ok(());
+                        }
+                    }
+                }
                 // Intrinsic properties (`list.Count`, `s.Length`).
                 if let Some(native) = self.intrinsic_property_native(obj, name)? {
                     self.ops.push(Op::NativeCall(native as u16));
@@ -1463,6 +1475,10 @@ impl<'a> MethodEmitter<'a> {
                             self.emit_expr(target)?;
                             self.ops.push(Op::CallVirt(call.method.clone()));
                         }
+                    } else if self.program.newtypes.contains_key(&call.method) {
+                        // Newtype constructor: fully erased — the wrapped
+                        // expression is the value.
+                        self.emit_expr(&call.args[0])?;
                     } else if let Some(im) =
                         crate::intrinsics::static_method(&call.class_or_target, &call.method)
                     {
@@ -2360,9 +2376,16 @@ impl<'a> MethodEmitter<'a> {
             Expr::New(class_name, type_args, _) => Type::Class(class_name.clone(), type_args.clone()),
             Expr::With(obj, _) => self.expr_ty(obj)?,
             Expr::Field(obj, name) => {
-                // Intrinsic properties (`list.Count`, `s.Length`).
+                // Intrinsic properties (`list.Count`, `s.Length`) and
+                // newtype unwrap (`id.Value`).
                 if let Ok(obj_ty) = self.expr_ty(obj) {
-                    let prop = match &Self::strip_nullable(obj_ty) {
+                    let stripped = Self::strip_nullable(obj_ty);
+                    if let Type::Newtype(_, underlying) = &stripped {
+                        if name == "Value" {
+                            return Ok((**underlying).clone());
+                        }
+                    }
+                    let prop = match &stripped {
                         Type::String => crate::intrinsics::string_property(name),
                         Type::Class(cname, _) => crate::intrinsics::property(cname, name),
                         _ => None,
@@ -2515,6 +2538,10 @@ impl<'a> MethodEmitter<'a> {
                 _ => Ok(Type::Unit),
             };
         } else {
+            // Newtype constructors type as the newtype itself.
+            if let Some(underlying) = self.program.newtypes.get(&call.method) {
+                return Ok(Type::Newtype(call.method.clone(), Box::new(underlying.clone())));
+            }
             // Bare call: `foo(args)` without a class qualifier. If the
             // class_or_target is not a known class, it resolves to a static
             // method of the current class.
@@ -2734,6 +2761,9 @@ fn arith_conv(ty: &Type) -> Option<TypeDesc> {
 fn map_type(ty: &Type, class_ids: &HashMap<String, ClassId>, enum_ids: &HashMap<String, EnumId>, generic_params: &[aura_bytecode::GenericParam]) -> TypeDesc {
     match ty {
         Type::Nullable(inner) => TypeDesc::Nullable(Box::new(map_type(inner, class_ids, enum_ids, generic_params))),
+        // Newtypes are fully erased: at runtime a value of `Newtype` IS its
+        // underlying primitive.
+        Type::Newtype(_, inner) => map_type(inner, class_ids, enum_ids, generic_params),
         Type::Unit => TypeDesc::Unit,
         // Literal marker types only exist transiently during type checking and
         // never reach code emission.

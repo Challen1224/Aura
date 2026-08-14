@@ -164,6 +164,10 @@ pub struct TypedProgram {
     pub classes: HashMap<String, ClassInfo>,
     /// Enum descriptors keyed by name.
     pub enums: HashMap<String, EnumInfo>,
+    /// Newtype registry: name -> underlying primitive type. Used by the
+    /// emitter to recognize `Name(expr)` constructors, which erase to the
+    /// wrapped expression.
+    pub newtypes: HashMap<String, Type>,
 }
 
 /// Class metadata populated by the type checker.
@@ -286,6 +290,8 @@ pub struct VariantInfo {
 pub struct TypeChecker {
     classes: HashMap<String, ClassInfo>,
     enums: HashMap<String, EnumInfo>,
+    /// Newtype registry: name -> underlying primitive type.
+    newtypes: HashMap<String, Type>,
     /// Locals currently narrowed from `T?` to `T` by a null check, mapped to
     /// their declared (nullable) type. Assigning to a narrowed local widens
     /// it back to the declared type (see `Stmt::Assign`).
@@ -298,6 +304,7 @@ impl TypeChecker {
         Self {
             classes: HashMap::new(),
             enums: HashMap::new(),
+            newtypes: HashMap::new(),
             narrowed: std::cell::RefCell::new(HashMap::new()),
         }
     }
@@ -311,12 +318,14 @@ impl TypeChecker {
                 Decl::Class(c) => self.check_class(c)?,
                 Decl::Enum(_) => {}
                 Decl::TypeAlias(_) => {}
+                Decl::Newtype(_) => {}
             }
         }
         Ok(TypedProgram {
             program: program.clone(),
             classes: self.classes,
             enums: self.enums,
+            newtypes: self.newtypes,
         })
     }
 
@@ -400,11 +409,40 @@ impl TypeChecker {
     }
 
     fn gather_decls(&mut self, program: &Program) -> Result<(), TypeError> {
+        // Newtypes first, so class/enum name collisions are caught whichever
+        // declaration order the source uses. The parser has already resolved
+        // and validated the underlying primitive.
+        for decl in &program.decls {
+            if let Decl::Newtype(n) = decl {
+                if self.newtypes.contains_key(&n.name) {
+                    return Err(TypeError(format!("duplicate newtype `{}`", n.name)));
+                }
+                if self.classes.contains_key(&n.name) {
+                    return Err(TypeError(format!(
+                        "newtype `{}` conflicts with a class of the same name",
+                        n.name
+                    )));
+                }
+                if self.enums.contains_key(&n.name) {
+                    return Err(TypeError(format!(
+                        "newtype `{}` conflicts with an enum of the same name",
+                        n.name
+                    )));
+                }
+                self.newtypes.insert(n.name.clone(), n.underlying.clone());
+            }
+        }
         for decl in &program.decls {
             match decl {
                 Decl::Class(c) => {
                     if self.classes.contains_key(&c.name) {
                         return Err(TypeError(format!("duplicate class `{}`", c.name)));
+                    }
+                    if self.newtypes.contains_key(&c.name) {
+                        return Err(TypeError(format!(
+                            "class `{}` conflicts with a newtype of the same name",
+                            c.name
+                        )));
                     }
                     if self.enums.contains_key(&c.name) {
                         return Err(TypeError(format!("`{}` is already defined as an enum", c.name)));
@@ -708,6 +746,7 @@ impl TypeChecker {
                     });
                 }
                 Decl::TypeAlias(_) => {}
+                Decl::Newtype(_) => {} // registered in the pre-pass above
             }
         }
         self.split_bases(program)?;
@@ -2032,6 +2071,16 @@ impl TypeChecker {
                         name
                     )));
                 }
+                // Newtype unwrap: `id.Value` yields the underlying type.
+                if let Type::Newtype(nt_name, underlying) = &obj_ty {
+                    if name == "Value" {
+                        return Ok((**underlying).clone());
+                    }
+                    return Err(TypeError(format!(
+                        "unknown property `{}` on newtype `{}` (only `Value` is available)",
+                        name, nt_name
+                    )));
+                }
                 let (class_name, type_args) = if let Type::Class(name, args) = &obj_ty {
                     (name.clone(), args.clone())
                 } else if in_instance && matches!(obj.as_ref(), Expr::Var(n) if n == "this") {
@@ -3038,6 +3087,27 @@ impl TypeChecker {
                     return self.infer_enum_construction(
                         &enum_name, &call.method, &call.args, class, locals, in_instance, return_ty, generic_params,
                     );
+                }
+                // Newtype constructor: `UserId(expr)` wraps a value of the
+                // underlying type. Purely a compile-time conversion.
+                if let Some(underlying) = self.newtypes.get(&call.method).cloned() {
+                    if call.args.len() != 1 {
+                        return Err(TypeError(format!(
+                            "newtype constructor `{}` expects 1 argument, got {}",
+                            call.method,
+                            call.args.len()
+                        )));
+                    }
+                    let arg_ty = self.infer_expr(&call.args[0], class, locals, in_instance, return_ty, generic_params)?;
+                    if !self.is_assignable(&underlying, &arg_ty) {
+                        return Err(TypeError(format!(
+                            "cannot construct {}({}): expected {}",
+                            call.method,
+                            arg_ty.name(),
+                            underlying.name()
+                        )));
+                    }
+                    return Ok(Type::Newtype(call.method.clone(), Box::new(underlying)));
                 }
                 // Bare static method call: `safeDivide(a, b)` resolves to a
                 // static method of the current class.

@@ -21,6 +21,53 @@ pub fn expand_type_aliases(program: &Program) -> Result<Program, String> {
             aliases.insert(a.name.clone(), a.clone());
         }
     }
+    // Newtypes ride the same machinery as synthetic aliases whose target is
+    // the opaque `Type::Newtype` wrapper: every occurrence of the name in a
+    // type position resolves to the wrapper, while the wrapper itself is
+    // never expanded further (it is nominal, not transparent). The
+    // underlying type may itself use aliases, but must resolve to a
+    // primitive — in particular a newtype cannot wrap another newtype.
+    for decl in &program.decls {
+        if let Decl::Newtype(n) = decl {
+            if aliases.contains_key(&n.name) {
+                return Err(format!(
+                    "newtype `{}` conflicts with a type alias of the same name",
+                    n.name
+                ));
+            }
+            let underlying = expand(&n.underlying, &aliases, &mut Vec::new())?;
+            if !matches!(
+                underlying,
+                Type::Int8
+                    | Type::Int16
+                    | Type::Int32
+                    | Type::Int64
+                    | Type::UInt8
+                    | Type::UInt16
+                    | Type::UInt32
+                    | Type::UInt64
+                    | Type::Float32
+                    | Type::Float64
+                    | Type::Bool
+                    | Type::Char
+                    | Type::String
+            ) {
+                return Err(format!(
+                    "newtype `{}` must wrap a primitive type, got {}",
+                    n.name,
+                    underlying.name()
+                ));
+            }
+            aliases.insert(
+                n.name.clone(),
+                TypeAliasDecl {
+                    name: n.name.clone(),
+                    generic_params: Vec::new(),
+                    target: Type::Newtype(n.name.clone(), Box::new(underlying)),
+                },
+            );
+        }
+    }
     if aliases.is_empty() {
         return Ok(program.clone());
     }
@@ -54,6 +101,8 @@ pub fn expand_type_aliases(program: &Program) -> Result<Program, String> {
                 Decl::Enum(e)
             }
             Decl::TypeAlias(_) => continue,
+            // Kept so the type checker can register the constructor name.
+            Decl::Newtype(n) => Decl::Newtype(n.clone()),
         };
         decls.push(expanded);
     }
@@ -481,6 +530,12 @@ impl<'a> Parser<'a> {
                 decls.push(Decl::Enum(self.parse_enum()?));
             } else if self.match_token(Token::Type) {
                 decls.push(self.parse_type_decl()?);
+            } else if self.match_token(Token::Newtype) {
+                let name = self.consume_ident("expected newtype name")?;
+                self.consume(Token::Assign, "expected `=` in newtype declaration")?;
+                let underlying = self.parse_type()?;
+                self.consume(Token::Semi, "expected `;` after newtype declaration")?;
+                decls.push(Decl::Newtype(NewtypeDecl { name, underlying }));
             } else if self.match_token(Token::Interface) {
                 decls.push(Decl::Class(self.parse_class(true, false, false)?));
             } else if self.match_token(Token::Abstract) {

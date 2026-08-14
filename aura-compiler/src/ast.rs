@@ -16,6 +16,8 @@ pub enum Decl {
     Enum(EnumDecl),
     /// Type alias declaration (e.g., `type UserId = int;`).
     TypeAlias(TypeAliasDecl),
+    /// Newtype declaration.
+    Newtype(NewtypeDecl),
 }
 
 /// Type alias declaration.
@@ -27,6 +29,18 @@ pub struct TypeAliasDecl {
     pub generic_params: Vec<GenericParam>,
     /// The type this alias refers to.
     pub target: Type,
+}
+
+/// Newtype declaration: `newtype UserId = int;` — a distinct nominal type
+/// over a primitive. Unlike a type alias it does not interconvert with its
+/// underlying type; construction is `UserId(expr)` and unwrapping is
+/// `value.Value`. Fully erased at runtime.
+#[derive(Debug, Clone, PartialEq)]
+pub struct NewtypeDecl {
+    /// Newtype name.
+    pub name: String,
+    /// The underlying primitive type.
+    pub underlying: Type,
 }
 
 /// Enum declaration.
@@ -298,6 +312,9 @@ pub enum Type {
     Tuple(Vec<Type>),
     /// Nullable type: `T?`. Only nullable types may hold `null`.
     Nullable(Box<Type>),
+    /// A declared newtype: distinct nominal wrapper carrying its name and
+    /// underlying primitive type. Erased to the underlying type at runtime.
+    Newtype(String, Box<Type>),
     /// Untyped integer literal carrying its value. Only ever inferred; never
     /// written in source. Used to allow literals to coerce to any integer type
     /// whose range fits the value.
@@ -337,6 +354,7 @@ impl Type {
                 format!("({})", types.iter().map(|t| t.name()).collect::<Vec<_>>().join(", "))
             }
             Type::Nullable(inner) => format!("{}?", inner.name()),
+            Type::Newtype(name, _) => name.clone(),
             Type::IntLit(v) => format!("int literal {}", v),
             Type::FloatLit(_) => "float literal".to_string(),
         }

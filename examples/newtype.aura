@@ -1,0 +1,57 @@
+// Newtypes: distinct nominal wrappers over primitives.
+//
+// `newtype UserId = int;` declares a type that is an int at runtime (zero
+// cost — fully erased) but distinct at compile time: ints don't implicitly
+// become UserIds, UserIds don't leak back to int, and two newtypes over the
+// same primitive never interconvert. Construct with `UserId(expr)`, unwrap
+// with `.Value`. This is how you stop passing a UserId where an OrderId
+// belongs — the classic bug aliases can't catch.
+
+newtype UserId = int;
+newtype OrderId = int;
+newtype Email = string;
+
+class Program {
+    static void Ship(UserId user, OrderId order) {
+        print("shipping order ");
+        print(order.Value);
+        print(" to user ");
+        print(user.Value);
+        println();
+    }
+
+    static void Main() {
+        UserId user = UserId(7);
+        OrderId order = OrderId(1042);
+
+        // Argument order is now compiler-checked: swapping user and order
+        // here would be a compile error, not a shipped bug.
+        Ship(user, order);
+
+        // Same newtype compares; arithmetic goes through .Value.
+        UserId next = UserId(user.Value + 1);
+        print("next user: ");
+        print(next.Value);
+        println();
+        print("same user: ");
+        print(user == UserId(7));
+        println();
+
+        // String-backed newtypes are just as opaque: no string methods
+        // until you unwrap.
+        Email e = Email("ada@example.com");
+        print("domain: ");
+        print(e.Value.Split("@").Get(1));
+        println();
+
+        // Erasure means newtypes work as collection keys for free.
+        Map<UserId, string> names = new Map<UserId, string>();
+        names.Put(user, "ada");
+        names.Put(next, "grace");
+        for (UserId id in names.Keys()) {
+            print(names.Get(id));
+            print(" ");
+        }
+        println();
+    }
+}

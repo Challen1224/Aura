@@ -98,7 +98,16 @@
         Verified under both tiers (aura-vm/tests/duck_typing.rs).
   - [x] Type aliases: `type UserId = int;` (parser-level expansion; also
         composes with `?`)
-  - [ ] Newtype pattern support
+  - [x] Newtype pattern support — `newtype UserId = int;` declares a
+        distinct nominal wrapper over a primitive (int widths, float, bool,
+        char, string; a newtype cannot wrap a class or another newtype).
+        No implicit conversion in either direction, and distinct newtypes
+        over the same primitive don't interconvert. Construct with
+        `UserId(expr)`, unwrap with `.Value`; `==`/`!=` work between the
+        same newtype; arithmetic and the underlying type's methods require
+        unwrapping. Fully erased at runtime (zero cost — works as
+        collection keys, composes with `T?` narrowing and `!`). Verified
+        under both tiers (aura-vm/tests/newtype.rs).
 
 - [x] **Nullable types (strict)** — `T?` for reference and value types;
       `null` is only assignable to `T?`, and member access on `T?` is a
