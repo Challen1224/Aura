@@ -158,10 +158,25 @@
 
 **P2 - Medium Priority**
 - [ ] **Advanced type features**
-  - [ ] Dependent types (research)
-  - [ ] Refinement types
+  - [x] Dependent types (research) — study written:
+        docs/research/dependent-types.md. Conclusion: park indefinitely;
+        no implementation planned. If type-level guarantees become a
+        priority, the incremental path is (1) enforce generic constraints
+        (see gap below), (2) integer interval facts in the existing
+        GuardFact narrowing engine as diagnostics, and only then evaluate
+        const generics. SMT-based refinement types are rejected for this
+        project. Near-term idiom for invariants: newtype + validating
+        constructor.
+  - [ ] Refinement types (see research note above: rejected in SMT form;
+        interval-fact diagnostics are the plausible subset)
   - [ ] Phantom types
   - [ ] Type-level computation
+
+- [ ] **Generic constraint enforcement** — found while researching
+      dependent types, verified 2026-08-14: `class Box<T : Sized>` parses
+      the constraint but the typer never enforces it; `Box<Plain>` with a
+      non-conforming `Plain` compiles and runs. Ordinary type-checking
+      work, prerequisite for any type-level feature.
 
 - [ ] **Type inference improvements**
   - [ ] Hindley-Milner style inference
