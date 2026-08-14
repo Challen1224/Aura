@@ -152,8 +152,9 @@
   erased — string methods, hashed Map keys, `foreach`, and `T?` narrowing
   all work). Bare string literals now infer a transient literal type that
   widens to `string` everywhere else (mirroring the existing int-literal
-  machinery). Int-literal unions and subset-widening between unions are
-  not implemented. Verified under both tiers
+  machinery). Int-literal unions are not implemented. Subset-widening
+  between unions was originally excluded but is now part of the union
+  algebra (see Type-level computation below). Verified under both tiers
   (aura-vm/tests/literal_types.rs).
 
 **P2 - Medium Priority**
@@ -178,7 +179,24 @@
         rejected by the existing invariant checking, and tags are fully
         erased at runtime. Verified under both tiers
         (aura-vm/tests/phantom_types.rs, examples/phantom_types.aura).
-  - [ ] Type-level computation
+  - [x] Type-level computation (v1: literal-union algebra) — union
+        declarations compose other unions (`type Direction = Horizontal |
+        Vertical;`, mixed literal/name operands allowed); members merge in
+        declaration order with silent dedup across operands (explicit
+        duplicate literals in one declaration still error). Subset
+        widening follows the algebra: a union value flows into any union
+        containing all its members; the reverse stays rejected. An
+        all-bare-variant `type` declaration is reinterpreted as a union
+        only when every name resolves to a literal union; mixing union
+        names with enum variants is a hard error (previously it silently
+        parsed as a wrong enum), and cycles/unknown names are errors. Sum
+        types are untouched. Generic type aliases (already shipped) are
+        the type-level-function baseline. Not in scope: conditional/mapped
+        types, int-literal unions, comptime-style evaluation. Prerequisite
+        fix that landed with this: match-arm and ternary joins now widen
+        int/float literal markers like string literals (int-literal match
+        expressions previously never unified). Verified under both tiers
+        (aura-vm/tests/union_algebra.rs).
 
 - [x] **Generic constraint enforcement** — `<T : IFace>` (and class
       constraints) are now enforced at every type reference and `new`

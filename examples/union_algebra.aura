@@ -1,0 +1,62 @@
+// Type-level computation: literal-union algebra.
+//
+// Literal unions compose: a union declaration may name other unions, and
+// their member sets merge (in order, duplicates removed). Subset widening
+// follows the algebra — a union value flows into any union that contains
+// all its members, so Horizontal fits Direction fits Extended. Mixing
+// union names with enum variants in one declaration is a compile error,
+// and ordinary sum types (`type Result<T,E> = Ok(T) | Err(E);`) are
+// completely unaffected.
+
+type Horizontal = "east" | "west";
+type Vertical = "north" | "south";
+type Direction = Horizontal | Vertical;
+type Extended = Direction | "up" | "down";
+
+class Program {
+    static string Arrow(Extended e) {
+        if (e == "north") { return "^"; }
+        if (e == "south") { return "v"; }
+        if (e == "east") { return ">"; }
+        if (e == "west") { return "<"; }
+        if (e == "up") { return "+"; }
+        return "-";
+    }
+
+    static void Main() {
+        // Members of the composed parts are members of the whole.
+        Direction d = "north";
+        print("direction ");
+        print(d);
+        print(" ");
+        print(Arrow(d));
+        println();
+
+        // Subset widening: Horizontal -> Direction -> Extended.
+        Horizontal h = "west";
+        Direction viaH = h;
+        Extended e = viaH;
+        print("widened ");
+        print(e);
+        print(" ");
+        print(Arrow(e));
+        println();
+
+        // The extension's own members work too.
+        print("extended ");
+        print(Arrow("up"));
+        print(Arrow("down"));
+        println();
+
+        // Composed unions as map keys and in loops, like any literal type.
+        List<Extended> route = new List<Extended>();
+        route.Add("east");
+        route.Add("up");
+        route.Add("north");
+        print("route ");
+        for (Extended step in route) {
+            print(Arrow(step));
+        }
+        println();
+    }
+}

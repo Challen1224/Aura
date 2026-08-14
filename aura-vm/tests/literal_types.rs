@@ -94,11 +94,16 @@ class Program { static void Main() { string s = "north"; Direction d = s; } }
 "#,
             "cannot assign",
         ),
+        // NOTE: this case originally pinned the v1 rule that unions never
+        // interconvert, using Compass -> Direction (a subset into its
+        // superset). Union algebra deliberately legalized subset widening,
+        // so the case now pins the direction that must stay illegal: a
+        // superset value flowing into a subset union.
         (
             r#"
 type Direction = "north" | "south" | "east" | "west";
 type Compass = "north" | "south";
-class Program { static void Main() { Compass c = "north"; Direction d = c; } }
+class Program { static void Main() { Direction d = "east"; Compass c = d; } }
 "#,
             "cannot assign",
         ),

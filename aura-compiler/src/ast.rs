@@ -18,6 +18,8 @@ pub enum Decl {
     TypeAlias(TypeAliasDecl),
     /// Newtype declaration.
     Newtype(NewtypeDecl),
+    /// Literal-union type declaration (resolved during alias expansion).
+    LiteralUnion(LiteralUnionDecl),
 }
 
 /// Type alias declaration.
@@ -29,6 +31,28 @@ pub struct TypeAliasDecl {
     pub generic_params: Vec<GenericParam>,
     /// The type this alias refers to.
     pub target: Type,
+}
+
+/// One operand of a literal-union type declaration.
+#[derive(Debug, Clone, PartialEq)]
+pub enum UnionOperand {
+    /// A string literal member: `"north"`.
+    Literal(String),
+    /// A named reference to another literal union whose members are merged
+    /// in: `Horizontal` in `type Direction = Horizontal | Vertical;`.
+    Named(String),
+}
+
+/// A literal-union type declaration: `type D = "a" | Other | "b";`.
+/// Operands may be string literals or names of other literal unions;
+/// resolution (merging, deduplication, cycle detection) happens in the
+/// alias-expansion pass.
+#[derive(Debug, Clone, PartialEq)]
+pub struct LiteralUnionDecl {
+    /// Declared name.
+    pub name: String,
+    /// Operands in declaration order.
+    pub operands: Vec<UnionOperand>,
 }
 
 /// Newtype declaration: `newtype UserId = int;` — a distinct nominal type

@@ -21,6 +21,151 @@ pub fn expand_type_aliases(program: &Program) -> Result<Program, String> {
             aliases.insert(a.name.clone(), a.clone());
         }
     }
+    // Literal-union algebra: resolve union declarations into flat member
+    // lists. Operands may name other literal unions (members merge in
+    // declaration order; duplicates arising through composition dedup
+    // silently). A sum-type candidate whose bare variants ALL name literal
+    // unions is reinterpreted as a union composition — `type Direction =
+    // Horizontal | Vertical;` — while mixing union names with ordinary
+    // variant names is an error rather than a silently-wrong enum.
+    let mut union_ops: HashMap<String, Vec<UnionOperand>> = HashMap::new();
+    for decl in &program.decls {
+        if let Decl::LiteralUnion(u) = decl {
+            if aliases.contains_key(&u.name) || union_ops.contains_key(&u.name) {
+                return Err(format!("duplicate type `{}`", u.name));
+            }
+            union_ops.insert(u.name.clone(), u.operands.clone());
+        }
+    }
+    let mut enum_tentative: HashMap<String, Vec<UnionOperand>> = HashMap::new();
+    for decl in &program.decls {
+        if let Decl::Enum(e) = decl {
+            if e.generic_params.is_empty()
+                && !e.variants.is_empty()
+                && e.variants.iter().all(|v| v.fields.is_empty())
+            {
+                enum_tentative.insert(
+                    e.name.clone(),
+                    e.variants.iter().map(|v| UnionOperand::Named(v.name.clone())).collect(),
+                );
+            }
+        }
+    }
+    // `Ok(Some(members))` = resolved union; `Ok(None)` = not a union (only
+    // legal for tentative sum-type candidates with no union operands).
+    fn resolve_union(
+        name: &str,
+        definite: &HashMap<String, Vec<UnionOperand>>,
+        tentative: &HashMap<String, Vec<UnionOperand>>,
+        aliases: &HashMap<String, TypeAliasDecl>,
+        stack: &mut Vec<String>,
+    ) -> Result<Option<Vec<String>>, String> {
+        if stack.iter().any(|n| n == name) {
+            return Err(format!("circular literal type `{}`", name));
+        }
+        let (ops, is_definite) = match definite.get(name) {
+            Some(ops) => (ops, true),
+            None => match tentative.get(name) {
+                Some(ops) => (ops, false),
+                None => {
+                    // A plain alias may rename a union: follow one hop.
+                    if let Some(a) = aliases.get(name) {
+                        if let Type::Class(target, args) = &a.target {
+                            if args.is_empty() && a.generic_params.is_empty() {
+                                stack.push(name.to_string());
+                                let r = resolve_union(target, definite, tentative, aliases, stack);
+                                stack.pop();
+                                return r;
+                            }
+                        }
+                    }
+                    return Ok(None);
+                }
+            },
+        };
+        stack.push(name.to_string());
+        let mut members: Vec<String> = Vec::new();
+        let mut resolved_named = 0usize;
+        let mut unresolved: Option<String> = None;
+        for op in ops {
+            match op {
+                UnionOperand::Literal(v) => {
+                    if !members.contains(v) {
+                        members.push(v.clone());
+                    }
+                }
+                UnionOperand::Named(n) => {
+                    match resolve_union(n, definite, tentative, aliases, stack)? {
+                        Some(sub) => {
+                            resolved_named += 1;
+                            for v in sub {
+                                if !members.contains(&v) {
+                                    members.push(v);
+                                }
+                            }
+                        }
+                        None => {
+                            if is_definite {
+                                stack.pop();
+                                return Err(format!(
+                                    "`{}` in literal type `{}` is not a literal type",
+                                    n, name
+                                ));
+                            }
+                            unresolved = Some(n.clone());
+                        }
+                    }
+                }
+            }
+        }
+        stack.pop();
+        if !is_definite {
+            if let Some(n) = unresolved {
+                if resolved_named > 0 {
+                    return Err(format!(
+                        "type `{}` mixes literal-union types and enum variants (`{}` is not a literal type)",
+                        name, n
+                    ));
+                }
+                return Ok(None); // an ordinary bare-variant sum type
+            }
+        }
+        Ok(Some(members))
+    }
+    let mut converted_enums: Vec<String> = Vec::new();
+    let union_names: Vec<String> = union_ops.keys().cloned().collect();
+    for name in union_names {
+        let members = resolve_union(&name, &union_ops, &enum_tentative, &aliases, &mut Vec::new())?
+            .expect("definite union declarations always resolve or error");
+        aliases.insert(
+            name.clone(),
+            TypeAliasDecl {
+                name: name.clone(),
+                generic_params: Vec::new(),
+                target: Type::LiteralUnion(name, members),
+            },
+        );
+    }
+    let tentative_names: Vec<String> = enum_tentative.keys().cloned().collect();
+    for name in tentative_names {
+        if let Some(members) =
+            resolve_union(&name, &union_ops, &enum_tentative, &aliases, &mut Vec::new())?
+        {
+            if aliases.contains_key(&name) {
+                return Err(format!("duplicate type `{}`", name));
+            }
+            converted_enums.push(name.clone());
+            aliases.insert(
+                name.clone(),
+                TypeAliasDecl {
+                    name: name.clone(),
+                    generic_params: Vec::new(),
+                    target: Type::LiteralUnion(name, members),
+                },
+            );
+        }
+    }
+
     // Newtypes ride the same machinery as synthetic aliases whose target is
     // the opaque `Type::Newtype` wrapper: every occurrence of the name in a
     // type position resolves to the wrapper, while the wrapper itself is
@@ -91,6 +236,10 @@ pub fn expand_type_aliases(program: &Program) -> Result<Program, String> {
                 Decl::Class(c)
             }
             Decl::Enum(e) => {
+                // Reinterpreted as a literal-union composition: consumed.
+                if converted_enums.iter().any(|n| n == &e.name) {
+                    continue;
+                }
                 let mut e = e.clone();
                 e.generic_params = expand_generic_params(&e.generic_params, &aliases)?;
                 for variant in &mut e.variants {
@@ -101,6 +250,8 @@ pub fn expand_type_aliases(program: &Program) -> Result<Program, String> {
                 Decl::Enum(e)
             }
             Decl::TypeAlias(_) => continue,
+            // Resolved into a synthetic alias above: consumed.
+            Decl::LiteralUnion(_) => continue,
             // Kept so the type checker can register the constructor name.
             Decl::Newtype(n) => Decl::Newtype(n.clone()),
         };
@@ -739,39 +890,70 @@ impl<'a> Parser<'a> {
         // A string-literal union: `type Direction = "north" | "south";`.
         // Stored as an alias whose target is the opaque `Type::LiteralUnion`,
         // so the existing alias-expansion pass resolves every use of the name.
-        if matches!(self.tokens.get(self.pos), Some(Token::StringLit(_))) {
+        // A pipe list containing at least one string literal is a
+        // literal-union declaration; operands may also name other literal
+        // unions, merged during alias expansion. (An all-ident pipe list
+        // stays a sum-type candidate and is reinterpreted there when every
+        // name resolves to a literal union.)
+        let looks_like_literal_union = {
+            let mut pos = self.pos;
+            let mut saw_lit = false;
+            loop {
+                match self.tokens.get(pos) {
+                    Some(Token::StringLit(_)) => {
+                        saw_lit = true;
+                        pos += 1;
+                    }
+                    Some(Token::Ident(_)) => pos += 1,
+                    _ => break false,
+                }
+                match self.tokens.get(pos) {
+                    Some(Token::Pipe) => pos += 1,
+                    Some(Token::Semi) => break saw_lit,
+                    _ => break false,
+                }
+            }
+        };
+        if looks_like_literal_union {
             if !generic_params.is_empty() {
                 return Err(format!(
                     "literal type `{}` cannot have generic parameters",
                     name
                 ));
             }
-            let mut members = Vec::new();
+            let mut operands = Vec::new();
             loop {
-                let Some(Token::StringLit(v)) = self.peek().cloned() else {
-                    return Err(format!(
-                        "expected string literal in literal type `{}`",
-                        name
-                    ));
-                };
-                self.advance();
-                if members.contains(&v) {
-                    return Err(format!(
-                        "duplicate literal {:?} in literal type `{}`",
-                        v, name
-                    ));
+                match self.peek().cloned() {
+                    Some(Token::StringLit(v)) => {
+                        self.advance();
+                        // Explicit duplicate literals in one declaration are
+                        // almost certainly typos; duplicates arising through
+                        // composed unions dedup silently at resolution.
+                        if operands.contains(&UnionOperand::Literal(v.clone())) {
+                            return Err(format!(
+                                "duplicate literal {:?} in literal type `{}`",
+                                v, name
+                            ));
+                        }
+                        operands.push(UnionOperand::Literal(v));
+                    }
+                    Some(Token::Ident(n)) => {
+                        self.advance();
+                        operands.push(UnionOperand::Named(n));
+                    }
+                    _ => {
+                        return Err(format!(
+                            "expected string literal or literal-type name in literal type `{}`",
+                            name
+                        ));
+                    }
                 }
-                members.push(v);
                 if !self.match_token(Token::Pipe) {
                     break;
                 }
             }
             self.consume(Token::Semi, "expected `;` after type declaration")?;
-            return Ok(Decl::TypeAlias(TypeAliasDecl {
-                name: name.clone(),
-                generic_params: Vec::new(),
-                target: Type::LiteralUnion(name, members),
-            }));
+            return Ok(Decl::LiteralUnion(LiteralUnionDecl { name, operands }));
         }
         // A `type` declaration is either a sum type (`type Result<T,E> = Ok(T) | Err(E);`)
         // or an alias to a single type (`type UserId = int;`). A sum type starts

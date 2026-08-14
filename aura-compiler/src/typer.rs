@@ -330,6 +330,8 @@ impl TypeChecker {
                 Decl::Enum(_) => {}
                 Decl::TypeAlias(_) => {}
                 Decl::Newtype(_) => {}
+                // Consumed by alias expansion; never reaches the checker.
+                Decl::LiteralUnion(_) => {}
             }
         }
         Ok(TypedProgram {
@@ -758,6 +760,7 @@ impl TypeChecker {
                 }
                 Decl::TypeAlias(_) => {}
                 Decl::Newtype(_) => {} // registered in the pre-pass above
+                Decl::LiteralUnion(_) => {} // consumed by alias expansion
             }
         }
         self.split_bases(program)?;
@@ -2378,6 +2381,11 @@ impl TypeChecker {
                                     (Type::StringLit(_), Type::StringLit(_)) => true,
                                     (Type::String, Type::LiteralUnion(..)) => true,
                                     (Type::LiteralUnion(_, m), Type::StringLit(v)) => m.contains(v),
+                                    // Two unions compare when they can hold a
+                                    // common member.
+                                    (Type::LiteralUnion(_, a), Type::LiteralUnion(_, b)) => {
+                                        a.iter().any(|m| b.contains(m))
+                                    }
                                     _ => false,
                                 }
                             };
@@ -2536,10 +2544,10 @@ impl TypeChecker {
                         t => Type::Nullable(Box::new(t.clone())),
                     });
                 }
-                // String literals widen to `string` so branches with
-                // different literals unify.
-                let then_ty = if matches!(then_ty, Type::StringLit(_)) { Type::String } else { then_ty };
-                let else_ty = if matches!(else_ty, Type::StringLit(_)) { Type::String } else { else_ty };
+                // Literal marker types widen to their carrier type so
+                // branches with different literals unify.
+                let then_ty = self.resolve_literal(&then_ty);
+                let else_ty = self.resolve_literal(&else_ty);
                 if !self.is_assignable(&then_ty, &else_ty) && !self.is_assignable(&else_ty, &then_ty) {
                     return Err(TypeError(format!(
                         "ternary branches must have compatible types, got {} and {}",
@@ -2662,11 +2670,12 @@ impl TypeChecker {
                         }
                     }
                     
-                    // Type check body. String literals widen to `string` so
-                    // arms with different literals unify.
-                    let body_ty = match self.infer_expr(&arm.body, class, &arm_locals, in_instance, return_ty, generic_params)? {
-                        Type::StringLit(_) => Type::String,
-                        t => t,
+                    // Type check body. Literal marker types (string/int/
+                    // float literals) widen to their carrier type so arms
+                    // with different literals unify.
+                    let body_ty = {
+                        let t = self.infer_expr(&arm.body, class, &arm_locals, in_instance, return_ty, generic_params)?;
+                        self.resolve_literal(&t)
                     };
                     
                     // Check that all arms have compatible types
@@ -3530,6 +3539,13 @@ impl TypeChecker {
             }
             // Widening: a literal-union value is always a valid string.
             (Type::String, Type::LiteralUnion(..)) => return true,
+            // Subset widening: a union flows into another union exactly when
+            // every member it can hold is a member of the target (the rule
+            // that makes composed unions like `type Extended = Direction |
+            // "up";` accept Direction values).
+            (Type::LiteralUnion(_, target_members), Type::LiteralUnion(_, source_members)) => {
+                return source_members.iter().all(|m| target_members.contains(m));
+            }
             _ => {}
         }
         if self.is_numeric(target) && self.is_numeric(source) {

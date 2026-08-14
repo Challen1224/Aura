@@ -2651,6 +2651,9 @@ impl<'a> MethodEmitter<'a> {
                 self.is_subclass_of(source_name, name)
                     || crate::typer::structurally_satisfies(&self.program.classes, source_name, name)
             }
+            (Type::LiteralUnion(_, target_members), Type::LiteralUnion(_, source_members)) => {
+                source_members.iter().all(|m| target_members.contains(m))
+            }
             (Type::String, Type::Class(source_name, _)) if source_name == "null" => true,
             (Type::Enum(a), Type::Enum(b)) => a == b,
             (Type::Class(name, _), Type::Enum(enum_name)) => name == enum_name,
