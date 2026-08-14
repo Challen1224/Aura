@@ -1,0 +1,67 @@
+// Structural interface satisfaction (duck typing).
+//
+// A class that has an interface's methods — same names, same parameter and
+// return types, public instance methods — satisfies the interface without
+// declaring `: IFace`. Interface default methods come along for free.
+// Declared implementations still work exactly as before; structural
+// matching only adds ways to satisfy an interface, never removes checking:
+// a near-miss (wrong signature, missing method) is still a compile error.
+
+interface Speaker {
+    string Speak();
+
+    string Introduce() {
+        return "I say: {this.Speak()}";
+    }
+}
+
+interface Walker {
+    int Steps();
+}
+
+// No implements clause anywhere on these classes.
+class Dog {
+    string Speak() { return "woof"; }
+    int Steps() { return 4; }
+}
+
+class Robot {
+    string Speak() { return "beep"; }
+    int Steps() { return 2; }
+}
+
+class Program {
+    static void Hear(Speaker s) {
+        print(s.Speak());
+        print(" ");
+    }
+
+    static void Main() {
+        Dog d = new Dog();
+        Robot r = new Robot();
+
+        // Structural assignment: Dog and Robot both duck-type as Speaker
+        // and Walker.
+        print("speak: ");
+        Hear(d);
+        Hear(r);
+        println();
+
+        // Default methods reach structural implementers.
+        Speaker s = d;
+        print(s.Introduce());
+        println();
+
+        // Heterogeneous collection typed by interface.
+        List<Walker> walkers = new List<Walker>();
+        walkers.Add(d);
+        walkers.Add(r);
+        int total = 0;
+        for (Walker w in walkers) {
+            total = total + w.Steps();
+        }
+        print("total steps: ");
+        print(total);
+        println();
+    }
+}

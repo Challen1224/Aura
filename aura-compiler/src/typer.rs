@@ -6,6 +6,102 @@ use std::collections::{HashMap, HashSet};
 /// Type substitution map: generic parameter name -> concrete type
 pub type TypeSubst = HashMap<String, Type>;
 
+/// True if class `class_name` structurally satisfies interface `iface_name`
+/// (duck typing): every abstract method of the interface — and of the
+/// interfaces it extends — exists on the class or its superclasses as a
+/// public, non-generic instance method with exactly the same parameter and
+/// return types. Rules, deliberately conservative for v1:
+///
+/// * Exact type matching only — no parameter/return variance.
+/// * Non-generic interfaces only; generic interfaces still require a
+///   declared `: IFace<...>`.
+/// * Sources must be classes (possibly abstract); interface-to-interface
+///   satisfaction stays declaration-based.
+/// * Interface default methods (with bodies) are optional: the emitter
+///   records structural implementations into `ClassDef.interfaces`, so the
+///   runtime inherits default bodies through the same lookup that declared
+///   implementations use.
+/// * Intrinsic stdlib classes (`List` etc.) are excluded — their methods
+///   have no bytecode bodies, so interface-typed dispatch could not reach
+///   them at runtime.
+///
+/// Shared by the type checker (assignability) and the emitter (recording
+/// implementations for runtime type tests) so the two can never disagree.
+pub fn structurally_satisfies(
+    classes: &HashMap<String, ClassInfo>,
+    class_name: &str,
+    iface_name: &str,
+) -> bool {
+    let Some(iface) = classes.get(iface_name) else {
+        return false;
+    };
+    if !iface.is_interface || !iface.generic_params.is_empty() {
+        return false;
+    }
+    let Some(class) = classes.get(class_name) else {
+        return false;
+    };
+    if class.is_interface || crate::intrinsics::is_intrinsic_class(class_name) {
+        return false;
+    }
+
+    // The full requirement set: the interface plus everything it extends.
+    let mut required: Vec<&ClassInfo> = Vec::new();
+    let mut queue = vec![iface_name.to_string()];
+    let mut seen = HashSet::new();
+    while let Some(name) = queue.pop() {
+        if !seen.insert(name.clone()) {
+            continue;
+        }
+        if let Some(info) = classes.get(&name) {
+            if !info.generic_params.is_empty() {
+                return false;
+            }
+            required.push(info);
+            queue.extend(info.interfaces.iter().cloned());
+        }
+    }
+
+    // Look a method up along the class's superclass chain (nearest wins,
+    // mirroring find_method's shadowing behavior).
+    let find_on_class = |method: &str| -> Option<&MethodInfo> {
+        let mut cur = Some(class_name);
+        while let Some(c) = cur {
+            let info = classes.get(c)?;
+            if let Some(mi) = info.methods.get(method) {
+                return Some(mi);
+            }
+            cur = info.super_class.as_deref();
+        }
+        None
+    };
+
+    for info in required {
+        for (name, im) in &info.methods {
+            if !im.is_abstract {
+                continue; // default methods are optional
+            }
+            if !im.generic_params.is_empty() {
+                return false;
+            }
+            let Some(found) = find_on_class(name) else {
+                return false;
+            };
+            // An abstract match is fine: any runtime instance is a concrete
+            // subclass that was forced to override it.
+            if !found.is_instance
+                || found.visibility != Visibility::Public
+                || !found.generic_params.is_empty()
+                || found.params != im.params
+                || found.return_ty != im.return_ty
+            {
+                return false;
+            }
+        }
+    }
+    true
+}
+
 /// Human-readable name for a visibility level, used in diagnostics.
 fn visibility_name(v: Visibility) -> &'static str {
     match v {
@@ -3168,6 +3264,7 @@ impl TypeChecker {
                 // reference — only to `T?` (handled above).
                 // Upcast: a subclass instance is assignable to its base type.
                 self.is_subclass_of(source_name, target_name)
+                    || structurally_satisfies(&self.classes, source_name, target_name)
             }
             (Type::Enum(a), Type::Enum(b)) => a == b,
             (Type::Class(name, _), Type::Enum(enum_name)) => name == enum_name,

@@ -85,7 +85,17 @@
 
 **P1 - High Priority**
 - [ ] **Structural typing**
-  - [ ] Duck typing for interfaces
+  - [x] Duck typing for interfaces — a class whose public, non-generic
+        instance methods exactly match an interface's abstract methods
+        (including its extends-closure) satisfies it without declaring
+        `: IFace`. Default methods are optional and inherited; the emitter
+        records structural implementations into runtime metadata, so
+        catch-by-interface and dispatch agree with the typer. v1 limits,
+        by design: exact signature match (no variance), non-generic
+        interfaces only, classes only as sources (interface-to-interface
+        stays declaration-based), stdlib intrinsics excluded, and a
+        default-method-only interface is satisfied by every class.
+        Verified under both tiers (aura-vm/tests/duck_typing.rs).
   - [x] Type aliases: `type UserId = int;` (parser-level expansion; also
         composes with `?`)
   - [ ] Newtype pattern support

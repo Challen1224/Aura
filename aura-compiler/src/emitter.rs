@@ -385,6 +385,33 @@ impl Emitter {
             }
         }
 
+        // Record structural (duck-typed) interface implementations into each
+        // class's ClassDef.interfaces so runtime type tests (catch matching,
+        // instance-of walks) and interface default-method resolution agree
+        // with the type checker's structural assignability.
+        for decl in &program.program.decls {
+            let Decl::Class(c) = decl else { continue };
+            let Some(info) = program.classes.get(&c.name) else { continue };
+            if info.is_interface {
+                continue;
+            }
+            let class_id = class_ids[&c.name];
+            for other in &program.program.decls {
+                let Decl::Class(i) = other else { continue };
+                let Some(iface_info) = program.classes.get(&i.name) else { continue };
+                if !iface_info.is_interface {
+                    continue;
+                }
+                let iface_id = class_ids[&i.name];
+                let def = module.classes.get_mut(&class_id).unwrap();
+                if !def.interfaces.contains(&iface_id)
+                    && crate::typer::structurally_satisfies(&program.classes, &c.name, &i.name)
+                {
+                    def.interfaces.push(iface_id);
+                }
+            }
+        }
+
         module.entrypoint = entrypoint;
         Ok(module)
     }
@@ -2547,6 +2574,7 @@ impl<'a> MethodEmitter<'a> {
                     return true;
                 }
                 self.is_subclass_of(source_name, name)
+                    || crate::typer::structurally_satisfies(&self.program.classes, source_name, name)
             }
             (Type::String, Type::Class(source_name, _)) if source_name == "null" => true,
             (Type::Enum(a), Type::Enum(b)) => a == b,
