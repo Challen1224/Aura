@@ -76,6 +76,38 @@ pub unsafe fn copy_slot(src: *const Value, dst: *mut Value) {
     std::ptr::copy_nonoverlapping(src as *const u8, dst as *mut u8, 16);
 }
 
+/// Decompose a `Value` into its canonical `(tag, payload)` slot parts.
+///
+/// This must be used whenever a Rust-constructed `Value` is handed to
+/// generated code: a plain Rust assignment only writes the bytes the enum
+/// layout needs (discriminant plus inline data) and leaves the rest of the
+/// 16-byte slot as stale garbage, but generated code reads the tag and
+/// payload as whole qwords and relies on the unused bits being zero.
+pub fn to_parts(v: &Value) -> (u64, u64) {
+    match v {
+        Value::Unit => (TAG_UNIT, 0),
+        Value::Int(i) => (TAG_INT, *i as u64),
+        Value::Float(f) => (TAG_FLOAT, f.to_bits()),
+        Value::Bool(b) => (TAG_BOOL | (*b as u64) << 8, 0),
+        Value::Char(c) => (TAG_CHAR | (*c as u64) << 32, 0),
+        Value::String(GcRef(r)) => (TAG_STRING, *r as u64),
+        Value::Object(GcRef(r)) => (TAG_OBJECT, *r as u64),
+        Value::Enum(GcRef(r)) => (TAG_ENUM, *r as u64),
+        Value::Tuple(GcRef(r)) => (TAG_TUPLE, *r as u64),
+        Value::Null => (TAG_NULL, 0),
+    }
+}
+
+/// Rewrite the `Value` at `ptr` in canonical slot form (all 16 bytes
+/// written, unused bits zeroed). See [`to_parts`].
+///
+/// # Safety
+/// `ptr` must point to a valid, aligned `Value`.
+pub unsafe fn canonicalize(ptr: *mut Value) {
+    let (tag, payload) = to_parts(&*ptr);
+    write_parts(ptr, tag, payload);
+}
+
 /// True if the value slot at `ptr` is an integer.
 ///
 /// # Safety
@@ -139,6 +171,12 @@ pub fn verify_layout() -> Result<(), String> {
             if v != expected {
                 return Err(format!(
                     "round-trip mismatch for {name}: wrote tag {tag:#x} payload {payload:#x}, read back {v:?}"
+                ));
+            }
+            let (ct, cp) = to_parts(&expected);
+            if (ct, cp) != (tag, payload) {
+                return Err(format!(
+                    "to_parts mismatch for {name}: expected ({tag:#x}, {payload:#x}), got ({ct:#x}, {cp:#x})"
                 ));
             }
             Ok(())

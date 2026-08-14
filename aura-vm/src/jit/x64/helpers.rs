@@ -563,6 +563,10 @@ unsafe extern "C" fn dispatcher(nf: *mut NativeFrame, args: *const Value, argc: 
     match exec(vm, &op, &argv) {
         Ok(Some(v)) => {
             nf.result = v;
+            // Rust's enum assignment leaves stale bytes in the unused bits of
+            // the 16-byte slot; generated code reads the tag/payload as whole
+            // qwords, so the slot must be rewritten in canonical form.
+            crate::jit::value::canonicalize(&mut nf.result);
             STATUS_OK
         }
         Ok(None) => STATUS_OK,

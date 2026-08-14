@@ -60,6 +60,10 @@ impl Jit {
             .and_then(|l| l.lower())
             .map_err(CompileError::Unsupported)?;
         super::ir::optimize(&mut func);
+        if std::env::var("AURA_DUMP_IR").is_ok() {
+            eprintln!("=== IR for method {method_id:?} ===\n{}", super::ir::dump(&func));
+            eprintln!("=== local_types={:?} helper_ops={:?}", func.local_types, func.helper_ops);
+        }
         let alloc = allocate(&mut func);
         let code = emit_function(&func, &alloc).map_err(CompileError::Unsupported)?;
         let exec = JitFunction::new(code).map_err(|_| CompileError::OutOfMemory)?;
@@ -112,7 +116,12 @@ impl CompiledMethod {
     pub fn run(&self, vm: &mut Vm, args: &[Value]) -> Result<FrameResult, VmError> {
         vm.call_stack.push(Frame::for_jit(self.method_id, self.locals_count));
 
-        let argv: Vec<Value> = args.to_vec();
+        // The prologue copies these boxes into local slots as raw qwords, so
+        // they must be in canonical slot form (see `value::canonicalize`).
+        let mut argv: Vec<Value> = args.to_vec();
+        for v in argv.iter_mut() {
+            unsafe { super::value::canonicalize(v) };
+        }
         let mut nf = NativeFrame {
             vm: vm as *mut Vm,
             op_id: 0,

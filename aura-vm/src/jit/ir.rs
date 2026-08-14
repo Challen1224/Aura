@@ -300,16 +300,21 @@ impl Function {
     }
 }
 
-/// Per-block analysis state (entry stack height and abstract types).
+/// Per-block analysis state (entry stack height, abstract types, and object
+/// class of each stack slot where known).
 #[derive(Debug, Clone)]
 struct BlockState {
     height: Option<usize>,
     types: Vec<KType>,
+    /// Class of each entry stack slot: `Some` when the value provably belongs
+    /// to a single class (from `new`, `this`, or a typed field), `None` when
+    /// unknown or polymorphic.
+    classes: Vec<Option<ClassId>>,
 }
 
 impl Default for BlockState {
     fn default() -> Self {
-        BlockState { height: None, types: Vec::new() }
+        BlockState { height: None, types: Vec::new(), classes: Vec::new() }
     }
 }
 
@@ -329,11 +334,16 @@ pub struct Lowerer<'a> {
     // Analysis
     state: Vec<BlockState>,
     local_types: Vec<KType>,
+    /// Class of each local (parallel to `local_types`): `Some` when the value
+    /// provably belongs to a single class.
+    local_classes: Vec<Option<ClassId>>,
 
     // Lowering
     func: Function,
     next_vreg: VReg,
     block_params: Vec<Vec<VReg>>,
+    /// Class of each pre-allocated block param (parallel to `block_params`).
+    block_param_classes: Vec<Vec<Option<ClassId>>>,
 }
 
 impl<'a> Lowerer<'a> {
@@ -353,6 +363,7 @@ impl<'a> Lowerer<'a> {
             block_at: HashMap::new(),
             state: Vec::new(),
             local_types: Vec::new(),
+            local_classes: Vec::new(),
             func: Function {
                 method_id,
                 name: String::new(),
@@ -368,6 +379,7 @@ impl<'a> Lowerer<'a> {
             },
             next_vreg: 0,
             block_params: Vec::new(),
+            block_param_classes: Vec::new(),
         })
     }
 
