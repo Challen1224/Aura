@@ -41,7 +41,9 @@ pub const NF_RESULT: i32 = 0x20;
 pub const NF_METHOD_ID: i32 = 0x30;
 pub const NF_HELPERS: i32 = 0x38;
 pub const NF_DISPATCHER: i32 = 0x40;
-pub const NF_SIZE: usize = 0x48;
+pub const NF_FRAME_BASE: i32 = 0x48;
+pub const NF_FRAME_BYTES: i32 = 0x50;
+pub const NF_SIZE: usize = 0x58;
 
 /// Frame shared between the JIT runtime and generated code. A new instance is
 /// set up on the native stack by [`crate::jit::CompiledMethod::run`] and passed
@@ -65,6 +67,12 @@ pub struct NativeFrame {
     pub helpers: *const Vec<Op>,
     /// Address of the [`dispatcher`] stub, called by generated code.
     pub dispatcher: usize,
+    /// Base of the generated code's stack frame (`r13`), stored by the
+    /// prologue. Null until the prologue has run. The GC scans
+    /// `frame_base..frame_base + frame_bytes` conservatively for roots.
+    pub frame_base: *const u8,
+    /// Size in bytes of the generated code's stack frame.
+    pub frame_bytes: usize,
 }
 
 /// Return statuses from the dispatcher / compiled code.
@@ -573,11 +581,20 @@ unsafe extern "C" fn dispatcher(nf: *mut NativeFrame, args: *const Value, argc: 
             // the 16-byte slot; generated code reads the tag/payload as whole
             // qwords, so the slot must be rewritten in canonical form.
             crate::jit::value::canonicalize(&mut nf.result);
+            // Safepoint: the result is rooted via nf.result and all other
+            // live references sit in frame slots, so a deferred collection
+            // is safe before returning to generated code.
+            vm.maybe_collect();
             STATUS_OK
         }
-        Ok(None) => STATUS_OK,
+        Ok(None) => {
+            vm.maybe_collect();
+            STATUS_OK
+        }
         Err(Ok(exc)) => {
             nf.result = exc;
+            crate::jit::value::canonicalize(&mut nf.result);
+            vm.maybe_collect();
             STATUS_EXCEPTION
         }
         Err(Err(e)) => error(vm, e),

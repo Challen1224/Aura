@@ -15,7 +15,7 @@
 use super::asm::regs::{RAX, RBP, RBX, RCX, RDX, RDI, R10, R11, R13, R14, R15, RSI, RSP};
 use super::asm::xmms::XMM0;
 use super::asm::{Asm, Cond, Gpr, Label, Mem, Xmm};
-use super::helpers::{NF_DISPATCHER, NF_OP, NF_RESULT, NF_VM, raise_overflow_addr};
+use super::helpers::{NF_DISPATCHER, NF_FRAME_BASE, NF_OP, NF_RESULT, NF_VM, raise_overflow_addr};
 use crate::jit::ir::{BinOp, Block, ConvTarget, Function, Insn, KType, Term, UnOp, VReg};
 use super::regalloc::{Allocation, Home, SLOT_BYTES};
 
@@ -27,9 +27,13 @@ pub const STATUS_EXCEPTION: u64 = 1;
 pub const STATUS_ERROR: u64 = 2;
 
 /// Generate machine code for `func`, using the homes from `alloc`.
-pub fn emit_function(func: &Function, alloc: &Allocation) -> Result<Vec<u8>, String> {
+/// Emit machine code for `func`. Returns the code bytes and the size of the
+/// generated code's stack frame in bytes (the region the GC scans for roots).
+pub fn emit_function(func: &Function, alloc: &Allocation) -> Result<(Vec<u8>, usize), String> {
     let mut cg = Codegen::new(func, alloc)?;
-    cg.emit()
+    let frame_bytes = cg.frame;
+    let code = cg.emit()?;
+    Ok((code, frame_bytes))
 }
 
 struct Codegen<'a> {
@@ -141,8 +145,10 @@ impl<'a> Codegen<'a> {
         self.asm.sub_rsp_imm(self.frame as u32);
         self.asm.mov_rr(R13, RSP);
 
-        // Save the native frame pointer passed in rdi.
+        // Save the native frame pointer passed in rdi, and publish this
+        // frame's base into the NativeFrame so the GC can scan its slots.
         self.asm.mov_mr(Mem::new(R13, self.nf_slot), RDI);
+        self.asm.mov_mr(Mem::new(RDI, NF_FRAME_BASE), R13);
 
         // Copy the parameter boxes from argv (rsi) into the local slots.
         let params = self.func.params;

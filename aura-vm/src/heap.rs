@@ -30,6 +30,14 @@ pub struct Heap {
     allocated: usize,
     /// Threshold that triggers the next collection.
     threshold: usize,
+    /// Set when `allocated` crosses `threshold`; the VM collects at its next
+    /// safepoint. Allocation never collects inline, because callers routinely
+    /// hold freshly-allocated handles in Rust locals the collector cannot see.
+    gc_pending: bool,
+    /// Number of collections run (for tests and diagnostics).
+    collections: u64,
+    /// Total objects ever allocated (monotonic; for tests and diagnostics).
+    total_allocations: u64,
 }
 
 #[derive(Debug, Clone)]
@@ -51,7 +59,38 @@ impl Heap {
             objects: HashMap::new(),
             allocated: 0,
             threshold,
+            gc_pending: false,
+            collections: 0,
+            total_allocations: 0,
         }
+    }
+
+    /// Replace the collection threshold (also re-arms the pending check).
+    pub fn set_threshold(&mut self, threshold: usize) {
+        self.threshold = threshold;
+        if self.allocated >= self.threshold {
+            self.gc_pending = true;
+        }
+    }
+
+    /// True if a collection should run at the next safepoint.
+    pub fn needs_collect(&self) -> bool {
+        self.gc_pending
+    }
+
+    /// Number of collections run so far.
+    pub fn collections(&self) -> u64 {
+        self.collections
+    }
+
+    /// Total number of objects ever allocated (monotonic).
+    pub fn total_allocations(&self) -> u64 {
+        self.total_allocations
+    }
+
+    /// True if `handle` refers to a live object.
+    pub fn contains(&self, handle: GcRef) -> bool {
+        self.objects.contains_key(&handle)
     }
 
     /// Allocate a new object on the heap.
@@ -67,9 +106,12 @@ impl Heap {
             },
         );
 
+        self.total_allocations += 1;
         if self.allocated >= self.threshold {
-            // A real VM would invoke GC here. We expose `collect` explicitly
-            // so the VM can provide root references safely.
+            // Don't collect here: the caller may hold unrooted handles in
+            // Rust locals. Flag the need and let the VM collect at a
+            // safepoint where every live reference is visible.
+            self.gc_pending = true;
         }
 
         handle
@@ -142,7 +184,9 @@ impl Heap {
         });
 
         self.allocated = self.objects.values().map(|ho| Self::approx_size(&ho.object)).sum();
-        self.threshold = (self.allocated * 2).max(DEFAULT_GC_THRESHOLD);
+        self.threshold = (self.allocated * 2).max(self.threshold.min(DEFAULT_GC_THRESHOLD)).max(1);
+        self.gc_pending = self.allocated >= self.threshold;
+        self.collections += 1;
     }
 
     /// Number of live objects.

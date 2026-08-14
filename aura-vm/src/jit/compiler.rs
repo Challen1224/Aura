@@ -65,13 +65,14 @@ impl Jit {
             eprintln!("=== local_types={:?} helper_ops={:?}", func.local_types, func.helper_ops);
         }
         let alloc = allocate(&mut func);
-        let code = emit_function(&func, &alloc).map_err(CompileError::Unsupported)?;
+        let (code, frame_bytes) = emit_function(&func, &alloc).map_err(CompileError::Unsupported)?;
         let exec = JitFunction::new(code).map_err(|_| CompileError::OutOfMemory)?;
         let compiled = Arc::new(CompiledMethod {
             method_id,
             locals_count: func.locals,
             helpers: func.helper_ops,
             code: exec,
+            frame_bytes,
         });
         self.cache
             .lock()
@@ -100,6 +101,8 @@ pub struct CompiledMethod {
     /// Ops the generated code dispatches to by index (`NativeFrame.helpers`).
     helpers: Vec<Op>,
     code: JitFunction,
+    /// Stack frame size of the generated code (GC root-scan region).
+    frame_bytes: usize,
 }
 
 impl CompiledMethod {
@@ -131,8 +134,14 @@ impl CompiledMethod {
             method_id: self.method_id,
             helpers: &self.helpers as *const Vec<Op>,
             dispatcher: dispatcher_addr(),
+            // The prologue publishes the real frame base; null until then.
+            frame_base: std::ptr::null(),
+            frame_bytes: self.frame_bytes,
         };
 
+        // Register this frame so GC safepoints reached while the native code
+        // runs (always inside helper calls) can scan its slots for roots.
+        vm.jit_frames.push(&nf as *const NativeFrame);
         let status = unsafe {
             self.code.call_abi(&[
                 &mut nf as *mut NativeFrame as u64,
@@ -140,6 +149,7 @@ impl CompiledMethod {
                 argv.len() as u64,
             ])
         };
+        vm.jit_frames.pop();
 
         vm.call_stack.pop();
 

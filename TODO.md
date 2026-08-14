@@ -1,8 +1,10 @@
 # Aura Language TODO
 
 > **Status:** Core language and compiler: usable. VM with baseline x86-64
-> JIT: implemented; static, virtual, and super calls all tier up to the JIT
-> (GC exists but is never triggered — see §2.1). Stdlib: collections
+> JIT: implemented; static, virtual, and super calls all tier up. GC now
+> actually runs: threshold-triggered, safepoint-based mark-and-sweep,
+> collecting under both tiers (JIT frames scanned conservatively — see
+> §2.1; generational/weak-ref work unstarted). Stdlib: collections
 > (`List`/`Map`/`Set`), string methods, `Console.ReadLine`, and text `File`
 > I/O are implemented and verified under both interpreter and JIT, including
 > mid-run tier transitions; still missing: networking, async, reflection,
@@ -552,11 +554,20 @@
 - [x] Mark-and-sweep collector implementation (`Heap::collect`)
 - [x] Object allocation
 - [x] Reference tracking
-- [ ] **GC triggering** — `Heap::allocate` tracks a threshold but never
-      invokes `collect`, and nothing else calls it either: memory grows
-      unboundedly today. Wiring this up needs a root-set walk at safepoints,
-      and JIT frames keep locals in native stack slots the GC cannot see —
-      both must be solved together.
+- [x] **GC triggering (safepoint-based)** — crossing the allocation
+      threshold sets a pending flag; collection runs at safepoints (top of
+      the interpreter op loop, and in the JIT helper dispatcher after each
+      helper), never inside `allocate` itself, because natives hold
+      unrooted handles in Rust locals mid-operation. Roots: frame locals,
+      eval stacks, deferred `finally` exceptions, static fields, and JIT
+      native frames. JIT frames are scanned **conservatively**: reference
+      values are always `KType::Unknown` and therefore always live in
+      canonical 16-byte frame slots (never registers), so any slot with a
+      reference tag and a live handle payload is a root. This can
+      over-retain (a stale slot pins a dead object until the frame exits)
+      but never frees a live object. Verified: collections run mid-program
+      under both tiers, including while JIT frames are on the native stack
+      (aura-vm/tests/gc.rs).
 
 #### ⏳ Planned
 

@@ -213,6 +213,10 @@ pub struct Frame {
     /// True for frames of JIT-compiled methods (kept on the call stack so
     /// stack traces include them, but never dispatched by the interpreter).
     is_jit: bool,
+    /// Exception deferred while this frame runs a `finally` block
+    /// (re-raised by `EndFinally`). Kept on the frame rather than in a Rust
+    /// local so the GC can root it.
+    after_finally: Option<Value>,
 }
 
 impl Frame {
@@ -226,6 +230,7 @@ impl Frame {
             locals,
             stack: Vec::new(),
             is_jit: false,
+            after_finally: None,
         }
     }
 
@@ -239,6 +244,7 @@ impl Frame {
             locals: vec![Value::Unit; locals_count as usize],
             stack: Vec::new(),
             is_jit: true,
+            after_finally: None,
         }
     }
 
@@ -277,6 +283,11 @@ pub struct Vm {
     pub(crate) jit_failed: HashSet<(MethodId, bool)>,
     /// Compilation threshold in interpreter invocations.
     pub(crate) jit_threshold: u64,
+    /// Native frames of JIT methods currently on the call stack, innermost
+    /// last. Registered by `CompiledMethod::run` so the collector can scan
+    /// their slot memory conservatively for roots.
+    #[cfg(target_arch = "x86_64")]
+    pub(crate) jit_frames: Vec<*const jit::helpers::NativeFrame>,
 }
 
 impl Vm {
@@ -301,6 +312,8 @@ impl Vm {
             call_counts: HashMap::new(),
             jit_failed: HashSet::new(),
             jit_threshold: jit::JIT_THRESHOLD,
+            #[cfg(target_arch = "x86_64")]
+            jit_frames: Vec::new(),
         }
     }
 
@@ -396,11 +409,79 @@ impl Vm {
         &self.heap
     }
 
+    /// Replace the GC trigger threshold (approximate heap bytes).
+    pub fn set_gc_threshold(&mut self, bytes: usize) {
+        self.heap.set_threshold(bytes);
+    }
+
+    /// Number of garbage collections run so far.
+    pub fn gc_collections(&self) -> u64 {
+        self.heap.collections()
+    }
+
+    /// Run a deferred garbage collection if the heap requested one.
+    ///
+    /// Must only be called at safepoints: moments when every live reference
+    /// is reachable from the VM (frame locals/eval stacks/`after_finally`,
+    /// static fields) or from an active JIT native frame. JIT frames are
+    /// scanned conservatively: reference-typed values are always
+    /// `KType::Unknown` in the JIT and therefore always live in canonical
+    /// 16-byte frame slots (never registers — see regalloc), so any slot
+    /// whose tag qword is a reference tag and whose payload is a live handle
+    /// is treated as a root. This can over-retain (a stale slot pins a dead
+    /// object until the frame exits) but can never free a live one.
+    pub(crate) fn maybe_collect(&mut self) {
+        if !self.heap.needs_collect() {
+            return;
+        }
+        let mut roots: Vec<GcRef> = Vec::new();
+        for frame in &self.call_stack {
+            for v in frame
+                .locals
+                .iter()
+                .chain(frame.stack.iter())
+                .chain(frame.after_finally.iter())
+            {
+                roots.extend(v.contained_refs());
+            }
+        }
+        for values in self.static_fields.values() {
+            for v in values {
+                roots.extend(v.contained_refs());
+            }
+        }
+        #[cfg(target_arch = "x86_64")]
+        for &nf_ptr in &self.jit_frames {
+            // SAFETY: each pointer is registered by `CompiledMethod::run` for
+            // exactly the dynamic extent of the native call, so the frame and
+            // its slot memory are alive while it is on this list.
+            unsafe {
+                let nf = &*nf_ptr;
+                roots.extend(nf.result.contained_refs());
+                let base = nf.frame_base;
+                if !base.is_null() {
+                    for i in 0..nf.frame_bytes / 16 {
+                        let slot = base.add(i * 16) as *const u64;
+                        let tag = slot.read_unaligned();
+                        // Canonical reference tags: String=5, Object=6,
+                        // Enum=7, Tuple=8 (exact, no packed data bits).
+                        if (5..=8).contains(&tag) {
+                            let handle = GcRef(slot.add(1).read_unaligned() as usize);
+                            if self.heap.contains(handle) {
+                                roots.push(handle);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        self.heap.collect(&roots);
+    }
+
     fn execute_frame(&mut self, method: MethodDef) -> Result<FrameResult, VmError> {
         let mut pending: Option<Value> = None;
         // Captured once: overflow_checks only changes between runs.
         let overflow_checks = self.overflow_checks;
-        let mut after_finally: Option<Value> = None;
         loop {
             if let Some(exc) = pending.take() {
                 let instr_pc = self.current_frame().pc.saturating_sub(1) as u32;
@@ -414,8 +495,9 @@ impl Vm {
                         frame.pc = h.handler_pc as usize;
                     }
                     Some(h) => {
-                        after_finally = Some(exc);
-                        self.current_frame().pc = h.handler_pc as usize;
+                        let frame = self.current_frame();
+                        frame.after_finally = Some(exc);
+                        frame.pc = h.handler_pc as usize;
                     }
                     None => {
                         self.call_stack.pop();
@@ -424,6 +506,11 @@ impl Vm {
                 }
                 continue;
             }
+
+            // Safepoint: `pending` is always None here, every live value sits
+            // in frame locals/stacks (or JIT frame slots), so a deferred
+            // collection is safe to run now.
+            self.maybe_collect();
 
             let op = {
                 let frame = self.current_frame();
@@ -823,11 +910,11 @@ impl Vm {
                 Op::Throw => {
                     let exc = self.pop()?;
                     self.attach_stack_trace(&exc);
-                    after_finally = None;
+                    self.current_frame().after_finally = None;
                     pending = Some(exc);
                 }
                 Op::EndFinally => {
-                    if let Some(exc) = after_finally.take() {
+                    if let Some(exc) = self.current_frame().after_finally.take() {
                         pending = Some(exc);
                     }
                 }
