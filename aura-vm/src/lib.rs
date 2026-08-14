@@ -608,13 +608,13 @@ impl Vm {
                     }
                 }
                 Op::Call(id) => {
-                    let (params_len, locals) = {
-                        let m = self.resolve_method(id)?;
-                        (m.params.len(), m.locals)
-                    };
+                    // Dispatch through invoke_frame so static calls count
+                    // toward the JIT threshold like virtual/super calls do;
+                    // its interpreter path is identical to pushing the frame
+                    // and running it directly.
+                    let params_len = self.resolve_method(id)?.params.len();
                     let args = self.pop_args(params_len)?;
-                    self.call_stack.push(Frame::new(id, args, locals));
-                    match self.run_frame()? {
+                    match self.invoke_frame(id, args)? {
                         FrameResult::Normal(v) => self.push(v),
                         FrameResult::Exception(e) => pending = Some(e),
                     }

@@ -10,11 +10,15 @@ use aura_vm::{Vm, VmError};
 use std::sync::Arc;
 
 fn run(source: &str, jit: bool) -> Result<(i64, usize), VmError> {
+    run_with_threshold(source, jit, 1)
+}
+
+fn run_with_threshold(source: &str, jit: bool, threshold: u64) -> Result<(i64, usize), VmError> {
     let module = Arc::new(compile(source, "test").expect("compile"));
     let mut vm = Vm::new(module);
     if jit {
         vm.enable_jit();
-        vm.set_jit_threshold(1);
+        vm.set_jit_threshold(threshold);
     }
     let result = vm.run()?;
     let compiled = vm.jit_compiled_count();
@@ -204,6 +208,46 @@ class Program {
 "#;
     // 2 * sum(i^2, 1..20) = 2 * 2870 = 5740.
     assert_parity(src, 5740);
+}
+
+#[test]
+fn file_io_hot_loop() {
+    // A helper method doing file I/O is called 50 times with a JIT threshold
+    // of 10, so it transitions from interpreted to JIT-compiled mid-run —
+    // the hand-off path that has broken before (see jit_field_type.rs).
+    // Distinct file name so parallel tests cannot collide.
+    let src = r#"
+class Program {
+    static int RoundTrip(int i) {
+        string path = "/tmp/aura_parity_file_io_hot.txt";
+        File.WriteAllText(path, "value\n{i * 3}");
+        List<string> lines = File.ReadAllLines(path);
+        int parsed = lines.Get(1).ToInt();
+        File.AppendAllText(path, "\nextra");
+        string all = File.ReadAllText(path);
+        int bonus = 0;
+        if (File.Exists(path)) { bonus = 1; }
+        File.Delete(path);
+        return parsed + all.Length - lines.Count + bonus;
+    }
+    static int Main() {
+        int total = 0;
+        int i = 0;
+        while (i < 50) {
+            total = total + RoundTrip(i);
+            i = i + 1;
+        }
+        return total;
+    }
+}
+"#;
+    let (interp, _) = run_with_threshold(src, false, 10).expect("interpreter should run");
+    let (jit, compiled) = run_with_threshold(src, true, 10).expect("jit should run");
+    assert_eq!(jit, interp, "jit must match interpreter");
+    #[cfg(target_arch = "x86_64")]
+    assert!(compiled > 0, "expected RoundTrip to compile (got {compiled})");
+    #[cfg(not(target_arch = "x86_64"))]
+    let _ = compiled;
 }
 
 #[test]

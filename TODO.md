@@ -1,9 +1,12 @@
 # Aura Language TODO
 
 > **Status:** Core language and compiler: usable. VM with baseline x86-64
-> JIT: implemented (GC exists but is never triggered — see §2.1). Stdlib:
-> basics usable — `List`/`Map`/`Set`, string methods, `Console.ReadLine`,
-> text `File` I/O (native-backed; see §4 caveats). Tooling: early.  
+> JIT: implemented; static, virtual, and super calls all tier up to the JIT
+> (GC exists but is never triggered — see §2.1). Stdlib: collections
+> (`List`/`Map`/`Set`), string methods, `Console.ReadLine`, and text `File`
+> I/O are implemented and verified under both interpreter and JIT, including
+> mid-run tier transitions; still missing: networking, async, reflection,
+> binary I/O, string builder/formatting (see §4). Tooling: early.  
 > **Last Updated:** 2026-08-13  
 > **Current Version:** 0.27.0
 

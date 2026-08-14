@@ -1,0 +1,59 @@
+// Stdlib I/O: Console.ReadLine and the File class.
+//
+// Run with input piped to stdin, e.g.:
+//   printf 'ada\n7\n' | aura run examples/stdlib_io.aura
+
+class Program {
+    static void Main() {
+        // Console input. ReadLine returns null at end of input.
+        print("name? ");
+        string name = Console.ReadLine();
+        if (name == null) {
+            print("(no input; using 'world')");
+            println();
+            name = "world";
+        }
+        print("hello, ");
+        print(name);
+        println();
+
+        print("number? ");
+        string raw = Console.ReadLine();
+        if (raw != null) {
+            print("doubled: ");
+            print(raw.Trim().ToInt() * 2);
+            println();
+        }
+
+        // File round-trip: write, append, read back, clean up.
+        string path = "stdlib_io_example.txt";
+        File.WriteAllText(path, "first line\nsecond line");
+        File.AppendAllText(path, "\nthird line");
+
+        print("exists: ");
+        print(File.Exists(path));
+        println();
+
+        string all = File.ReadAllText(path);
+        print("chars: ");
+        print(all.Length);
+        println();
+
+        List<string> lines = File.ReadAllLines(path);
+        print("lines: ");
+        print(lines.Count);
+        println();
+        int i = 0;
+        while (i < lines.Count) {
+            print("  ");
+            print(lines.Get(i));
+            println();
+            i = i + 1;
+        }
+
+        File.Delete(path);
+        print("cleaned up: ");
+        print(!File.Exists(path));
+        println();
+    }
+}
