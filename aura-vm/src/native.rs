@@ -356,6 +356,17 @@ pub(crate) fn exec_native(vm: &mut Vm, id: NativeId, args: &[Value]) -> Result<V
                 .map_err(|_| VmError::Runtime(format!("{}: cannot parse `{}` as float", id.name(), s)))
         }
 
+        // ---------------- Core language support ----------------
+        NativeId::AssertNonNull => {
+            if matches!(args[0], Value::Null) {
+                Err(VmError::Runtime(
+                    "null assertion failed: value is null".to_string(),
+                ))
+            } else {
+                Ok(args[0].clone())
+            }
+        }
+
         // ---------------- Console ----------------
         NativeId::ConsoleReadLine => {
             let mut line = String::new();

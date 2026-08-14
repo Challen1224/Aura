@@ -296,6 +296,8 @@ pub enum Type {
     GenericParam(String),
     /// Tuple type (e.g., `(int, string)`).
     Tuple(Vec<Type>),
+    /// Nullable type: `T?`. Only nullable types may hold `null`.
+    Nullable(Box<Type>),
     /// Untyped integer literal carrying its value. Only ever inferred; never
     /// written in source. Used to allow literals to coerce to any integer type
     /// whose range fits the value.
@@ -334,6 +336,7 @@ impl Type {
             Type::Tuple(types) => {
                 format!("({})", types.iter().map(|t| t.name()).collect::<Vec<_>>().join(", "))
             }
+            Type::Nullable(inner) => format!("{}?", inner.name()),
             Type::IntLit(v) => format!("int literal {}", v),
             Type::FloatLit(_) => "float literal".to_string(),
         }
@@ -520,6 +523,9 @@ pub enum Expr {
     Range(Box<Expr>, Box<Expr>, bool),
     /// Null coalescing: `a ?? b` returns `a` if not null, else `b`.
     NullCoalesce(Box<Expr>, Box<Expr>),
+    /// Non-null assertion: `value!`. Asserts a nullable value is non-null,
+    /// raising a runtime error if it is null.
+    NonNullAssert(Box<Expr>),
     /// Null conditional field access: `a?.field` returns null if `a` is null.
     NullConditionalField(Box<Expr>, String),
     /// Null conditional method call: `a?.method()` returns null if `a` is null.

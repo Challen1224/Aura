@@ -258,6 +258,7 @@ fn write_type<W: Write>(w: &mut W, t: &TypeDesc) -> io::Result<()> {
         TypeDesc::GenericParam(_) => 15,
         TypeDesc::Enum(_) => 16,
         TypeDesc::Tuple(_) => 17,
+        TypeDesc::Nullable(_) => 19,
     };
     write_u8(w, tag)?;
     match t {
@@ -273,6 +274,9 @@ fn write_type<W: Write>(w: &mut W, t: &TypeDesc) -> io::Result<()> {
         }
         TypeDesc::Tuple(types) => {
             write_vec(w, types, |w, ty| write_type(w, ty))?;
+        }
+        TypeDesc::Nullable(inner) => {
+            write_type(w, inner)?;
         }
         _ => {}
     }
@@ -305,6 +309,7 @@ fn read_type<R: Read>(r: &mut R) -> io::Result<TypeDesc> {
         15 => TypeDesc::GenericParam(read_u32(r)?),
         16 => TypeDesc::Enum(EnumId(read_u32(r)?)),
         17 => TypeDesc::Tuple(read_vec(r, |r| read_type(r))?),
+        19 => TypeDesc::Nullable(Box::new(read_type(r)?)),
         _ => return Err(io::Error::new(io::ErrorKind::InvalidData, "bad type tag")),
     })
 }
@@ -606,6 +611,14 @@ fn encode_type_args(type_args: &[TypeDesc]) -> Vec<u8> {
                 v.extend(id.0.to_le_bytes());
                 13
             }
+            TypeDesc::Nullable(inner) => {
+                // Marker tag, then the inner type through the same scheme
+                // (one-element encoding minus its length prefix).
+                v.push(19);
+                let inner_bytes = encode_type_args(std::slice::from_ref(inner));
+                v.extend(&inner_bytes[4..]);
+                continue;
+            }
             TypeDesc::Null => 14,
             TypeDesc::GenericParam(idx) => {
                 v.extend(idx.to_le_bytes());
@@ -624,6 +637,33 @@ fn encode_type_args(type_args: &[TypeDesc]) -> Vec<u8> {
         v.push(tag);
     }
     v
+}
+
+fn decode_type_args_one<R: Read>(r: &mut R) -> io::Result<TypeDesc> {
+    let tag = read_u8(r)?;
+    Ok(match tag {
+        0 => TypeDesc::Unit,
+        1 => TypeDesc::Int8,
+        2 => TypeDesc::Int16,
+        3 => TypeDesc::Int32,
+        4 => TypeDesc::Int64,
+        5 => TypeDesc::UInt8,
+        6 => TypeDesc::UInt16,
+        7 => TypeDesc::UInt32,
+        8 => TypeDesc::UInt64,
+        9 => TypeDesc::Float32,
+        10 => TypeDesc::Float64,
+        11 => TypeDesc::Bool,
+        18 => TypeDesc::Char,
+        12 => TypeDesc::String,
+        13 => TypeDesc::Class(ClassId(read_u32(r)?), vec![]),
+        14 => TypeDesc::Null,
+        15 => TypeDesc::GenericParam(read_u32(r)?),
+        16 => TypeDesc::Enum(EnumId(read_u32(r)?)),
+        17 => TypeDesc::Tuple(vec![]),
+        19 => TypeDesc::Nullable(Box::new(decode_type_args_one(r)?)),
+        _ => return Err(io::Error::new(io::ErrorKind::InvalidData, "bad type tag")),
+    })
 }
 
 fn decode_type_args<R: Read>(r: &mut R) -> io::Result<Vec<TypeDesc>> {
@@ -654,6 +694,10 @@ fn decode_type_args<R: Read>(r: &mut R) -> io::Result<Vec<TypeDesc>> {
             15 => TypeDesc::GenericParam(read_u32(r)?),
             16 => TypeDesc::Enum(EnumId(read_u32(r)?)),
             17 => TypeDesc::Tuple(vec![]), // Simplified: empty tuple for now
+            19 => {
+                let inner = decode_type_args_one(r)?;
+                TypeDesc::Nullable(Box::new(inner))
+            }
             _ => return Err(io::Error::new(io::ErrorKind::InvalidData, "bad type tag")),
         };
         args.push(arg);

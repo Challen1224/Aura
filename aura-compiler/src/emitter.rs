@@ -1156,6 +1156,10 @@ impl<'a> MethodEmitter<'a> {
 
     fn emit_expr(&mut self, expr: &Expr) -> Result<(), String> {
         match expr {
+            Expr::NonNullAssert(inner) => {
+                self.emit_expr(inner)?;
+                self.ops.push(Op::NativeCall(aura_bytecode::natives::NativeId::AssertNonNull as u16));
+            }
             Expr::IntLit(i, _) => self.emit_int_const(*i),
             Expr::FloatLit(f, suffix) => {
                 let idx = self.constants.len() as u32;
@@ -2040,7 +2044,7 @@ impl<'a> MethodEmitter<'a> {
         body: &[Stmt],
     ) -> Result<(), String> {
         use aura_bytecode::natives::NativeId;
-        let iter_ty = self.expr_ty(iterable)?;
+        let iter_ty = Self::strip_nullable(self.expr_ty(iterable)?);
         let is_set = matches!(&iter_ty, Type::Class(n, _) if n == "Set");
         if !matches!(&iter_ty, Type::Class(n, _) if n == "List" || n == "Set") {
             return Err(format!(
@@ -2143,7 +2147,7 @@ impl<'a> MethodEmitter<'a> {
         let Ok(target_ty) = self.expr_ty(target) else {
             return Ok(None);
         };
-        let native = match &target_ty {
+        let native = match &Self::strip_nullable(target_ty) {
             Type::String => crate::intrinsics::string_method(&call.method).map(|m| m.native),
             Type::Class(name, _) => crate::intrinsics::method(name, &call.method).map(|m| m.native),
             _ => None,
@@ -2166,7 +2170,7 @@ impl<'a> MethodEmitter<'a> {
         let Ok(obj_ty) = self.expr_ty(obj) else {
             return Ok(None);
         };
-        let native = match &obj_ty {
+        let native = match &Self::strip_nullable(obj_ty) {
             Type::String => crate::intrinsics::string_property(name).map(|p| p.native),
             Type::Class(cname, _) => crate::intrinsics::property(cname, name).map(|p| p.native),
             _ => None,
@@ -2180,6 +2184,15 @@ impl<'a> MethodEmitter<'a> {
         }
     }
 
+    /// Erase nullability for dispatch: the typer has already enforced
+    /// null-safety, and values of `T?` and `T` are identical at runtime.
+    fn strip_nullable(ty: Type) -> Type {
+        match ty {
+            Type::Nullable(inner) => *inner,
+            t => t,
+        }
+    }
+
     fn expr_class(&self, expr: &Expr) -> Option<String> {
         match expr {
             Expr::Var(name) => {
@@ -2190,19 +2203,20 @@ impl<'a> MethodEmitter<'a> {
                         Some(self.class_name.to_string())
                     }
                 } else {
-                    match self.local_types.get(name) {
-                        Some(Type::Class(c, _)) => Some(c.clone()),
+                    match self.local_types.get(name).cloned().map(Self::strip_nullable) {
+                        Some(Type::Class(c, _)) => Some(c),
                         _ => None,
                     }
                 }
             }
             Expr::New(class_name, _, _) => Some(class_name.clone()),
+            Expr::NonNullAssert(inner) => self.expr_class(inner),
             Expr::Field(obj, name) => {
                 let owner = self.expr_class(obj)?;
                 let layout = self.field_layout.get(&owner)?;
                 let idx = layout.iter().rposition(|(n, _)| n == name)?;
-                match &layout[idx].1 {
-                    Type::Class(c, _) => Some(c.clone()),
+                match Self::strip_nullable(layout[idx].1.clone()) {
+                    Type::Class(c, _) => Some(c),
                     _ => None,
                 }
             }
@@ -2321,7 +2335,7 @@ impl<'a> MethodEmitter<'a> {
             Expr::Field(obj, name) => {
                 // Intrinsic properties (`list.Count`, `s.Length`).
                 if let Ok(obj_ty) = self.expr_ty(obj) {
-                    let prop = match &obj_ty {
+                    let prop = match &Self::strip_nullable(obj_ty) {
                         Type::String => crate::intrinsics::string_property(name),
                         Type::Class(cname, _) => crate::intrinsics::property(cname, name),
                         _ => None,
@@ -2393,6 +2407,32 @@ impl<'a> MethodEmitter<'a> {
             Expr::Call(call) => {
                 self.call_return_type(call)?
             }
+            Expr::NonNullAssert(inner) => {
+                match self.expr_ty(inner)? {
+                    Type::Nullable(t) => *t,
+                    t => t,
+                }
+            }
+            Expr::NullCoalesce(left, right) => {
+                match self.expr_ty(left)? {
+                    Type::Nullable(t) => {
+                        if matches!(self.expr_ty(right), Ok(Type::Nullable(_))) {
+                            Type::Nullable(t)
+                        } else {
+                            *t
+                        }
+                    }
+                    _ => self.expr_ty(right)?,
+                }
+            }
+            Expr::Ternary(_, then_expr, else_expr) => {
+                let t = self.expr_ty(then_expr)?;
+                if matches!(&t, Type::Class(n, _) if n == "null") {
+                    self.expr_ty(else_expr)?
+                } else {
+                    t
+                }
+            }
             _ => Type::Class("null".to_string(), Vec::new()),
         };
         Ok(ty)
@@ -2412,7 +2452,7 @@ impl<'a> MethodEmitter<'a> {
                     class_name = c.clone();
                     is_instance = false;
                 } else {
-                    let obj_ty = self.expr_ty(target)?;
+                    let obj_ty = Self::strip_nullable(self.expr_ty(target)?);
                     if obj_ty == Type::String {
                         return crate::intrinsics::string_method(&call.method)
                             .map(|m| m.return_ty)
@@ -2426,7 +2466,7 @@ impl<'a> MethodEmitter<'a> {
                     is_instance = true;
                 }
             } else {
-                let obj_ty = self.expr_ty(target)?;
+                let obj_ty = Self::strip_nullable(self.expr_ty(target)?);
                 if obj_ty == Type::String {
                     return crate::intrinsics::string_method(&call.method)
                         .map(|m| m.return_ty)
@@ -2490,6 +2530,13 @@ impl<'a> MethodEmitter<'a> {
     fn is_assignable(&self, target: &Type, source: &Type) -> bool {
         if target == source {
             return true;
+        }
+        match (target, source) {
+            (Type::Nullable(t), Type::Nullable(s)) => return self.is_assignable(t, s),
+            (Type::Nullable(_), Type::Class(sn, _)) if sn == "null" => return true,
+            (Type::Nullable(t), s) => return self.is_assignable(t, s),
+            (_, Type::Nullable(_)) => return false,
+            _ => {}
         }
         if target.is_numeric() && source.is_numeric() {
             return self.numeric_widening(target, source);
@@ -2658,6 +2705,7 @@ fn arith_conv(ty: &Type) -> Option<TypeDesc> {
 
 fn map_type(ty: &Type, class_ids: &HashMap<String, ClassId>, enum_ids: &HashMap<String, EnumId>, generic_params: &[aura_bytecode::GenericParam]) -> TypeDesc {
     match ty {
+        Type::Nullable(inner) => TypeDesc::Nullable(Box::new(map_type(inner, class_ids, enum_ids, generic_params))),
         Type::Unit => TypeDesc::Unit,
         // Literal marker types only exist transiently during type checking and
         // never reach code emission.

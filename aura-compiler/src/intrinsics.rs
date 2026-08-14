@@ -121,7 +121,12 @@ pub fn classes() -> Vec<IntrinsicClass> {
             generic_params: &[],
             constructor: None,
             methods: vec![],
-            static_methods: vec![m("ReadLine", vec![], Type::String, ConsoleReadLine)],
+            static_methods: vec![m(
+                "ReadLine",
+                vec![],
+                Type::Nullable(Box::new(Type::String)),
+                ConsoleReadLine,
+            )],
             properties: vec![],
         },
         IntrinsicClass {

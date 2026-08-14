@@ -103,6 +103,9 @@ natives! {
     // Console
     ConsoleReadLine = 90, "Console.ReadLine", arity 0;
 
+    // Core language support
+    AssertNonNull = 110, "non-null assertion", arity 1;
+
     // File
     FileReadAllText = 100, "File.ReadAllText", arity 1;
     FileWriteAllText = 101, "File.WriteAllText", arity 2;

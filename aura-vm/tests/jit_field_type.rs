@@ -17,7 +17,7 @@ use std::sync::Arc;
 const LINKED_LIST: &str = r#"
 class Node {
     int value;
-    Node next;
+    Node? next;
     Node(int v) { this.value = v; this.next = null; }
 }
 class Program {
@@ -28,7 +28,7 @@ class Program {
         int steps = 0;
         int i = 0;
         while (i < 300) {
-            Node cur = a;
+            Node? cur = a;
             while (cur != null) {
                 steps = steps + 1;
                 cur = cur.next;
@@ -45,7 +45,7 @@ class Program {
 const NULL_REASSIGN_LOOP: &str = r#"
 class Node {
     int value;
-    Node next;
+    Node? next;
     Node(int v) { this.value = v; this.next = null; }
 }
 class Program {
@@ -54,7 +54,7 @@ class Program {
         int steps = 0;
         int i = 0;
         while (i < 3) {
-            Node cur = a;
+            Node? cur = a;
             while (cur != null) {
                 steps = steps + 1;
                 cur = null;
@@ -70,7 +70,7 @@ class Program {
 const PRIM_FIELD_LOOP: &str = r#"
 class Node {
     int value;
-    Node next;
+    Node? next;
     Node(int v) { this.value = v; this.next = null; }
 }
 class Program {
@@ -87,11 +87,15 @@ class Program {
 }
 "#;
 
-/// Virtual method calls on an object reached through a field chain.
+/// Virtual method calls on an object reached through a field chain. Under
+/// strict nullability the unchecked `cur.next.Compute(...)` chain is a
+/// compile error (field narrowing is deliberately unsupported), so the walk
+/// asserts with `!` — same runtime behavior, and the assertions exercise the
+/// AssertNonNull native inside the exact hot loop this test guards.
 const VIRT_CALL_THROUGH_FIELD: &str = r#"
 class Node {
     int value;
-    Node next;
+    Node? next;
     Node(int v) { this.value = v; this.next = null; }
     int Compute(int x) { return this.value * x; }
 }
@@ -103,10 +107,10 @@ class Program {
         int total = 0;
         int i = 0;
         while (i < 100) {
-            Node cur = a;
-            while (cur.next != null) {
-                total = total + cur.next.Compute(2);
-                cur = cur.next;
+            Node? cur = a;
+            while (cur!.next != null) {
+                total = total + cur!.next!.Compute(2);
+                cur = cur!.next;
             }
             i = i + 1;
         }

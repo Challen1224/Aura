@@ -40,6 +40,7 @@ pub(crate) fn default_value(ty: &TypeDesc) -> Value {
         TypeDesc::Float32 | TypeDesc::Float64 => Value::Float(0.0),
         TypeDesc::Bool => Value::Bool(false),
         TypeDesc::Char => Value::Char('\0'),
+        // Nullable and reference types default to null.
         _ => Value::Null,
     }
 }
@@ -164,6 +165,7 @@ pub(crate) fn substitute_type_desc(ty: &TypeDesc, generic_params: &[aura_bytecod
                 .collect();
             TypeDesc::Tuple(substituted_types)
         }
+        TypeDesc::Nullable(inner) => TypeDesc::Nullable(Box::new(substitute_type_desc(inner, generic_params, type_args))),
         _ => ty.clone(),
     }
 }
@@ -1126,8 +1128,9 @@ impl Vm {
             (Value::Bool(a), Value::Bool(b)) => Value::Bool(a == b),
             (Value::Char(a), Value::Char(b)) => Value::Bool(a == b),
             (Value::Null, Value::Null) => Value::Bool(true),
-            (Value::Null, Value::Object(_)) | (Value::Object(_), Value::Null) => Value::Bool(false),
-            (Value::Null, Value::String(_)) | (Value::String(_), Value::Null) => Value::Bool(false),
+            // Null equals nothing but null (nullable value types make
+            // `int? == null` and friends legal comparisons).
+            (Value::Null, _) | (_, Value::Null) => Value::Bool(false),
             (Value::Object(a), Value::Object(b)) => Value::Bool(a == b),
             (Value::Enum(a), Value::Enum(b)) => Value::Bool(self.enum_value_eq(a, b)),
             (a, b) => {

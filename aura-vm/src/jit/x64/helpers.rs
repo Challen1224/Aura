@@ -513,8 +513,8 @@ fn exec(vm: &mut Vm, op: &Op, args: &[Value]) -> Result<Option<Value>, Result<Va
                 (Value::Bool(a), Value::Bool(b)) => Value::Bool(a == b),
                 (Value::Char(a), Value::Char(b)) => Value::Bool(a == b),
                 (Value::Null, Value::Null) => Value::Bool(true),
-                (Value::Null, Value::Object(_)) | (Value::Object(_), Value::Null) => Value::Bool(false),
-                (Value::Null, Value::String(_)) | (Value::String(_), Value::Null) => Value::Bool(false),
+                // Null equals nothing but null (mirrors the interpreter).
+                (Value::Null, _) | (_, Value::Null) => Value::Bool(false),
                 (Value::Object(a), Value::Object(b)) => Value::Bool(a == b),
                 (Value::Enum(a), Value::Enum(b)) => Value::Bool(enum_value_eq(vm, a, b)),
                 (Value::Tuple(a), Value::Tuple(b)) => Value::Bool(tuple_value_eq(vm, a, b)),

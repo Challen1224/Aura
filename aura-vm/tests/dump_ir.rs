@@ -9,7 +9,7 @@ use std::sync::Arc;
 const LINKED_LIST: &str = r#"
 class Node {
     int value;
-    Node next;
+    Node? next;
     Node(int v) { this.value = v; this.next = null; }
 }
 class Program {
@@ -20,7 +20,7 @@ class Program {
         int steps = 0;
         int i = 0;
         while (i < 300) {
-            Node cur = a;
+            Node? cur = a;
             while (cur != null) {
                 steps = steps + 1;
                 cur = cur.next;

@@ -97,7 +97,7 @@ fn interpreter_collects_and_reclaims() {
 const JIT_GRAPH_CHURN: &str = r#"
 class Node {
     int value;
-    Node next;
+    Node? next;
     Node(int v) { this.value = v; this.next = null; }
 }
 class Program {
@@ -105,7 +105,7 @@ class Program {
         int total = 0;
         int round = 0;
         while (round < 40) {
-            Node head = null;
+            Node? head = null;
             int i = 0;
             while (i < 30) {
                 Node n = new Node(i);
@@ -113,7 +113,7 @@ class Program {
                 head = n;
                 i = i + 1;
             }
-            Node cur = head;
+            Node? cur = head;
             while (cur != null) {
                 total = total + cur.value;
                 cur = cur.next;

@@ -7,7 +7,7 @@ class Program {
     static void Main() {
         // Console input. ReadLine returns null at end of input.
         print("name? ");
-        string name = Console.ReadLine();
+        string? name = Console.ReadLine();
         if (name == null) {
             print("(no input; using 'world')");
             println();
@@ -18,7 +18,7 @@ class Program {
         println();
 
         print("number? ");
-        string raw = Console.ReadLine();
+        string? raw = Console.ReadLine();
         if (raw != null) {
             print("doubled: ");
             print(raw.Trim().ToInt() * 2);

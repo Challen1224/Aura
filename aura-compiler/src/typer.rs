@@ -38,6 +38,7 @@ pub fn substitute_type(ty: &Type, subst: &TypeSubst) -> Type {
                 .collect();
             Type::Tuple(substituted_types)
         }
+        Type::Nullable(inner) => Type::Nullable(Box::new(substitute_type(inner, subst))),
         _ => ty.clone(),
     }
 }
@@ -189,6 +190,10 @@ pub struct VariantInfo {
 pub struct TypeChecker {
     classes: HashMap<String, ClassInfo>,
     enums: HashMap<String, EnumInfo>,
+    /// Locals currently narrowed from `T?` to `T` by a null check, mapped to
+    /// their declared (nullable) type. Assigning to a narrowed local widens
+    /// it back to the declared type (see `Stmt::Assign`).
+    narrowed: std::cell::RefCell<HashMap<String, Type>>,
 }
 
 impl TypeChecker {
@@ -197,6 +202,7 @@ impl TypeChecker {
         Self {
             classes: HashMap::new(),
             enums: HashMap::new(),
+            narrowed: std::cell::RefCell::new(HashMap::new()),
         }
     }
 
@@ -1255,6 +1261,62 @@ impl TypeChecker {
         out
     }
 
+    /// Recognize `x != null` / `x == null` (either operand order) on a local
+    /// variable. Returns (name, is_not_null).
+    fn null_comparison(cond: &Expr) -> Option<(String, bool)> {
+        let (op, l, r) = match cond {
+            Expr::Binary(op @ (BinOp::Ne | BinOp::Eq), l, r) => (op, l.as_ref(), r.as_ref()),
+            _ => return None,
+        };
+        let name = match (l, r) {
+            (Expr::Var(n), Expr::Null) | (Expr::Null, Expr::Var(n)) => n.clone(),
+            _ => return None,
+        };
+        Some((name, matches!(op, BinOp::Ne)))
+    }
+
+    /// True if a branch always transfers control away (so code after the
+    /// enclosing `if` only runs when the branch was not taken).
+    fn branch_terminates(body: &[Stmt]) -> bool {
+        matches!(
+            body.last(),
+            Some(Stmt::Return(_) | Stmt::Throw(_) | Stmt::Break(_) | Stmt::Continue(_))
+        )
+    }
+
+    /// Run `f` with local `name` narrowed from `T?` to `T`, restoring the
+    /// declared type afterwards.
+    fn with_narrowed<R>(
+        &self,
+        locals: &mut HashMap<String, Type>,
+        name: &str,
+        inner: Type,
+        declared: Type,
+        f: impl FnOnce(&Self, &mut HashMap<String, Type>) -> R,
+    ) -> R {
+        locals.insert(name.to_string(), inner);
+        let prev = self.narrowed.borrow_mut().insert(name.to_string(), declared.clone());
+        let result = f(self, locals);
+        locals.insert(name.to_string(), declared);
+        match prev {
+            Some(p) => { self.narrowed.borrow_mut().insert(name.to_string(), p); }
+            None => { self.narrowed.borrow_mut().remove(name); }
+        }
+        result
+    }
+
+    /// The (name, non-null inner, declared nullable) triple for a condition
+    /// that null-tests a nullable local, if any.
+    fn narrowable(&self, cond: &Expr, locals: &HashMap<String, Type>) -> Option<(String, bool, Type, Type)> {
+        let (name, is_ne) = Self::null_comparison(cond)?;
+        match locals.get(&name) {
+            Some(Type::Nullable(inner)) => {
+                Some((name.clone(), is_ne, (**inner).clone(), Type::Nullable(inner.clone())))
+            }
+            _ => None,
+        }
+    }
+
     fn check_stmt(
         &self,
         stmt: &Stmt,
@@ -1267,6 +1329,16 @@ impl TypeChecker {
         match stmt {
             Stmt::VarDecl(ty, name, init) => {
                 self.validate_type_with_generics(ty, generic_params)?;
+                if init.is_none()
+                    && matches!(ty, Type::Class(_, _) | Type::String | Type::Enum(_) | Type::Tuple(_) | Type::GenericParam(_))
+                {
+                    return Err(TypeError(format!(
+                        "variable `{}` of non-nullable type {} must be initialized (or declared as {}?)",
+                        name,
+                        ty.name(),
+                        ty.name()
+                    )));
+                }
                 if let Some(init) = init {
                     let init_ty = self.infer_expr(init, class, locals, in_instance, return_ty, generic_params)?;
                     if !self.is_assignable(ty, &init_ty) {
@@ -1304,6 +1376,25 @@ impl TypeChecker {
                 let _ = self.infer_expr(e, class, locals, in_instance, return_ty, generic_params)?;
             }
             Stmt::Assign(target, value) => {
+                // Assigning to a narrowed local checks against its declared
+                // (nullable) type and widens it back for later statements.
+                if let AssignTarget::Local(name) = target {
+                    let declared = self.narrowed.borrow().get(name).cloned();
+                    if let Some(declared) = declared {
+                        let value_ty = self.infer_expr(value, class, locals, in_instance, return_ty, generic_params)?;
+                        if !self.is_assignable(&declared, &value_ty) {
+                            return Err(TypeError(format!(
+                                "cannot assign {} to `{}` of type {}",
+                                value_ty.name(),
+                                name,
+                                declared.name()
+                            )));
+                        }
+                        locals.insert(name.clone(), declared);
+                        self.narrowed.borrow_mut().remove(name);
+                        return Ok(());
+                    }
+                }
                 let target_ty = self.infer_assign_target(target, class, locals, in_instance, return_ty, generic_params)?;
                 let value_ty = self.infer_expr(value, class, locals, in_instance, return_ty, generic_params)?;
                 if !self.is_assignable(&target_ty, &value_ty) {
@@ -1340,12 +1431,48 @@ impl TypeChecker {
                         cond_ty.name()
                     )));
                 }
-                for s in then_branch {
-                    self.check_stmt(s, class, locals, return_ty, in_instance, generic_params)?;
+                // Null narrowing: `x != null` narrows x in the then-branch,
+                // `x == null` narrows x in the else-branch, and an `x == null`
+                // branch that always exits narrows x for the code after.
+                let narrow = self.narrowable(cond, locals);
+                match &narrow {
+                    Some((name, true, inner, declared)) => {
+                        self.with_narrowed(locals, name, inner.clone(), declared.clone(), |me, locals| {
+                            for s in then_branch {
+                                me.check_stmt(s, class, locals, return_ty, in_instance, generic_params)?;
+                            }
+                            Ok::<(), TypeError>(())
+                        })?;
+                    }
+                    _ => {
+                        for s in then_branch {
+                            self.check_stmt(s, class, locals, return_ty, in_instance, generic_params)?;
+                        }
+                    }
                 }
                 if let Some(else_branch) = else_branch {
-                    for s in else_branch {
-                        self.check_stmt(s, class, locals, return_ty, in_instance, generic_params)?;
+                    match &narrow {
+                        Some((name, false, inner, declared)) => {
+                            self.with_narrowed(locals, name, inner.clone(), declared.clone(), |me, locals| {
+                                for s in else_branch {
+                                    me.check_stmt(s, class, locals, return_ty, in_instance, generic_params)?;
+                                }
+                                Ok::<(), TypeError>(())
+                            })?;
+                        }
+                        _ => {
+                            for s in else_branch {
+                                self.check_stmt(s, class, locals, return_ty, in_instance, generic_params)?;
+                            }
+                        }
+                    }
+                }
+                // `if (x == null) { ...return/break/continue/throw; }` leaves
+                // x non-null afterwards.
+                if let Some((name, false, inner, declared)) = narrow {
+                    if else_branch.is_none() && Self::branch_terminates(then_branch) {
+                        locals.insert(name.clone(), inner);
+                        self.narrowed.borrow_mut().insert(name, declared);
                     }
                 }
             }
@@ -1387,8 +1514,22 @@ impl TypeChecker {
                         cond_ty.name()
                     )));
                 }
-                for s in body {
-                    self.check_stmt(s, class, locals, return_ty, in_instance, generic_params)?;
+                // `while (x != null)` narrows x inside the body; assignments
+                // to x re-widen it (the condition re-narrows each iteration).
+                match self.narrowable(condition, locals) {
+                    Some((name, true, inner, declared)) => {
+                        self.with_narrowed(locals, &name, inner, declared, |me, locals| {
+                            for s in body {
+                                me.check_stmt(s, class, locals, return_ty, in_instance, generic_params)?;
+                            }
+                            Ok::<(), TypeError>(())
+                        })?;
+                    }
+                    _ => {
+                        for s in body {
+                            self.check_stmt(s, class, locals, return_ty, in_instance, generic_params)?;
+                        }
+                    }
                 }
             }
             Stmt::For { label: _, init, condition, update, body } => {
@@ -1801,6 +1942,13 @@ impl TypeChecker {
                     // For `this`, use the current class with empty type args
                     (class.name.clone(), vec![])
                 } else {
+                    if let Type::Nullable(_) = &obj_ty {
+                        return Err(TypeError(format!(
+                            "`{}` may be null (type {}): narrow with an `if` check, or use `?.` / `!`",
+                            name,
+                            obj_ty.name()
+                        )));
+                    }
                     return Err(TypeError(format!(
                         "cannot access field `{}` on non-class type {}",
                         name,
@@ -1886,8 +2034,11 @@ impl TypeChecker {
                     let lt_is_null = matches!(&lt, Type::Class(n, _) if n == "null");
                     let rt_is_null = matches!(&rt, Type::Class(n, _) if n == "null");
                     if !lt_is_null && !rt_is_null {
-                        if !self.is_numeric(&lt) || !self.is_numeric(&rt) {
-                            if lt != rt {
+                        // T and T? compare as their underlying type.
+                        let lt_u = if let Type::Nullable(t) = &lt { (**t).clone() } else { lt.clone() };
+                        let rt_u = if let Type::Nullable(t) = &rt { (**t).clone() } else { rt.clone() };
+                        if !self.is_numeric(&lt_u) || !self.is_numeric(&rt_u) {
+                            if lt_u != rt_u {
                                 return Err(TypeError(format!(
                                     "cannot compare {} and {}",
                                     lt.name(),
@@ -1940,7 +2091,7 @@ impl TypeChecker {
                     }
                 }
             }
-            Expr::Call(call) => self.check_call(call, class, locals, in_instance, return_ty, generic_params),
+            Expr::Call(call) => self.check_call(call, class, locals, in_instance, return_ty, generic_params, false),
             Expr::New(class_name, type_args, args) => {
                 let Some(class_info) = self.classes.get(class_name) else {
                     return Err(TypeError(format!("unknown class `{}`", class_name)));
@@ -2022,6 +2173,19 @@ impl TypeChecker {
                 }
                 let then_ty = self.resolve_literal(&self.infer_expr(then_expr, class, locals, in_instance, return_ty, generic_params)?);
                 let else_ty = self.resolve_literal(&self.infer_expr(else_expr, class, locals, in_instance, return_ty, generic_params)?);
+                let then_null = matches!(&then_ty, Type::Class(n, _) if n == "null");
+                let else_null = matches!(&else_ty, Type::Class(n, _) if n == "null");
+                // A null branch makes the result nullable.
+                if then_null || else_null {
+                    let other = if then_null { &else_ty } else { &then_ty };
+                    if then_null && else_null {
+                        return Ok(then_ty);
+                    }
+                    return Ok(match other {
+                        Type::Nullable(_) => other.clone(),
+                        t => Type::Nullable(Box::new(t.clone())),
+                    });
+                }
                 if !self.is_assignable(&then_ty, &else_ty) && !self.is_assignable(&else_ty, &then_ty) {
                     return Err(TypeError(format!(
                         "ternary branches must have compatible types, got {} and {}",
@@ -2029,24 +2193,54 @@ impl TypeChecker {
                         else_ty.name()
                     )));
                 }
+                // T / T? branches join to T?.
+                if matches!(&else_ty, Type::Nullable(_)) && !matches!(&then_ty, Type::Nullable(_)) {
+                    return Ok(else_ty);
+                }
                 Ok(then_ty)
+            }
+            Expr::NonNullAssert(inner) => {
+                let inner_ty = self.infer_expr(inner, class, locals, in_instance, return_ty, generic_params)?;
+                Ok(match inner_ty {
+                    Type::Nullable(t) => *t,
+                    // Redundant assertions are allowed and are no-ops.
+                    t => t,
+                })
             }
             Expr::NullCoalesce(left, right) => {
                 let left_ty = self.infer_expr(left, class, locals, in_instance, return_ty, generic_params)?;
                 let right_ty = self.infer_expr(right, class, locals, in_instance, return_ty, generic_params)?;
-                // The result type is the left type (which should be nullable)
-                // For now, we just check that the types are compatible
-                if !self.is_assignable(&left_ty, &right_ty) && !self.is_assignable(&right_ty, &left_ty) {
+                // `a ?? b`: a must be nullable; the result is a's underlying
+                // type, nullable again only if b is nullable too.
+                let inner = match &left_ty {
+                    Type::Nullable(t) => (**t).clone(),
+                    Type::Class(n, _) if n == "null" => right_ty.clone(),
+                    _ => {
+                        return Err(TypeError(format!(
+                            "`??` requires a nullable left operand, got {}",
+                            left_ty.name()
+                        )));
+                    }
+                };
+                if !self.is_assignable(&Type::Nullable(Box::new(inner.clone())), &right_ty) {
                     return Err(TypeError(format!(
                         "null coalescing operands must have compatible types, got {} and {}",
                         left_ty.name(),
                         right_ty.name()
                     )));
                 }
-                Ok(left_ty)
+                if matches!(&right_ty, Type::Nullable(_)) {
+                    Ok(Type::Nullable(Box::new(inner)))
+                } else {
+                    Ok(inner)
+                }
             }
             Expr::NullConditionalField(obj, field_name) => {
                 let obj_ty = self.infer_expr(obj, class, locals, in_instance, return_ty, generic_params)?;
+                let obj_ty = match obj_ty {
+                    Type::Nullable(inner) => *inner,
+                    t => t,
+                };
                 let class_name = if let Type::Class(name, _) = &obj_ty {
                     name.clone()
                 } else {
@@ -2068,12 +2262,21 @@ impl TypeChecker {
                         field_name, declared_in, visibility_name(visibility)
                     )));
                 }
-                // Result is nullable version of the field type
-                Ok(ty)
+                // Result is the nullable version of the field type.
+                Ok(match ty {
+                    Type::Nullable(_) => ty,
+                    t => Type::Nullable(Box::new(t)),
+                })
             }
             Expr::NullConditionalCall(call) => {
-                // Similar to regular call, but the result is nullable
-                self.check_call(call, class, locals, in_instance, return_ty, generic_params)
+                // Like a regular call, but the receiver may be nullable and
+                // the result is nullable (null propagates through).
+                let ret = self.check_call(call, class, locals, in_instance, return_ty, generic_params, true)?;
+                Ok(match ret {
+                    Type::Unit => Type::Unit,
+                    Type::Nullable(_) => ret,
+                    t => Type::Nullable(Box::new(t)),
+                })
             }
             Expr::Match(subject, arms) => {
                 let subject_ty = self.infer_expr(subject, class, locals, in_instance, return_ty, generic_params)?;
@@ -2592,6 +2795,7 @@ impl TypeChecker {
         in_instance: bool,
         return_ty: &Type,
         generic_params: &[GenericParam],
+        nullable_receiver: bool,
     ) -> Result<Type, TypeError> {
         if call.class_or_target == "__intrinsics" {
             if call.method == "print" {
@@ -2655,6 +2859,10 @@ impl TypeChecker {
                 }
             }
             let target_ty = self.infer_expr(target, class, locals, in_instance, return_ty, generic_params)?;
+            let target_ty = match target_ty {
+                Type::Nullable(inner) if nullable_receiver => *inner,
+                t => t,
+            };
             // Intrinsic string methods (`s.Substring(...)`, `s.Split(...)`).
             if target_ty == Type::String {
                 let Some(im) = crate::intrinsics::string_method(&call.method) else {
@@ -2684,6 +2892,13 @@ impl TypeChecker {
                 // (we're inside the generic class definition)
                 (class.name.clone(), vec![])
             } else {
+                if let Type::Nullable(_) = &target_ty {
+                    return Err(TypeError(format!(
+                        "receiver of `{}` may be null (type {}): narrow with an `if` check, or use `?.` / `!`",
+                        call.method,
+                        target_ty.name()
+                    )));
+                }
                 return Err(TypeError(format!(
                     "cannot call method on non-class type {}",
                     target_ty.name()
@@ -2909,6 +3124,17 @@ impl TypeChecker {
         if target == source {
             return true;
         }
+        // Nullability (strict): `null` and `T?` are only assignable to
+        // nullable targets; `T` widens into `T?`.
+        match (target, source) {
+            (Type::Nullable(t), Type::Nullable(s)) => return self.is_assignable(t, s),
+            (Type::Nullable(_), Type::Class(sn, _)) if sn == "null" => return true,
+            (Type::Nullable(t), s) => return self.is_assignable(t, s),
+            // Unbound generic parameters stay permissive (unified later).
+            (Type::GenericParam(_), Type::Nullable(_)) => return true,
+            (_, Type::Nullable(_)) => return false,
+            _ => {}
+        }
         // Untyped literals coerce to any numeric type whose range fits.
         match (target, source) {
             (target, Type::IntLit(v)) => {
@@ -2938,15 +3164,11 @@ impl TypeChecker {
                             .zip(source_args)
                             .all(|(t, s)| self.is_assignable(t, s));
                 }
-                // Null is assignable to any class reference.
-                if source_name == "null" {
-                    return true;
-                }
+                // Strict nullability: null is NOT assignable to a plain class
+                // reference — only to `T?` (handled above).
                 // Upcast: a subclass instance is assignable to its base type.
                 self.is_subclass_of(source_name, target_name)
             }
-            // Null is assignable to string (reference type).
-            (Type::String, Type::Class(source_name, _)) if source_name == "null" => true,
             (Type::Enum(a), Type::Enum(b)) => a == b,
             (Type::Class(name, _), Type::Enum(enum_name)) => name == enum_name,
             (Type::Enum(enum_name), Type::Class(name, _)) => name == enum_name,

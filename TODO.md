@@ -86,13 +86,28 @@
 **P1 - High Priority**
 - [ ] **Structural typing**
   - [ ] Duck typing for interfaces
-  - [ ] Type aliases: `type UserId = int;`
+  - [x] Type aliases: `type UserId = int;` (parser-level expansion; also
+        composes with `?`)
   - [ ] Newtype pattern support
 
-- [ ] **Type annotations**
-  - [ ] Nullable types: `int?`
-  - [ ] Non-null assertions: `value!`
-  - [ ] Type guards and type narrowing
+- [x] **Nullable types (strict)** — `T?` for reference and value types;
+      `null` is only assignable to `T?`, and member access on `T?` is a
+      compile error until the value is narrowed or asserted. Narrowing
+      covers locals/params via `if (x != null)` (then-branch),
+      `if (x == null)` (else-branch and after an always-exiting branch),
+      and `while (x != null)`; assigning to a narrowed variable widens it
+      back. `value!` asserts non-null (runtime error if null, via an
+      AssertNonNull native under both tiers); `??` unwraps to the non-null
+      type; `?.` produces `T?`. `Console.ReadLine()` now returns `string?`.
+      Known holes (deliberate, documented): fields are not
+      definite-assignment checked (an unassigned non-nullable reference
+      field reads as null and fails at use with a runtime error), field
+      expressions are never narrowed (copy to a local or use `!`), and
+      compound conditions (`x != null && ...`) don't narrow yet.
+      Verified: aura-vm/tests/nullable.rs (narrowing/assert/??/?.
+      semantics under interpreter and JIT, plus compile-fail cases pinning
+      each strictness rule).
+  - [ ] Type guards beyond null checks (`is` checks, compound conditions)
 
 - [ ] **Literal types**
   ```aura

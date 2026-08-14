@@ -103,6 +103,14 @@ fn expand(ty: &Type, aliases: &HashMap<String, TypeAliasDecl>, stack: &mut Vec<S
                 .collect::<Result<Vec<_>, _>>()?;
             Ok(Type::Tuple(types))
         }
+        Type::Nullable(inner) => {
+            let inner = expand(inner, aliases, stack)?;
+            // An alias of a nullable target stays singly nullable.
+            Ok(match inner {
+                Type::Nullable(_) => inner,
+                t => Type::Nullable(Box::new(t)),
+            })
+        }
         _ => Ok(ty.clone()),
     }
 }
@@ -118,6 +126,7 @@ fn substitute(ty: &Type, subst: &HashMap<String, Type>) -> Type {
             Type::Class(name.clone(), args)
         }
         Type::Tuple(types) => Type::Tuple(types.iter().map(|t| substitute(t, subst)).collect()),
+        Type::Nullable(inner) => Type::Nullable(Box::new(substitute(inner, subst))),
         _ => ty.clone(),
     }
 }
@@ -288,6 +297,9 @@ fn expand_expr(expr: &mut Expr, aliases: &HashMap<String, TypeAliasDecl>) -> Res
     match expr {
         Expr::Cast(inner, ty) => {
             *ty = expand_type(ty)?;
+            expand_expr(inner, aliases)?;
+        }
+        Expr::NonNullAssert(inner) => {
             expand_expr(inner, aliases)?;
         }
         Expr::Binary(op, a, b) => {
@@ -1356,6 +1368,11 @@ impl<'a> Parser<'a> {
             }
         }
         
+        // Skip a nullable marker (`T?`) if present
+        if matches!(self.tokens.get(pos), Some(Token::Question)) {
+            pos += 1;
+        }
+
         // Check for identifier
         if pos >= self.tokens.len() || !matches!(self.tokens.get(pos), Some(Token::Ident(_))) {
             return false;
@@ -1789,6 +1806,12 @@ impl<'a> Parser<'a> {
                 } else {
                     expr = Expr::NullConditionalField(Box::new(expr), name);
                 }
+            } else if self.check(Token::Bang) {
+                // Non-null assertion: `value!`. `!=` lexes as a single token,
+                // so a lone `!` after a postfix expression is unambiguous.
+                self.advance();
+                expr = Expr::NonNullAssert(Box::new(expr));
+                continue;
             } else if self.check(Token::Question) {
                 // `?` is ambiguous: it starts a ternary (`cond ? a : b`) or is
                 // a postfix error-propagation operator (`expr?`). A ternary is
@@ -2159,6 +2182,17 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_type(&mut self) -> Result<Type, String> {
+        let base = self.parse_base_type()?;
+        if self.match_token(Token::Question) {
+            if self.check(Token::Question) {
+                return Err("doubly-nullable type `T??` is not allowed".to_string());
+            }
+            return Ok(Type::Nullable(Box::new(base)));
+        }
+        Ok(base)
+    }
+
+    fn parse_base_type(&mut self) -> Result<Type, String> {
         match self.peek() {
             Some(Token::Void) => {
                 self.advance();
@@ -2272,7 +2306,22 @@ impl<'a> Parser<'a> {
                 pos += 1;
             }
         }
-        matches!(self.tokens.get(pos), Some(Token::Ident(_)))
+        let mut nullable = false;
+        if matches!(self.tokens.get(pos), Some(Token::Question)) {
+            nullable = true;
+            pos += 1;
+        }
+        if !matches!(self.tokens.get(pos), Some(Token::Ident(_))) {
+            return false;
+        }
+        if nullable {
+            // `x ? y : z` (a ternary statement) also matches
+            // "type-question-ident", so a nullable var decl additionally
+            // requires a declaration continuation after the name.
+            pos += 1;
+            return matches!(self.tokens.get(pos), Some(Token::Assign | Token::Semi));
+        }
+        true
     }
 
     fn consume(&mut self, expected: Token, msg: &str) -> Result<(), String> {

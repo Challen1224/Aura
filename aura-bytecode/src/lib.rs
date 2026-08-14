@@ -392,6 +392,8 @@ pub enum TypeDesc {
     GenericParam(u32),
     /// Tuple type with element types.
     Tuple(Vec<TypeDesc>),
+    /// Nullable type: `T?`.
+    Nullable(Box<TypeDesc>),
     /// Null type (bottom of reference hierarchy).
     Null,
 }
@@ -435,6 +437,7 @@ impl fmt::Display for TypeDesc {
             TypeDesc::Bool => write!(f, "bool"),
             TypeDesc::Char => write!(f, "char"),
             TypeDesc::String => write!(f, "string"),
+            TypeDesc::Nullable(inner) => write!(f, "{}?", inner),
             TypeDesc::Class(ClassId(id), args) => {
                 if args.is_empty() {
                     write!(f, "class#{id}")
