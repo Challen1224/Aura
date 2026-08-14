@@ -1,0 +1,57 @@
+// Stdlib string methods and Console/File I/O.
+
+class Program {
+    static void Main() {
+        string s = "  The Aura Language  ";
+
+        string t = s.Trim();
+        print(t);
+        println();
+        print("length: ");
+        print(t.Length);
+        println();
+        print("upper: ");
+        print(t.ToUpper());
+        println();
+        print("has Aura: ");
+        print(t.Contains("Aura"));
+        println();
+        print("index: ");
+        print(t.IndexOf("Aura"));
+        println();
+        print("slice: ");
+        print(t.Substring(4, 4));
+        println();
+        print("swapped: ");
+        print(t.Replace("Aura", "Fable"));
+        println();
+
+        // Split returns a List<string>.
+        List<string> words = t.Split(" ");
+        print("words: ");
+        print(words.Count);
+        println();
+
+        // Parsing.
+        int n = "21".ToInt();
+        print("doubled: ");
+        print(n * 2);
+        println();
+
+        // File round-trip.
+        string path = "stdlib_strings_example.txt";
+        File.WriteAllText(path, "alpha\nbeta");
+        File.AppendAllText(path, "\ngamma");
+        List<string> lines = File.ReadAllLines(path);
+        print("lines: ");
+        print(lines.Count);
+        println();
+        print("last: ");
+        print(lines.Get(2));
+        println();
+        File.Delete(path);
+        print("cleaned up: ");
+        print(!File.Exists(path));
+        println();
+    }
+}

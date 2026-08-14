@@ -63,8 +63,41 @@ impl Emitter {
             constant_pool: Vec::new(),
         };
 
-        // First pass: assign ids to classes.
+        // First pass: assign ids to classes. The stdlib intrinsic classes get
+        // ids and metadata-only `ClassDef`s (no methods, no fields) so type
+        // descriptors naming them resolve; calls and construction lower to
+        // `Op::NativeCall`, never `NewObj`/`CallVirt`, so the empty defs are
+        // never dispatched through.
         let mut class_ids: HashMap<String, ClassId> = HashMap::new();
+        for ic in crate::intrinsics::classes() {
+            let id = ClassId(self.next_class_id);
+            self.next_class_id += 1;
+            class_ids.insert(ic.name.to_string(), id);
+            module.classes.insert(
+                id,
+                ClassDef {
+                    name: ic.name.to_string(),
+                    generic_params: ic
+                        .generic_params
+                        .iter()
+                        .map(|n| aura_bytecode::GenericParam {
+                            name: n.to_string(),
+                            constraint: None,
+                            variance: aura_bytecode::Variance::Invariant,
+                        })
+                        .collect(),
+                    super_class: None,
+                    interfaces: Vec::new(),
+                    is_interface: false,
+                    is_abstract: ic.constructor.is_none(),
+                    is_record: false,
+                    fields: Vec::new(),
+                    static_fields: Vec::new(),
+                    methods: HashMap::new(),
+                    static_methods: HashMap::new(),
+                },
+            );
+        }
         for decl in &program.program.decls {
             if let Decl::Class(c) = decl {
                 let id = ClassId(self.next_class_id);
@@ -1179,6 +1212,11 @@ impl<'a> MethodEmitter<'a> {
                 }
             }
             Expr::Field(obj, name) => {
+                // Intrinsic properties (`list.Count`, `s.Length`).
+                if let Some(native) = self.intrinsic_property_native(obj, name)? {
+                    self.ops.push(Op::NativeCall(native as u16));
+                    return Ok(());
+                }
                 let obj_class = self.expr_class(obj);
                 if let Some(obj_class) = &obj_class {
                     if let Some((_declaring, _)) = self.instance_property_opt(obj_class, name) {
@@ -1346,6 +1384,15 @@ impl<'a> MethodEmitter<'a> {
                     }
                 } else {
                     if let Some(target) = &call.target {
+                        // Intrinsic dispatch: static calls on `Console`/`File`
+                        // and instance calls on `List`/`Map`/`Set`/`string`
+                        // lower to `NativeCall` (receiver pushed first, then
+                        // arguments — unlike `CallVirt`, which takes the
+                        // receiver on top).
+                        if let Some(native) = self.intrinsic_call_native(call, target)? {
+                            self.ops.push(Op::NativeCall(native as u16));
+                            return Ok(());
+                        }
                         if let Expr::Var(class_name) = target.as_ref() {
                             if self.class_ids.contains_key(class_name) {
                                 // Static method call: target is a class name.
@@ -1380,6 +1427,15 @@ impl<'a> MethodEmitter<'a> {
                             self.emit_expr(target)?;
                             self.ops.push(Op::CallVirt(call.method.clone()));
                         }
+                    } else if let Some(im) =
+                        crate::intrinsics::static_method(&call.class_or_target, &call.method)
+                    {
+                        // Static intrinsic call parsed without a target
+                        // expression: `File.WriteAllText(...)`.
+                        for arg in &call.args {
+                            self.emit_expr(arg)?;
+                        }
+                        self.ops.push(Op::NativeCall(im.native as u16));
                     } else {
                         if let Some(enum_id) = self.enum_ids.get(&call.class_or_target) {
                             let enum_def = self.program.enums.get(&call.class_or_target).ok_or_else(|| {
@@ -1424,6 +1480,12 @@ impl<'a> MethodEmitter<'a> {
                 }
             }
             Expr::New(class_name, type_args, args) => {
+                // Intrinsic constructors (`new List<int>()`) lower to a native
+                // call; the typer guarantees they take no arguments.
+                if let Some(ctor) = crate::intrinsics::constructor_native(class_name) {
+                    self.ops.push(Op::NativeCall(ctor as u16));
+                    return Ok(());
+                }
                 let class_id = *self.class_ids.get(class_name).ok_or_else(|| {
                     format!("unknown class `{}`", class_name)
                 })?;
@@ -1947,6 +2009,70 @@ impl<'a> MethodEmitter<'a> {
     }
 
     /// Static class name of an object expression, used to resolve field indices.
+    /// If `call` targets an intrinsic (static `Console`/`File` method, or an
+    /// instance method of `List`/`Map`/`Set`/`string`), emit its receiver and
+    /// arguments (receiver first, then arguments left to right) and return the
+    /// native id to invoke. Returns `Ok(None)` for non-intrinsic calls with
+    /// nothing emitted.
+    fn intrinsic_call_native(&mut self, call: &CallExpr, target: &Expr) -> Result<Option<aura_bytecode::natives::NativeId>, String> {
+        // Static intrinsic class: `Console.ReadLine()`, `File.Exists(p)`.
+        if let Expr::Var(name) = target {
+            if let Some(im) = crate::intrinsics::static_method(name, &call.method) {
+                for arg in &call.args {
+                    self.emit_expr(arg)?;
+                }
+                return Ok(Some(im.native));
+            }
+            // A name that is an intrinsic class but not one of its static
+            // methods should not fall through to instance dispatch.
+            if crate::intrinsics::is_intrinsic_class(name) && !self.local_types.contains_key(name) {
+                return Err(format!(
+                    "unknown static method `{}` on `{}`",
+                    call.method, name
+                ));
+            }
+        }
+        // Instance dispatch by receiver type.
+        let Ok(target_ty) = self.expr_ty(target) else {
+            return Ok(None);
+        };
+        let native = match &target_ty {
+            Type::String => crate::intrinsics::string_method(&call.method).map(|m| m.native),
+            Type::Class(name, _) => crate::intrinsics::method(name, &call.method).map(|m| m.native),
+            _ => None,
+        };
+        match native {
+            Some(native) => {
+                self.emit_expr(target)?;
+                for arg in &call.args {
+                    self.emit_expr(arg)?;
+                }
+                Ok(Some(native))
+            }
+            None => Ok(None),
+        }
+    }
+
+    /// If `obj.name` reads an intrinsic property (`list.Count`, `s.Length`),
+    /// emit the receiver and return the native id of the getter.
+    fn intrinsic_property_native(&mut self, obj: &Expr, name: &str) -> Result<Option<aura_bytecode::natives::NativeId>, String> {
+        let Ok(obj_ty) = self.expr_ty(obj) else {
+            return Ok(None);
+        };
+        let native = match &obj_ty {
+            Type::String => crate::intrinsics::string_property(name).map(|p| p.native),
+            Type::Class(cname, _) => crate::intrinsics::property(cname, name).map(|p| p.native),
+            _ => None,
+        };
+        match native {
+            Some(native) => {
+                self.emit_expr(obj)?;
+                Ok(Some(native))
+            }
+            None => Ok(None),
+        }
+    }
+
     fn expr_class(&self, expr: &Expr) -> Option<String> {
         match expr {
             Expr::Var(name) => {
@@ -2086,6 +2212,17 @@ impl<'a> MethodEmitter<'a> {
             Expr::New(class_name, type_args, _) => Type::Class(class_name.clone(), type_args.clone()),
             Expr::With(obj, _) => self.expr_ty(obj)?,
             Expr::Field(obj, name) => {
+                // Intrinsic properties (`list.Count`, `s.Length`).
+                if let Ok(obj_ty) = self.expr_ty(obj) {
+                    let prop = match &obj_ty {
+                        Type::String => crate::intrinsics::string_property(name),
+                        Type::Class(cname, _) => crate::intrinsics::property(cname, name),
+                        _ => None,
+                    };
+                    if let Some(p) = prop {
+                        return Ok(p.ty);
+                    }
+                }
                 let owner = self.expr_class(obj).ok_or_else(|| {
                     format!("cannot determine type of field target `{}`", name)
                 })?;
@@ -2159,6 +2296,9 @@ impl<'a> MethodEmitter<'a> {
         let class_name;
         let method_name;
         let is_instance;
+        // Type arguments of the receiver, used to substitute the return type
+        // of generic instance methods (`Map<string, int>.Get` -> `int`).
+        let mut receiver_type_args: Vec<Type> = Vec::new();
         if let Some(target) = &call.target {
             if let Expr::Var(c) = target.as_ref() {
                 if self.class_ids.contains_key(c) {
@@ -2166,18 +2306,30 @@ impl<'a> MethodEmitter<'a> {
                     is_instance = false;
                 } else {
                     let obj_ty = self.expr_ty(target)?;
-                    let Type::Class(c, _) = obj_ty else {
+                    if obj_ty == Type::String {
+                        return crate::intrinsics::string_method(&call.method)
+                            .map(|m| m.return_ty)
+                            .ok_or_else(|| format!("unknown method `{}` on `string`", call.method));
+                    }
+                    let Type::Class(c, args) = obj_ty else {
                         return Err("cannot determine call target class".to_string());
                     };
                     class_name = c;
+                    receiver_type_args = args;
                     is_instance = true;
                 }
             } else {
                 let obj_ty = self.expr_ty(target)?;
-                let Type::Class(c, _) = obj_ty else {
+                if obj_ty == Type::String {
+                    return crate::intrinsics::string_method(&call.method)
+                        .map(|m| m.return_ty)
+                        .ok_or_else(|| format!("unknown method `{}` on `string`", call.method));
+                }
+                let Type::Class(c, args) = obj_ty else {
                     return Err("cannot determine call target class".to_string());
                 };
                 class_name = c;
+                receiver_type_args = args;
                 is_instance = true;
             }
             method_name = call.method.clone();
@@ -2200,6 +2352,15 @@ impl<'a> MethodEmitter<'a> {
             is_instance = false;
             method_name = call.method.clone();
         }
+        // Substitute the receiver's type arguments into the return type so
+        // chained calls on generic receivers keep concrete types.
+        let subst = self
+            .program
+            .classes
+            .get(&class_name)
+            .filter(|_| !receiver_type_args.is_empty())
+            .map(|info| build_subst(&info.generic_params, &receiver_type_args))
+            .unwrap_or_default();
         let mut cur = Some(class_name.clone());
         while let Some(c) = cur {
             let info = self.program.classes.get(&c).ok_or_else(|| {
@@ -2207,7 +2368,7 @@ impl<'a> MethodEmitter<'a> {
             })?;
             let table = if is_instance { &info.methods } else { &info.static_methods };
             if let Some(mi) = table.get(&method_name) {
-                return Ok(mi.return_ty.clone());
+                return Ok(substitute_type(&mi.return_ty, &subst));
             }
             cur = info.super_class.clone();
         }

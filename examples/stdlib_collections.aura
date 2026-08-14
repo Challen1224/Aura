@@ -1,0 +1,64 @@
+// Stdlib collections: List<T>, Map<K, V>, Set<T>.
+
+class Program {
+    static void Main() {
+        // List<T>: ordered, index-addressable.
+        List<int> primes = new List<int>();
+        primes.Add(2);
+        primes.Add(3);
+        primes.Add(5);
+        primes.Add(7);
+        print("primes: ");
+        print(primes);
+        println();
+        print("count: ");
+        print(primes.Count);
+        println();
+        print("primes[2]: ");
+        print(primes.Get(2));
+        println();
+
+        int total = 0;
+        int i = 0;
+        while (i < primes.Count) {
+            total = total + primes.Get(i);
+            i = i + 1;
+        }
+        print("sum: ");
+        print(total);
+        println();
+
+        // Map<K, V>: insertion-ordered key/value pairs.
+        Map<string, int> ages = new Map<string, int>();
+        ages.Put("ada", 36);
+        ages.Put("grace", 45);
+        print("ada is ");
+        print(ages.Get("ada"));
+        println();
+        print("knows grace: ");
+        print(ages.ContainsKey("grace"));
+        println();
+
+        List<string> names = ages.Keys();
+        int n = 0;
+        while (n < names.Count) {
+            string name = names.Get(n);
+            print(name);
+            print(" -> ");
+            print(ages.Get(name));
+            println();
+            n = n + 1;
+        }
+
+        // Set<T>: unique values; Add reports whether the value was new.
+        Set<string> tags = new Set<string>();
+        tags.Add("vm");
+        tags.Add("jit");
+        print("added again: ");
+        print(tags.Add("vm"));
+        println();
+        print("tags: ");
+        print(tags.Count);
+        println();
+    }
+}

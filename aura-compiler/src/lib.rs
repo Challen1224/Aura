@@ -6,6 +6,7 @@
 
 pub mod ast;
 pub mod emitter;
+pub mod intrinsics;
 pub mod lexer;
 pub mod parser;
 pub mod typer;

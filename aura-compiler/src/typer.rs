@@ -202,6 +202,7 @@ impl TypeChecker {
 
     /// Type-check a program and return a typed view.
     pub fn check(mut self, program: &Program) -> Result<TypedProgram, TypeError> {
+        self.inject_intrinsics();
         self.gather_decls(program)?;
         for decl in &program.decls {
             match decl {
@@ -215,6 +216,85 @@ impl TypeChecker {
             classes: self.classes,
             enums: self.enums,
         })
+    }
+
+    /// Register the stdlib intrinsic classes (`List`, `Map`, `Set`, `Console`,
+    /// `File`) as ordinary [`ClassInfo`] entries so method lookup, generic
+    /// substitution and overload checking reuse the existing machinery. A user
+    /// declaration reusing one of these names reports a duplicate-class error.
+    fn inject_intrinsics(&mut self) {
+        for ic in crate::intrinsics::classes() {
+            let to_method_info = |m: &crate::intrinsics::IntrinsicMethod, is_instance: bool| MethodInfo {
+                name: m.name.to_string(),
+                generic_params: Vec::new(),
+                return_ty: m.return_ty.clone(),
+                params: m.params.clone(),
+                is_instance,
+                visibility: Visibility::Public,
+                is_virtual: false,
+                is_override: false,
+                is_abstract: false,
+                is_final: true,
+            };
+            let info = ClassInfo {
+                name: ic.name.to_string(),
+                generic_params: ic
+                    .generic_params
+                    .iter()
+                    .map(|n| GenericParam { name: n.to_string(), constraint: None })
+                    .collect(),
+                is_interface: false,
+                // Static classes (no constructor) are marked abstract so
+                // `new Console()` is rejected with the usual message.
+                is_abstract: ic.constructor.is_none(),
+                is_sealed: true,
+                is_record: false,
+                super_class: None,
+                interfaces: Vec::new(),
+                instance_fields: Vec::new(),
+                static_fields: Vec::new(),
+                protected_fields: HashSet::new(),
+                protected_static_fields: HashSet::new(),
+                private_fields: HashSet::new(),
+                private_static_fields: HashSet::new(),
+                methods: ic
+                    .methods
+                    .iter()
+                    .map(|m| (m.name.to_string(), to_method_info(m, true)))
+                    .collect(),
+                static_methods: ic
+                    .static_methods
+                    .iter()
+                    .map(|m| (m.name.to_string(), to_method_info(m, false)))
+                    .collect(),
+                constructors: if ic.constructor.is_some() {
+                    vec![ConstructorInfo { params: Vec::new() }]
+                } else {
+                    Vec::new()
+                },
+                properties: ic
+                    .properties
+                    .iter()
+                    .map(|p| {
+                        (
+                            p.name.to_string(),
+                            PropertyInfo {
+                                name: p.name.to_string(),
+                                ty: p.ty.clone(),
+                                visibility: Visibility::Public,
+                                getter_visibility: Visibility::Public,
+                                setter_visibility: Visibility::Public,
+                                has_getter: true,
+                                has_setter: false,
+                                is_static: false,
+                            },
+                        )
+                    })
+                    .collect(),
+                static_properties: HashMap::new(),
+            };
+            self.classes.insert(ic.name.to_string(), info);
+        }
     }
 
     fn gather_decls(&mut self, program: &Program) -> Result<(), TypeError> {
@@ -1689,6 +1769,16 @@ impl TypeChecker {
             }
             Expr::Field(obj, name) => {
                 let obj_ty = self.infer_expr(obj, class, locals, in_instance, return_ty, generic_params)?;
+                // Intrinsic string properties (`s.Length`).
+                if obj_ty == Type::String {
+                    if let Some(p) = crate::intrinsics::string_property(name) {
+                        return Ok(p.ty);
+                    }
+                    return Err(TypeError(format!(
+                        "unknown property `{}` on `string`",
+                        name
+                    )));
+                }
                 let (class_name, type_args) = if let Type::Class(name, args) = &obj_ty {
                     (name.clone(), args.clone())
                 } else if in_instance && matches!(obj.as_ref(), Expr::Var(n) if n == "this") {
@@ -2549,6 +2639,28 @@ impl TypeChecker {
                 }
             }
             let target_ty = self.infer_expr(target, class, locals, in_instance, return_ty, generic_params)?;
+            // Intrinsic string methods (`s.Substring(...)`, `s.Split(...)`).
+            if target_ty == Type::String {
+                let Some(im) = crate::intrinsics::string_method(&call.method) else {
+                    return Err(TypeError(format!(
+                        "unknown method `{}` on `string`",
+                        call.method
+                    )));
+                };
+                let info = MethodInfo {
+                    name: im.name.to_string(),
+                    generic_params: Vec::new(),
+                    return_ty: im.return_ty.clone(),
+                    params: im.params.clone(),
+                    is_instance: true,
+                    visibility: Visibility::Public,
+                    is_virtual: false,
+                    is_override: false,
+                    is_abstract: false,
+                    is_final: true,
+                };
+                return self.check_call_args(call, &info, class, locals, in_instance, return_ty, generic_params);
+            }
             let (name, type_args) = if let Type::Class(name, args) = &target_ty {
                 (name.clone(), args.clone())
             } else if in_instance && matches!(target.as_ref(), Expr::Var(n) if n == "this") {

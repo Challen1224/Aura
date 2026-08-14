@@ -153,8 +153,13 @@ impl Heap {
     fn approx_size(object: &AuraObject) -> usize {
         match object {
             AuraObject::String(s) => s.len(),
-            AuraObject::Instance { fields, .. } | AuraObject::Array { elements: fields } => {
+            AuraObject::Instance { fields, .. }
+            | AuraObject::Array { elements: fields }
+            | AuraObject::Set { elements: fields } => {
                 fields.len() * std::mem::size_of::<Value>() + std::mem::size_of::<AuraObject>()
+            }
+            AuraObject::Map { entries } => {
+                entries.len() * 2 * std::mem::size_of::<Value>() + std::mem::size_of::<AuraObject>()
             }
             AuraObject::Enum(e) => {
                 e.fields.len() * std::mem::size_of::<Value>() + std::mem::size_of::<AuraObject>()

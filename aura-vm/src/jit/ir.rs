@@ -738,6 +738,14 @@ impl<'a> Lowerer<'a> {
             Op::Stsfld(..) => {
                 pop(stack, h)?;
             }
+            Op::NativeCall(id) => {
+                let native = aura_bytecode::natives::NativeId::from_u16(*id)
+                    .ok_or_else(|| format!("unknown native id {id}"))?;
+                for _ in 0..native.arity() {
+                    pop(stack, h)?;
+                }
+                push(stack, h, KType::Unknown);
+            }
             Op::NewEnum(eid, _) => {
                 let count = enum_field_count(self.module, *eid);
                 for _ in 0..count {
@@ -1145,6 +1153,18 @@ impl<'a> Lowerer<'a> {
             Op::Ldsfld(..) => {
                 let dst = self.new_vreg(KType::Unknown);
                 helper!(Some(dst), op.clone(), vec![]);
+                stack.push(dst);
+            }
+            Op::NativeCall(id) => {
+                let native = aura_bytecode::natives::NativeId::from_u16(*id)
+                    .ok_or_else(|| format!("unknown native id {id}"))?;
+                let mut args = Vec::with_capacity(native.arity());
+                for _ in 0..native.arity() {
+                    args.push(pop(stack)?);
+                }
+                args.reverse();
+                let dst = self.new_vreg(KType::Unknown);
+                helper!(Some(dst), op.clone(), args);
                 stack.push(dst);
             }
             Op::Stsfld(..) => {

@@ -1,8 +1,10 @@
 # Aura Language TODO
 
-> **Status:** Core language and compiler: usable. VM with GC and baseline
-> x86-64 JIT: implemented. Stdlib/tooling: early.  
-> **Last Updated:** 2026-08-12  
+> **Status:** Core language and compiler: usable. VM with baseline x86-64
+> JIT: implemented (GC exists but is never triggered — see §2.1). Stdlib:
+> basics usable — `List`/`Map`/`Set`, string methods, `Console.ReadLine`,
+> text `File` I/O (native-backed; see §4 caveats). Tooling: early.  
+> **Last Updated:** 2026-08-13  
 > **Current Version:** 0.27.0
 
 ---
@@ -544,10 +546,14 @@
 
 #### ✅ Completed
 - [x] Managed heap with `GcRef` handles
-- [x] Mark-and-sweep garbage collector
+- [x] Mark-and-sweep collector implementation (`Heap::collect`)
 - [x] Object allocation
 - [x] Reference tracking
-- [x] Basic GC triggering (threshold-based)
+- [ ] **GC triggering** — `Heap::allocate` tracks a threshold but never
+      invokes `collect`, and nothing else calls it either: memory grows
+      unboundedly today. Wiring this up needs a root-set walk at safepoints,
+      and JIT frames keep locals in native stack slots the GC cannot see —
+      both must be solved together.
 
 #### ⏳ Planned
 
@@ -846,11 +852,13 @@
 
 **P0 - Critical**
 - [ ] **String**
-  - [ ] Immutable string class
+  - [x] String methods on the primitive `string` type (native-backed):
+        `Length`, `Substring`, `CharAt`, `Contains`, `StartsWith`,
+        `EndsWith`, `IndexOf`, `Split`, `Trim`, `ToUpper`, `ToLower`,
+        `Replace`, `ToInt`, `ToFloat` — char-indexed (Unicode scalar values)
   - [ ] String builder (mutable)
   - [ ] String formatting
   - [ ] Regular expressions
-  - [ ] Unicode support
 
 - [ ] **Math**
   - [ ] Basic math functions (sin, cos, sqrt, etc.)
@@ -891,38 +899,33 @@
 
 ### 4.2 Collections
 
+#### ✅ Completed (v1, native-backed intrinsics)
+
+Implemented as VM natives behind a generic `NativeCall` opcode; typed
+generically by the compiler (`List<T>`, `Map<K, V>`, `Set<T>`). Caveats:
+`Map`/`Set` lookups are linear scans over insertion-ordered vectors using
+structural `value_eq` (fine for small collections, no hashing yet), and
+out-of-range/missing-key errors are VM runtime errors, not catchable Aura
+exceptions.
+
+- [x] **List** — `Add`, `Get`, `Set`, `Insert`, `RemoveAt`, `IndexOf`,
+      `Contains`, `Clear`, `Count`
+  ```aura
+  List<int> list = new List<int>();
+  list.Add(1);
+  int first = list.Get(0);
+  ```
+- [x] **Map** — `Put`, `Get`, `ContainsKey`, `Remove`, `Keys`, `Values`,
+      `Clear`, `Count` (insertion-ordered)
+- [x] **Set** — `Add`, `Contains`, `Remove`, `ToList`, `Clear`, `Count`
+
 #### ⏳ Planned
 
 **P0 - Critical**
-- [ ] **List**
-  ```aura
-  List<int> list = new List<int>();
-  list.add(1);
-  list.add(2);
-  let first = list.get(0);
-  ```
-  - [ ] ArrayList (dynamic array)
-  - [ ] LinkedList
-  - [ ] Common operations (add, remove, get, set, size)
-
-- [ ] **Map**
-  ```aura
-  Map<string, int> map = new Map<string, int>();
-  map.put("key", 42);
-  let value = map.get("key");
-  ```
-  - [ ] HashMap
-  - [ ] TreeMap (sorted)
-  - [ ] LinkedHashMap (insertion order)
-
-- [ ] **Set**
-  ```aura
-  Set<int> set = new Set<int>();
-  set.add(1);
-  set.add(2);
-  ```
-  - [ ] HashSet
-  - [ ] TreeSet (sorted)
+- [ ] Hash-based `Map`/`Set` lookup (replace linear scan; `value_hash`
+      already exists in the VM)
+- [ ] Iteration support (`foreach` over collections)
+- [ ] Sorted variants (TreeMap/TreeSet), LinkedList
 
 **P1 - High Priority**
 - [ ] **Queue & Stack**
@@ -956,22 +959,22 @@
 - [ ] **Console I/O**
   ```aura
   print("Enter your name: ");
-  string name = readLine();
-  print("Hello, " + name + "!");
+  string name = Console.ReadLine();
   ```
-  - [ ] `Console.read()`, `Console.readLine()`
-  - [ ] `Console.write()`, `Console.writeLine()`
-  - [ ] Formatted output
+  - [x] `Console.ReadLine()` (returns `null` at EOF)
+  - [ ] `Console.Read()`, formatted output
+        (`print`/`println` remain the write path for now)
 
 - [ ] **File I/O**
   ```aura
-  string content = File.readAllText("data.txt");
-  File.writeAllText("output.txt", content);
+  string content = File.ReadAllText("data.txt");
+  File.WriteAllText("output.txt", content);
   ```
-  - [ ] File reading (text and binary)
-  - [ ] File writing (text and binary)
-  - [ ] File existence, deletion, renaming
-  - [ ] Directory operations
+  - [x] Text file reading: `ReadAllText`, `ReadAllLines`
+  - [x] Text file writing: `WriteAllText`, `AppendAllText`
+  - [x] `Exists`, `Delete` (I/O failures are VM runtime errors, not
+        catchable Aura exceptions)
+  - [ ] Binary I/O, renaming, directory operations
 
 **P1 - High Priority**
 - [ ] **Streams**

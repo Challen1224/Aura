@@ -543,6 +543,12 @@ fn exec(vm: &mut Vm, op: &Op, args: &[Value]) -> Result<Option<Value>, Result<Va
             };
             Ok(Some(res))
         }
+        Op::NativeCall(id) => {
+            let native = aura_bytecode::natives::NativeId::from_u16(*id)
+                .ok_or(Err(VmError::Runtime(format!("unknown native id {id}"))))?;
+            let v = try_vm!(crate::native::exec_native(vm, native, args));
+            Ok(Some(v))
+        }
         _ => Err(Err(VmError::Runtime(format!(
             "jit: unhandled helper op {op:?}"
         )))),

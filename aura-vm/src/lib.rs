@@ -8,6 +8,7 @@
 
 pub mod heap;
 pub mod jit;
+mod native;
 
 use aura_bytecode::{AuraObject, ClassId, EnumId, EnumValue, ExceptionHandler, GcRef, MethodDef, MethodId, Module, Op, TupleValue, TypeDesc, Value};
 use heap::{Heap, HeapError};
@@ -108,6 +109,28 @@ pub(crate) fn describe_value(vm: &Vm, v: &Value) -> String {
             .and_then(|o| match o {
                 AuraObject::Instance { class_id, .. } => {
                     vm.module.classes.get(class_id).map(|c| c.name.clone())
+                }
+                AuraObject::Array { elements } | AuraObject::Set { elements } => {
+                    let inner = elements
+                        .iter()
+                        .map(|e| describe_value(vm, e))
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    Some(if matches!(o, AuraObject::Set { .. }) {
+                        format!("{{{}}}", inner)
+                    } else {
+                        format!("[{}]", inner)
+                    })
+                }
+                AuraObject::Map { entries } => {
+                    let inner = entries
+                        .iter()
+                        .map(|(k, v)| {
+                            format!("{}: {}", describe_value(vm, k), describe_value(vm, v))
+                        })
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    Some(format!("{{{}}}", inner))
                 }
                 _ => None,
             })
@@ -787,6 +810,13 @@ impl Vm {
                     
                     let handle = self.heap.allocate(AuraObject::String(result));
                     self.push(Value::String(handle));
+                }
+                Op::NativeCall(id) => {
+                    let native = aura_bytecode::natives::NativeId::from_u16(id)
+                        .ok_or_else(|| VmError::Runtime(format!("unknown native id {id}")))?;
+                    let args = self.pop_args(native.arity())?;
+                    let result = native::exec_native(self, native, &args)?;
+                    self.push(result);
                 }
                 Op::Ret => unreachable!("Ret handled above match"),
                 Op::Break | Op::Continue => unreachable!("Break/Continue should be resolved by emitter"),

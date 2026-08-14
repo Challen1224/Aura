@@ -12,6 +12,7 @@ use std::fmt;
 use std::sync::Arc;
 
 pub mod encode;
+pub mod natives;
 
 /// An Aura primitive value.
 ///
@@ -141,9 +142,21 @@ pub enum AuraObject {
         /// Field values in declaration order.
         fields: Vec<Value>,
     },
-    /// Array of values (for future array support).
+    /// Array of values (backing store for the stdlib `List<T>`).
     Array {
         /// Element values.
+        elements: Vec<Value>,
+    },
+    /// Key/value map in insertion order (backing store for the stdlib
+    /// `Map<K, V>`). Key lookup uses the VM's structural `value_eq`.
+    Map {
+        /// Entries in insertion order; keys are unique under `value_eq`.
+        entries: Vec<(Value, Value)>,
+    },
+    /// Unique element collection in insertion order (backing store for the
+    /// stdlib `Set<T>`). Membership uses the VM's structural `value_eq`.
+    Set {
+        /// Elements in insertion order; unique under `value_eq`.
         elements: Vec<Value>,
     },
     /// Enum value payload.
@@ -158,6 +171,8 @@ impl AuraObject {
         match self {
             AuraObject::String(_)
             | AuraObject::Array { .. }
+            | AuraObject::Map { .. }
+            | AuraObject::Set { .. }
             | AuraObject::Instance { .. }
             | AuraObject::Enum(_)
             | AuraObject::Tuple(_) => true,
@@ -169,8 +184,16 @@ impl AuraObject {
         let mut refs = Vec::new();
         match self {
             AuraObject::String(_) => {}
-            AuraObject::Instance { fields, .. } | AuraObject::Array { elements: fields } => {
+            AuraObject::Instance { fields, .. }
+            | AuraObject::Array { elements: fields }
+            | AuraObject::Set { elements: fields } => {
                 for v in fields {
+                    refs.extend(v.contained_refs());
+                }
+            }
+            AuraObject::Map { entries } => {
+                for (k, v) in entries {
+                    refs.extend(k.contained_refs());
                     refs.extend(v.contained_refs());
                 }
             }
@@ -593,6 +616,10 @@ pub enum Op {
     PrintLn,
     /// Concatenate N strings from the stack into a single string.
     StringConcat(u16),
+    /// Call a native stdlib function by id (see [`natives::NativeId`]). Pops
+    /// the native's arity in arguments (receiver first for instance natives)
+    /// and pushes exactly one result value.
+    NativeCall(u16),
 }
 
 /// A shared immutable handle to a module (used by VM and compiler).
