@@ -633,6 +633,10 @@ pub enum Op {
     /// the native's arity in arguments (receiver first for instance natives)
     /// and pushes exactly one result value.
     NativeCall(u16),
+    /// Runtime type test (`expr is Type`): pops a value, pushes true iff it
+    /// is an object instance of the class (or an implementer of the
+    /// interface, declared or structural). Null and non-objects test false.
+    IsInst(ClassId),
 }
 
 /// A shared immutable handle to a module (used by VM and compiler).

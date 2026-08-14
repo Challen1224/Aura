@@ -6,6 +6,17 @@ use std::collections::{HashMap, HashSet};
 /// Type substitution map: generic parameter name -> concrete type
 pub type TypeSubst = HashMap<String, Type>;
 
+/// A single narrowing fact derived from a condition (see
+/// `TypeChecker::condition_facts`).
+#[derive(Debug, Clone)]
+enum GuardFact {
+    /// Local `name` (declared as the nullable `declared`) is known non-null
+    /// and narrows to `inner`.
+    NonNull { name: String, inner: Type, declared: Type },
+    /// An `is`-test binding `name` holding the subject typed as `ty`.
+    Binding { name: String, ty: Type },
+}
+
 /// True if class `class_name` structurally satisfies interface `iface_name`
 /// (duck typing): every abstract method of the interface — and of the
 /// interfaces it extends — exists on the class or its superclasses as a
@@ -1452,6 +1463,132 @@ impl TypeChecker {
         }
     }
 
+    /// Everything a condition proves about locals when it evaluates to
+    /// `positive`. Facts compose through `&&` (both sides hold when true),
+    /// `||` (both negations hold when false) and `!` (flips polarity):
+    ///
+    /// * `x != null` when true / `x == null` when false: `x` is non-null.
+    /// * `x is T [name]` when true: the binding `name` holds the subject
+    ///   typed as `T`, and a nullable subject variable is known non-null.
+    ///
+    /// `&&`/`||` deliberately contribute nothing in the other polarity — a
+    /// false `a && b` doesn't say which side failed.
+    fn condition_facts(
+        &self,
+        cond: &Expr,
+        locals: &HashMap<String, Type>,
+        positive: bool,
+    ) -> Vec<GuardFact> {
+        let mut facts = Vec::new();
+        self.collect_facts(cond, locals, positive, &mut facts);
+        facts
+    }
+
+    fn collect_facts(
+        &self,
+        cond: &Expr,
+        locals: &HashMap<String, Type>,
+        positive: bool,
+        out: &mut Vec<GuardFact>,
+    ) {
+        if let Some((name, is_ne)) = Self::null_comparison(cond) {
+            if is_ne == positive {
+                if let Some(Type::Nullable(inner)) = locals.get(&name) {
+                    out.push(GuardFact::NonNull {
+                        name: name.clone(),
+                        inner: (**inner).clone(),
+                        declared: Type::Nullable(inner.clone()),
+                    });
+                }
+            }
+            return;
+        }
+        match cond {
+            Expr::Is(subject, ty, binding) if positive => {
+                if let Some(b) = binding {
+                    out.push(GuardFact::Binding { name: b.clone(), ty: ty.clone() });
+                }
+                if let Expr::Var(name) = subject.as_ref() {
+                    if let Some(Type::Nullable(inner)) = locals.get(name) {
+                        out.push(GuardFact::NonNull {
+                            name: name.clone(),
+                            inner: (**inner).clone(),
+                            declared: Type::Nullable(inner.clone()),
+                        });
+                    }
+                }
+            }
+            Expr::Binary(BinOp::And, a, b) if positive => {
+                self.collect_facts(a, locals, true, out);
+                self.collect_facts(b, locals, true, out);
+            }
+            Expr::Binary(BinOp::Or, a, b) if !positive => {
+                self.collect_facts(a, locals, false, out);
+                self.collect_facts(b, locals, false, out);
+            }
+            Expr::Unary(UnaryOp::Not, a) => {
+                self.collect_facts(a, locals, !positive, out);
+            }
+            _ => {}
+        }
+    }
+
+    /// Run `f` with every fact applied to `locals` (narrowed types
+    /// registered for assignment re-widening; `is`-bindings introduced),
+    /// restoring everything afterwards.
+    fn with_facts<R>(
+        &self,
+        locals: &mut HashMap<String, Type>,
+        facts: &[GuardFact],
+        f: impl FnOnce(&Self, &mut HashMap<String, Type>) -> Result<R, TypeError>,
+    ) -> Result<R, TypeError> {
+        let mut saved_locals: Vec<(String, Option<Type>)> = Vec::new();
+        let mut saved_narrowed: Vec<(String, Option<Type>)> = Vec::new();
+        for fact in facts {
+            match fact {
+                GuardFact::NonNull { name, inner, declared } => {
+                    saved_locals.push((name.clone(), locals.insert(name.clone(), inner.clone())));
+                    saved_narrowed.push((
+                        name.clone(),
+                        self.narrowed.borrow_mut().insert(name.clone(), declared.clone()),
+                    ));
+                }
+                GuardFact::Binding { name, ty } => {
+                    saved_locals.push((name.clone(), locals.insert(name.clone(), ty.clone())));
+                }
+            }
+        }
+        let result = f(self, locals);
+        for (name, prev) in saved_locals.into_iter().rev() {
+            match prev {
+                Some(t) => { locals.insert(name, t); }
+                None => { locals.remove(&name); }
+            }
+        }
+        for (name, prev) in saved_narrowed.into_iter().rev() {
+            match prev {
+                Some(t) => { self.narrowed.borrow_mut().insert(name, t); }
+                None => { self.narrowed.borrow_mut().remove(&name); }
+            }
+        }
+        result
+    }
+
+    /// Apply facts' type effects to a scratch locals map (expression
+    /// contexts: typing the rhs of `&&`/`||`, where no assignments occur).
+    fn apply_fact_types(facts: &[GuardFact], locals: &mut HashMap<String, Type>) {
+        for fact in facts {
+            match fact {
+                GuardFact::NonNull { name, inner, .. } => {
+                    locals.insert(name.clone(), inner.clone());
+                }
+                GuardFact::Binding { name, ty } => {
+                    locals.insert(name.clone(), ty.clone());
+                }
+            }
+        }
+    }
+
     fn check_stmt(
         &self,
         stmt: &Stmt,
@@ -1566,48 +1703,33 @@ impl TypeChecker {
                         cond_ty.name()
                     )));
                 }
-                // Null narrowing: `x != null` narrows x in the then-branch,
-                // `x == null` narrows x in the else-branch, and an `x == null`
-                // branch that always exits narrows x for the code after.
-                let narrow = self.narrowable(cond, locals);
-                match &narrow {
-                    Some((name, true, inner, declared)) => {
-                        self.with_narrowed(locals, name, inner.clone(), declared.clone(), |me, locals| {
-                            for s in then_branch {
-                                me.check_stmt(s, class, locals, return_ty, in_instance, generic_params)?;
-                            }
-                            Ok::<(), TypeError>(())
-                        })?;
+                // Type guards: everything the condition proves when true
+                // narrows the then-branch (null checks, `is` bindings, facts
+                // composed through `&&`/`!`); the false-facts narrow the
+                // else-branch, and remain in force after a terminating
+                // then-branch (`if (x == null) { return; }`).
+                let true_facts = self.condition_facts(cond, locals, true);
+                let false_facts = self.condition_facts(cond, locals, false);
+                self.with_facts(locals, &true_facts, |me, locals| {
+                    for s in then_branch {
+                        me.check_stmt(s, class, locals, return_ty, in_instance, generic_params)?;
                     }
-                    _ => {
-                        for s in then_branch {
-                            self.check_stmt(s, class, locals, return_ty, in_instance, generic_params)?;
-                        }
-                    }
-                }
+                    Ok(())
+                })?;
                 if let Some(else_branch) = else_branch {
-                    match &narrow {
-                        Some((name, false, inner, declared)) => {
-                            self.with_narrowed(locals, name, inner.clone(), declared.clone(), |me, locals| {
-                                for s in else_branch {
-                                    me.check_stmt(s, class, locals, return_ty, in_instance, generic_params)?;
-                                }
-                                Ok::<(), TypeError>(())
-                            })?;
+                    self.with_facts(locals, &false_facts, |me, locals| {
+                        for s in else_branch {
+                            me.check_stmt(s, class, locals, return_ty, in_instance, generic_params)?;
                         }
-                        _ => {
-                            for s in else_branch {
-                                self.check_stmt(s, class, locals, return_ty, in_instance, generic_params)?;
-                            }
-                        }
-                    }
+                        Ok(())
+                    })?;
                 }
-                // `if (x == null) { ...return/break/continue/throw; }` leaves
-                // x non-null afterwards.
-                if let Some((name, false, inner, declared)) = narrow {
-                    if else_branch.is_none() && Self::branch_terminates(then_branch) {
-                        locals.insert(name.clone(), inner);
-                        self.narrowed.borrow_mut().insert(name, declared);
+                if else_branch.is_none() && Self::branch_terminates(then_branch) {
+                    for fact in &false_facts {
+                        if let GuardFact::NonNull { name, inner, declared } = fact {
+                            locals.insert(name.clone(), inner.clone());
+                            self.narrowed.borrow_mut().insert(name.clone(), declared.clone());
+                        }
                     }
                 }
             }
@@ -1649,23 +1771,17 @@ impl TypeChecker {
                         cond_ty.name()
                     )));
                 }
-                // `while (x != null)` narrows x inside the body; assignments
-                // to x re-widen it (the condition re-narrows each iteration).
-                match self.narrowable(condition, locals) {
-                    Some((name, true, inner, declared)) => {
-                        self.with_narrowed(locals, &name, inner, declared, |me, locals| {
-                            for s in body {
-                                me.check_stmt(s, class, locals, return_ty, in_instance, generic_params)?;
-                            }
-                            Ok::<(), TypeError>(())
-                        })?;
+                // The condition's true-facts hold inside the body (null
+                // checks, `is` bindings, `&&` compositions); assignments to
+                // narrowed locals re-widen them (the condition re-narrows
+                // each iteration).
+                let body_facts = self.condition_facts(condition, locals, true);
+                self.with_facts(locals, &body_facts, |me, locals| {
+                    for s in body {
+                        me.check_stmt(s, class, locals, return_ty, in_instance, generic_params)?;
                     }
-                    _ => {
-                        for s in body {
-                            self.check_stmt(s, class, locals, return_ty, in_instance, generic_params)?;
-                        }
-                    }
-                }
+                    Ok(())
+                })?;
             }
             Stmt::For { label: _, init, condition, update, body } => {
                 self.check_stmt(init, class, locals, return_ty, in_instance, generic_params)?;
@@ -2172,6 +2288,76 @@ impl TypeChecker {
                     )));
                 }
                 Ok(ty)
+            }
+            Expr::Is(subject, ty, _binding) => {
+                let subject_ty = self.infer_expr(subject, class, locals, in_instance, return_ty, generic_params)?;
+                let subject_core = match &subject_ty {
+                    Type::Nullable(inner) => (**inner).clone(),
+                    t => t.clone(),
+                };
+                let Type::Class(tested_name, tested_args) = ty else {
+                    return Err(TypeError(format!(
+                        "`is` requires a class or interface type, got {}",
+                        ty.name()
+                    )));
+                };
+                if !tested_args.is_empty() {
+                    return Err(TypeError(
+                        "`is` cannot test generic type arguments (they are erased at runtime)".to_string(),
+                    ));
+                }
+                if crate::intrinsics::is_intrinsic_class(tested_name) {
+                    return Err(TypeError(format!(
+                        "`is` cannot test stdlib type `{}`",
+                        tested_name
+                    )));
+                }
+                let Some(tested_info) = self.classes.get(tested_name) else {
+                    return Err(TypeError(format!("unknown class `{}`", tested_name)));
+                };
+                let Type::Class(subj_name, _) = &subject_core else {
+                    return Err(TypeError(format!(
+                        "`is` requires a class-typed subject, got {}",
+                        subject_ty.name()
+                    )));
+                };
+                // Reject provably-impossible tests between unrelated concrete
+                // classes (single inheritance makes them disjoint); interfaces
+                // keep everything possible via structural satisfaction.
+                let subj_is_interface = self
+                    .classes
+                    .get(subj_name)
+                    .map(|i| i.is_interface)
+                    .unwrap_or(false);
+                if !tested_info.is_interface && !subj_is_interface {
+                    let related = self.is_subclass_of(tested_name, subj_name)
+                        || self.is_subclass_of(subj_name, tested_name);
+                    if !related {
+                        return Err(TypeError(format!(
+                            "`is` test can never succeed: {} and {} are unrelated classes",
+                            subject_ty.name(),
+                            tested_name
+                        )));
+                    }
+                }
+                Ok(Type::Bool)
+            }
+            Expr::Binary(op @ (BinOp::And | BinOp::Or), left, right) => {
+                let lt = self.infer_expr(left, class, locals, in_instance, return_ty, generic_params)?;
+                if lt != Type::Bool {
+                    return Err(TypeError("logical operators require booleans".to_string()));
+                }
+                // The rhs is only reached when the lhs is true (`&&`) or
+                // false (`||`), so its facts hold while typing the rhs:
+                // `x != null && x.f > 0`, `x is Circle c && c.r > 0`.
+                let facts = self.condition_facts(left, locals, matches!(op, BinOp::And));
+                let mut rhs_locals = locals.clone();
+                Self::apply_fact_types(&facts, &mut rhs_locals);
+                let rt = self.infer_expr(right, class, &rhs_locals, in_instance, return_ty, generic_params)?;
+                if rt != Type::Bool {
+                    return Err(TypeError("logical operators require booleans".to_string()));
+                }
+                Ok(Type::Bool)
             }
             Expr::Binary(op, left, right) => {
                 let lt = self.infer_expr(left, class, locals, in_instance, return_ty, generic_params)?;

@@ -746,6 +746,10 @@ impl<'a> Lowerer<'a> {
                 }
                 push(stack, h, KType::Unknown);
             }
+            Op::IsInst(_) => {
+                pop(stack, h)?;
+                push(stack, h, KType::Bool);
+            }
             Op::NewEnum(eid, _) => {
                 let count = enum_field_count(self.module, *eid);
                 for _ in 0..count {
@@ -1165,6 +1169,12 @@ impl<'a> Lowerer<'a> {
                 args.reverse();
                 let dst = self.new_vreg(KType::Unknown);
                 helper!(Some(dst), op.clone(), args);
+                stack.push(dst);
+            }
+            Op::IsInst(_) => {
+                let v = pop(stack)?;
+                let dst = self.new_vreg(KType::Bool);
+                helper!(Some(dst), op.clone(), vec![v]);
                 stack.push(dst);
             }
             Op::Stsfld(..) => {

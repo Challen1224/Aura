@@ -126,7 +126,20 @@
       Verified: aura-vm/tests/nullable.rs (narrowing/assert/??/?.
       semantics under interpreter and JIT, plus compile-fail cases pinning
       each strictness rule).
-  - [ ] Type guards beyond null checks (`is` checks, compound conditions)
+  - [x] Type guards beyond null checks — `expr is Type` / `expr is Type
+        name` runtime tests (new `IsInst` op reusing the catch-matching
+        instance walk, so duck-typed interfaces test correctly; null and
+        provably-impossible tests between unrelated concrete classes are
+        compile errors; generic type arguments are not testable — erased).
+        The binding is flow-scoped: visible in the then-branch, loop body,
+        and the rhs of the same `&&` chain, never the else-branch. Facts
+        compose through conditions: `&&` carries left-side facts into the
+        right side and the branch, `||` narrows by the negation, `!` flips
+        — so `x != null && x.f > 0` and `m == null || m.R() < 0` type and
+        run safely. Prerequisite fix that this soundness depends on:
+        `&&`/`||` now short-circuit (they previously evaluated both
+        operands eagerly), pinned by a side-effect-counting test. Verified
+        under both tiers (aura-vm/tests/type_guards.rs).
 
 - [x] **Literal types** (string-literal unions)
   ```aura

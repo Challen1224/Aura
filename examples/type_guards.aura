@@ -1,0 +1,78 @@
+// Type guards: `is` checks and compound conditions.
+//
+// `expr is Type name` tests the runtime type and, where the test is known
+// true, binds `name` with the tested type. Conditions compose: `&&` carries
+// its left side's facts into the right side and the branch, `||` narrows by
+// the negation, `!` flips. The logical operators short-circuit, so
+// `x != null && x.f > 0` is both well-typed and safe.
+
+interface Shape {
+    int Area();
+}
+
+class Circle {
+    int r;
+    Circle(int r) { this.r = r; }
+    int Area() { return 3 * this.r * this.r; }
+    int Radius() { return this.r; }
+}
+
+class Square {
+    int side;
+    Square(int s) { this.side = s; }
+    int Area() { return this.side * this.side; }
+}
+
+class Program {
+    static void Describe(Shape s) {
+        if (s is Circle c) {
+            print("circle with radius ");
+            print(c.Radius());
+        } else if (s is Square sq) {
+            print("square with area ");
+            print(sq.Area());
+        }
+        println();
+    }
+
+    static void Main() {
+        // Duck typing + is: Circle and Square never declare Shape.
+        Describe(new Circle(3));
+        Describe(new Square(4));
+
+        // Compound null guard: check and use in one condition.
+        Circle? found = new Circle(6);
+        if (found != null && found.Radius() > 4) {
+            print("big circle found");
+            println();
+        }
+
+        // is-binding usable in the same condition.
+        Shape s = new Circle(9);
+        if (s is Circle big && big.Radius() > 8) {
+            print("huge: ");
+            print(big.Area());
+            println();
+        }
+
+        // || narrows its right side by the left's negation.
+        Circle? m = null;
+        if (m == null || m.Radius() < 0) {
+            print("nothing to measure");
+            println();
+        }
+
+        // Guards drive per-type dispatch over mixed collections.
+        List<Shape> shapes = new List<Shape>();
+        shapes.Add(new Circle(1));
+        shapes.Add(new Square(2));
+        shapes.Add(new Circle(5));
+        int circles = 0;
+        for (Shape each in shapes) {
+            if (each is Circle) { circles = circles + 1; }
+        }
+        print("circles: ");
+        print(circles);
+        println();
+    }
+}

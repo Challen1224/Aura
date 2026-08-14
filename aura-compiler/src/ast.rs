@@ -554,6 +554,10 @@ pub enum Expr {
     /// Non-null assertion: `value!`. Asserts a nullable value is non-null,
     /// raising a runtime error if it is null.
     NonNullAssert(Box<Expr>),
+    /// Runtime type test with optional binding: `expr is Type` /
+    /// `expr is Type name`. Evaluates to bool; in narrowing positions the
+    /// binding holds the subject typed as the tested type.
+    Is(Box<Expr>, Type, Option<String>),
     /// Null conditional field access: `a?.field` returns null if `a` is null.
     NullConditionalField(Box<Expr>, String),
     /// Null conditional method call: `a?.method()` returns null if `a` is null.

@@ -557,6 +557,10 @@ fn exec(vm: &mut Vm, op: &Op, args: &[Value]) -> Result<Option<Value>, Result<Va
             let v = try_vm!(crate::native::exec_native(vm, native, args));
             Ok(Some(v))
         }
+        Op::IsInst(class_id) => {
+            let v = args.first().ok_or(Err(VmError::StackUnderflow))?;
+            Ok(Some(Value::Bool(vm.value_is_instance(v, *class_id))))
+        }
         _ => Err(Err(VmError::Runtime(format!(
             "jit: unhandled helper op {op:?}"
         )))),

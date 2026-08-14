@@ -348,6 +348,10 @@ fn expand_expr(expr: &mut Expr, aliases: &HashMap<String, TypeAliasDecl>) -> Res
             *ty = expand_type(ty)?;
             expand_expr(inner, aliases)?;
         }
+        Expr::Is(subject, ty, _) => {
+            *ty = expand_type(ty)?;
+            expand_expr(subject, aliases)?;
+        }
         Expr::NonNullAssert(inner) => {
             expand_expr(inner, aliases)?;
         }
@@ -1668,6 +1672,15 @@ impl<'a> Parser<'a> {
             } else if self.match_token(Token::Ge) {
                 let right = self.parse_range()?;
                 left = Expr::Binary(BinOp::Ge, Box::new(left), Box::new(right));
+            } else if self.match_token(Token::Is) {
+                // `expr is Type` / `expr is Type name` (type test + binding).
+                let ty = self.parse_type()?;
+                let binding = if let Some(Token::Ident(_)) = self.peek() {
+                    Some(self.consume_ident("expected binding name")?)
+                } else {
+                    None
+                };
+                left = Expr::Is(Box::new(left), ty, binding);
             } else {
                 break;
             }

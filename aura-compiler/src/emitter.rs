@@ -1187,6 +1187,26 @@ impl<'a> MethodEmitter<'a> {
                 self.emit_expr(inner)?;
                 self.ops.push(Op::NativeCall(aura_bytecode::natives::NativeId::AssertNonNull as u16));
             }
+            Expr::Is(subject, ty, binding) => {
+                let Type::Class(name, _) = ty else {
+                    return Err(format!("`is` requires a class type, got {}", ty.name()));
+                };
+                let class_id = *self
+                    .class_ids
+                    .get(name)
+                    .ok_or_else(|| format!("unknown class `{}`", name))?;
+                self.emit_expr(subject)?;
+                if let Some(b) = binding {
+                    // Store a copy of the subject under the binding name; the
+                    // typer only exposes it where the test is known true.
+                    self.ops.push(Op::Dup);
+                    self.push_local(b.clone());
+                    let idx = (self.locals.len() - 1) as u16;
+                    self.local_types.insert(b.clone(), ty.clone());
+                    self.ops.push(Op::Stloc(idx));
+                }
+                self.ops.push(Op::IsInst(class_id));
+            }
             Expr::IntLit(i, _) => self.emit_int_const(*i),
             Expr::FloatLit(f, suffix) => {
                 let idx = self.constants.len() as u32;
@@ -1357,6 +1377,30 @@ impl<'a> MethodEmitter<'a> {
                     self.emit_expr(arg)?;
                 }
                 self.ops.push(Op::NewEnum(enum_id, variant_idx as u16));
+            }
+            Expr::Binary(op @ (BinOp::And | BinOp::Or), left, right) => {
+                // Short-circuit: the right operand must not be evaluated when
+                // the left already decides the result — type guards like
+                // `x != null && x.f > 0` depend on it for soundness.
+                self.emit_expr(left)?;
+                let short_jump = self.ops.len();
+                if matches!(op, BinOp::And) {
+                    self.ops.push(Op::BrFalse(0));
+                } else {
+                    self.ops.push(Op::BrTrue(0));
+                }
+                self.emit_expr(right)?;
+                let end_jump = self.ops.len();
+                self.ops.push(Op::Br(0));
+                let short_target = self.ops.len() as u32;
+                self.ops.push(Op::LdBool(matches!(op, BinOp::Or)));
+                let end_target = self.ops.len() as u32;
+                if matches!(op, BinOp::And) {
+                    self.ops[short_jump] = Op::BrFalse(short_target);
+                } else {
+                    self.ops[short_jump] = Op::BrTrue(short_target);
+                }
+                self.ops[end_jump] = Op::Br(end_target);
             }
             Expr::Binary(op, left, right) => {
                 self.emit_expr(left)?;
@@ -2466,6 +2510,7 @@ impl<'a> MethodEmitter<'a> {
                     t => t,
                 }
             }
+            Expr::Is(..) => Type::Bool,
             Expr::NullCoalesce(left, right) => {
                 match self.expr_ty(left)? {
                     Type::Nullable(t) => {

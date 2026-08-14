@@ -431,6 +431,7 @@ fn write_op<W: Write>(w: &mut W, op: &Op) -> io::Result<()> {
         Op::TupleField(idx) => (101, idx.to_le_bytes().to_vec()),
         Op::StringConcat(count) => (102, count.to_le_bytes().to_vec()),
         Op::NativeCall(id) => (110, id.to_le_bytes().to_vec()),
+        Op::IsInst(ClassId(id)) => (111, id.to_le_bytes().to_vec()),
     };
     write_u8(w, code)?;
     w.write_all(&extra)
@@ -502,6 +503,7 @@ fn read_op<R: Read>(r: &mut R) -> io::Result<Op> {
         101 => Op::TupleField(read_u16(r)?),
         102 => Op::StringConcat(read_u16(r)?),
         110 => Op::NativeCall(read_u16(r)?),
+        111 => Op::IsInst(ClassId(read_u32(r)?)),
         _ => return Err(io::Error::new(io::ErrorKind::InvalidData, "bad opcode")),
     })
 }

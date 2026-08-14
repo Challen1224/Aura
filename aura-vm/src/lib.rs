@@ -907,6 +907,11 @@ impl Vm {
                     let result = native::exec_native(self, native, &args)?;
                     self.push(result);
                 }
+                Op::IsInst(class_id) => {
+                    let v = self.pop()?;
+                    let result = self.value_is_instance(&v, class_id);
+                    self.push(Value::Bool(result));
+                }
                 Op::Ret => unreachable!("Ret handled above match"),
                 Op::Break | Op::Continue => unreachable!("Break/Continue should be resolved by emitter"),
                 Op::Throw => {
@@ -1061,6 +1066,18 @@ impl Vm {
             (TypeDesc::GenericParam(_), _) => true,
             (TypeDesc::Class(target, _), Value::Object(handle)) => match self.heap.get(*handle) {
                 Ok(AuraObject::Instance { class_id, .. }) => self.is_instance_of(*class_id, *target),
+                _ => false,
+            },
+            _ => false,
+        }
+    }
+
+    /// True if `v` is an object instance of `base` (same class, subclass, or
+    /// declared/structural implementer). Null and non-objects are not.
+    pub(crate) fn value_is_instance(&self, v: &Value, base: ClassId) -> bool {
+        match v {
+            Value::Object(handle) => match self.heap.get(*handle) {
+                Ok(AuraObject::Instance { class_id, .. }) => self.is_instance_of(*class_id, base),
                 _ => false,
             },
             _ => false,
