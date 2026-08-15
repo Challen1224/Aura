@@ -790,6 +790,18 @@ impl<'a> Parser<'a> {
                     name: "stackTrace".to_string(),
                     init: None,
                 }),
+                // Exception chaining: the wrapped original, null when the
+                // exception stands alone.
+                Member::Field(FieldDecl {
+                    is_static: false,
+                    visibility: Visibility::Public,
+                    ty: Type::Nullable(Box::new(Type::Class(
+                        "Exception".to_string(),
+                        Vec::new(),
+                    ))),
+                    name: "cause".to_string(),
+                    init: None,
+                }),
             ],
             extension_on: None,
             nested: Vec::new(),

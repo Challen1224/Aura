@@ -1505,6 +1505,38 @@ impl Vm {
     /// Format a thrown value for the uncaught-exception error message. Exception
     /// instances render as `Class: message` followed by their stack trace.
     fn describe_exception(&self, e: &Value) -> String {
+        let mut out = self.describe_exception_one(e);
+        // Walk the cause chain (depth-capped against cycles).
+        let mut cur = self.exception_cause(e);
+        let mut depth = 0;
+        while let Some(c) = cur {
+            if depth >= 8 {
+                out.push_str("\ncaused by: ... (chain truncated)");
+                break;
+            }
+            out.push_str("\ncaused by: ");
+            out.push_str(&self.describe_exception_one(&c));
+            cur = self.exception_cause(&c);
+            depth += 1;
+        }
+        out
+    }
+
+    /// The `cause` field of an exception instance, when set.
+    fn exception_cause(&self, e: &Value) -> Option<Value> {
+        let Value::Object(handle) = e else { return None };
+        let Ok(AuraObject::Instance { class_id, fields }) = self.heap.get(*handle) else {
+            return None;
+        };
+        let class = self.module.classes.get(class_id)?;
+        let idx = class.fields.iter().position(|f| f.name == "cause")?;
+        match fields.get(idx) {
+            Some(Value::Object(h)) => Some(Value::Object(*h)),
+            _ => None,
+        }
+    }
+
+    fn describe_exception_one(&self, e: &Value) -> String {
         let Value::Object(handle) = e else {
             return describe_value(self, e);
         };
@@ -1529,6 +1561,7 @@ impl Vm {
                 .iter()
                 .position(|f| f.name == name)
                 .and_then(|idx| fields.get(idx))
+                .filter(|v| !matches!(v, Value::Null))
                 .map(|v| self.value_as_string(v))
                 .unwrap_or_default()
         };

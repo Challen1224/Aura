@@ -853,7 +853,23 @@
   ```
 
 **P1 - High Priority**
-- [ ] **Exception chaining**
+- [x] **Exception chaining**
+  ```aura
+  catch (DbError e) { throw new AppError("boot failed", e); }
+  // AppError's ctor: this.cause = e;   ... later: e.cause?.message
+  ```
+  The builtin `Exception` gained `cause` (`Exception?`, null by
+  default) — subclasses store the wrapped original through ordinary
+  constructors and field assignment, and reading `cause` follows the
+  standard nullable rules (narrow before use, `is` refines the concrete
+  type). The uncaught-exception report walks the chain and prints
+  `caused by:` lines per link, depth-capped at 8 against cyclic chains
+  (`... (chain truncated)`), and null fields no longer render as a
+  stray "null" line. Zero compiler changes beyond the injected field —
+  chaining is plain object graph, so it survives catches, rethrows, GC,
+  and the JIT tier boundary unchanged. Verified under both tiers
+  (aura-vm/tests/exception_chaining.rs,
+  examples/exception_chaining.aura).
 
 **P2 - Medium Priority**
 - [ ] **Typed throws**

@@ -1,0 +1,47 @@
+// Exception chaining.
+//
+// Every exception carries a `cause` (Exception?, null unless set). To wrap
+// a low-level failure with context, catch it and throw a new exception
+// that stores the original in `cause`. Uncaught exceptions print the whole
+// chain as `caused by:` lines. `cause` is nullable — narrow before use.
+
+class DbError : Exception {
+    DbError(string m) { this.message = m; }
+}
+
+class AppError : Exception {
+    AppError(string m, Exception cause) {
+        this.message = m;
+        this.cause = cause;
+    }
+}
+
+class Store {
+    static string load(string key) throws DbError {
+        throw new DbError("connection refused for {key}");
+    }
+}
+
+class App {
+    static string profile(string user) throws AppError {
+        try {
+            return Store.load("profile:{user}");
+        } catch (DbError e) {
+            throw new AppError("could not load profile for {user}", e);
+        }
+    }
+}
+
+class Program {
+    static void Main() {
+        try {
+            App.profile("charchar");
+        } catch (AppError e) {
+            print(e.message); println();
+            var c = e.cause;
+            if (c != null) {
+                print("  caused by: "); print(c.message); println();
+            }
+        }
+    }
+}
