@@ -99,10 +99,13 @@ fn tags_cannot_be_dodged() {
             "FileHandle<Open> o = Files.OpenFile(1); FileHandle<Closed> c = o;",
             "cannot assign",
         ),
-        // Raw instantiation dodges the tag.
+        // Raw instantiation dodges the tag. (Construction-site inference
+        // now runs first and fails — the phantom parameter appears in no
+        // constructor argument — so the message asks for explicit
+        // arguments; still a compile error.)
         (
             "FileHandle<Open> o = new FileHandle(1);",
-            "expects 1 type argument(s), got 0",
+            "cannot infer type arguments for `FileHandle`",
         ),
         // Raw type reference dodges the tag.
         (

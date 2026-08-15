@@ -653,10 +653,27 @@
   cleanup). Verified under both tiers (aura-vm/tests/variance.rs,
   examples/variance.aura).
 
-- [ ] **Generic type inference**
+- [x] **Generic type inference**
   ```aura
-  let box = new Box(42);  // Infer Box<int>
+  var box = new Box(42);  // Infer Box<int>
   ```
+  Constructor calls on generic classes without explicit type arguments
+  infer them by unifying constructor parameters against the argument
+  types — the same machinery as generic-method call sites. Bindings
+  from several arguments join through assignability (`new Pair(derived,
+  base)` binds the wider type); conflicting arguments are an error;
+  constructors that never mention a parameter cannot determine it and
+  say so (phantom-tagged classes keep their guarantee — that test's
+  pinned message changed accordingly); constraints (bounds, unions,
+  `new()`) apply to inferred arguments exactly as to explicit ones.
+  Works with `var` and explicitly-typed targets, records, multi-param
+  classes, and nested inference (`new Box(new Box(7))`). Also fixed a
+  pre-existing bug it exposed: field access on a generic instantiation
+  (`pair.k.Length`) failed to compile even with explicit type arguments
+  — the emitter never substituted the receiver's instantiation into
+  field types (methods substituted; fields did not). Verified under
+  both tiers (aura-vm/tests/construction_inference.rs,
+  examples/construction_inference.aura).
 
 **P1 - High Priority**
 - [ ] **Higher-kinded types** (research)

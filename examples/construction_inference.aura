@@ -1,0 +1,42 @@
+// Generic type inference at construction.
+//
+// `new Box(42)` binds a generic class's type parameters from the
+// constructor arguments — no explicit `<int>` needed. Bindings from
+// several arguments join through assignability (the wider type wins);
+// conflicting arguments are a compile error, and constraints apply to
+// inferred arguments exactly as to explicit ones.
+
+class Box<T> {
+    T v;
+    Box(T v) { this.v = v; }
+    T get() { return this.v; }
+}
+
+class Pair<K, V> {
+    K key;
+    V val;
+    Pair(K key, V val) { this.key = key; this.val = val; }
+}
+
+record Point<T>(T x, T y);
+
+class Program {
+    static void Main() {
+        var b = new Box(42);
+        print("box: "); print(b.get()); println();
+
+        var p = new Pair("answer", 6 * 7);
+        print(p.key); print(" = "); print(p.val); println();
+
+        var pt = new Point(1.5, 2.5);
+        print("sum: "); print(pt.x + pt.y); println();
+
+        var nested = new Box(new Box("deep"));
+        print("nested: "); print(nested.get().get()); println();
+
+        // These would be compile errors:
+        //   new Box(1, 2);        // no matching constructor
+        //   var w = new Wrap(5);  // if Wrap's ctor never mentions T
+        //   new Pair(1, "x").key + 1;  // fine — K is int32, V is string
+    }
+}

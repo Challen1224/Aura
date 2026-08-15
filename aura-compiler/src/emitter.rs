@@ -1684,6 +1684,22 @@ impl<'a> MethodEmitter<'a> {
                     self.ops.push(Op::NativeCall(ctor as u16));
                     return Ok(());
                 }
+                // Inferred instantiation (`new Box(42)`): resolve the same
+                // type arguments the typer inferred so constructor overload
+                // matching and the NewObj type descriptors line up with the
+                // explicit form.
+                let inferred_args;
+                let type_args: &Vec<Type> = if type_args.is_empty() {
+                    match self.infer_new_type_args(class_name, args) {
+                        Some(v) => {
+                            inferred_args = v;
+                            &inferred_args
+                        }
+                        None => type_args,
+                    }
+                } else {
+                    type_args
+                };
                 let class_id = *self.class_ids.get(class_name).ok_or_else(|| {
                     format!("unknown class `{}`", class_name)
                 })?;
@@ -2413,7 +2429,16 @@ impl<'a> MethodEmitter<'a> {
                 let owner = self.expr_class(obj)?;
                 let layout = self.field_layout.get(&owner)?;
                 let idx = layout.iter().rposition(|(n, _)| n == name)?;
-                match Self::strip_nullable(layout[idx].1.clone()) {
+                let mut t = layout[idx].1.clone();
+                // Substitute the receiver's instantiation for generic fields.
+                if let Ok(Type::Class(rn, rargs)) = self.expr_ty(obj) {
+                    if !rargs.is_empty() {
+                        if let Some(rinfo) = self.program.classes.get(&rn) {
+                            t = substitute_type(&t, &build_subst(&rinfo.generic_params, &rargs));
+                        }
+                    }
+                }
+                match Self::strip_nullable(t) {
                     Type::Class(c, _) => Some(c),
                     _ => None,
                 }
@@ -2489,6 +2514,57 @@ impl<'a> MethodEmitter<'a> {
     fn is_record_type(&self, ty: &Type) -> bool {
         matches!(ty, Type::Class(name, _)
             if self.program.classes.get(name).map(|c| c.is_record).unwrap_or(false))
+    }
+
+    /// Mirror of the typer's construction-site inference (`new Box(42)` ->
+    /// `Box<int>`): unify constructor parameters against argument types.
+    /// The typer has already validated the call; first-binding-wins is
+    /// enough here.
+    fn infer_new_type_args(&self, class_name: &str, args: &[Expr]) -> Option<Vec<Type>> {
+        let info = self.program.classes.get(class_name)?;
+        if info.generic_params.is_empty() {
+            return None;
+        }
+        let widen = |t: Type| match t {
+            Type::IntLit(v) => {
+                if v >= i32::MIN as i64 && v <= i32::MAX as i64 {
+                    Type::Int32
+                } else {
+                    Type::Int64
+                }
+            }
+            Type::FloatLit(_) => Type::Float64,
+            Type::StringLit(_) => Type::String,
+            other => other,
+        };
+        let vars: std::collections::HashSet<String> =
+            info.generic_params.iter().map(|g| g.name.clone()).collect();
+        for ctor in &info.constructors {
+            if ctor.params.len() != args.len() {
+                continue;
+            }
+            let mut bindings = HashMap::new();
+            for (param, arg) in ctor.params.iter().zip(args) {
+                if let Ok(at) = self.expr_ty(arg) {
+                    crate::typer::unify_generic_types(
+                        param,
+                        &widen(at),
+                        &vars,
+                        &mut bindings,
+                        &mut |_, prev, _| Some(prev),
+                    );
+                }
+            }
+            if let Some(all) = info
+                .generic_params
+                .iter()
+                .map(|gp| bindings.get(&gp.name).cloned())
+                .collect::<Option<Vec<Type>>>()
+            {
+                return Some(all);
+            }
+        }
+        None
     }
 
     /// The extension class defining `method` for the target `key`, if any.
@@ -2608,7 +2684,16 @@ impl<'a> MethodEmitter<'a> {
                         .ok_or_else(|| format!("unknown variable `{}`", name))?
                 }
             }
-            Expr::New(class_name, type_args, _) => Type::Class(class_name.clone(), type_args.clone()),
+            Expr::New(class_name, type_args, args) => {
+                // Constructor calls without explicit type arguments carry
+                // their inferred instantiation (`new Box(42)` -> Box<int>).
+                if type_args.is_empty() {
+                    if let Some(inferred) = self.infer_new_type_args(class_name, args) {
+                        return Ok(Type::Class(class_name.clone(), inferred));
+                    }
+                }
+                Type::Class(class_name.clone(), type_args.clone())
+            }
             Expr::With(obj, _) => self.expr_ty(obj)?,
             Expr::Field(obj, name) => {
                 // Intrinsic properties (`list.Count`, `s.Length`) and
@@ -2635,11 +2720,22 @@ impl<'a> MethodEmitter<'a> {
                 let layout = self.field_layout.get(&owner).ok_or_else(|| {
                     format!("unknown field layout for `{}`", owner)
                 })?;
-                layout
+                let raw = layout
                     .iter()
                     .find(|(n, _)| n == name)
                     .map(|(_, t)| t.clone())
-                    .ok_or_else(|| format!("unknown field `{}` on `{}`", name, owner))?
+                    .ok_or_else(|| format!("unknown field `{}` on `{}`", name, owner))?;
+                // Substitute the receiver's instantiation: field `k` of a
+                // `Pair<string, float>` is a string, not `K`.
+                if let Ok(Type::Class(rn, rargs)) = self.expr_ty(obj) {
+                    if !rargs.is_empty() {
+                        if let Some(rinfo) = self.program.classes.get(&rn) {
+                            let subst = build_subst(&rinfo.generic_params, &rargs);
+                            return Ok(substitute_type(&raw, &subst));
+                        }
+                    }
+                }
+                raw
             }
             Expr::StaticField(class_name, name) => {
                 let info = self.program.classes.get(class_name).ok_or_else(|| {

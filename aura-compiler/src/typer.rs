@@ -1615,6 +1615,78 @@ impl TypeChecker {
         None
     }
 
+    /// Infer a generic class's type arguments from a constructor call with
+    /// none written (`new Box(42)` -> `Box<int>`): the first constructor of
+    /// matching arity whose parameters unify against the argument types and
+    /// bind every parameter wins. Bindings from several arguments join
+    /// through assignability, exactly like generic-method inference.
+    fn infer_new_type_args(
+        &self,
+        class_info: &ClassInfo,
+        class_name: &str,
+        arg_types: &[Type],
+    ) -> Result<Vec<Type>, TypeError> {
+        let vars: HashSet<String> = class_info
+            .generic_params
+            .iter()
+            .map(|gp| gp.name.clone())
+            .collect();
+        let mut last_conflict: Option<(String, Type, Type)> = None;
+        for ctor in &class_info.constructors {
+            if ctor.params.len() != arg_types.len() {
+                continue;
+            }
+            let mut bindings: HashMap<String, Type> = HashMap::new();
+            let mut conflict: Option<(String, Type, Type)> = None;
+            for (param, arg_ty) in ctor.params.iter().zip(arg_types) {
+                unify_generic_types(
+                    param,
+                    &self.resolve_literal(arg_ty),
+                    &vars,
+                    &mut bindings,
+                    &mut |name, prev, new| {
+                        if self.is_assignable(&prev, &new) {
+                            Some(prev)
+                        } else if self.is_assignable(&new, &prev) {
+                            Some(new)
+                        } else {
+                            if conflict.is_none() {
+                                conflict = Some((name.to_string(), prev.clone(), new.clone()));
+                            }
+                            None
+                        }
+                    },
+                );
+            }
+            if let Some(c) = conflict {
+                last_conflict = Some(c);
+                continue;
+            }
+            if let Some(all) = class_info
+                .generic_params
+                .iter()
+                .map(|gp| bindings.get(&gp.name).cloned())
+                .collect::<Option<Vec<Type>>>()
+            {
+                return Ok(all);
+            }
+        }
+        if let Some((name, a, b)) = last_conflict {
+            return Err(TypeError(format!(
+                "cannot infer `{}` for `new {}(...)`: conflicting argument types {} and {}",
+                name,
+                class_name,
+                a.name(),
+                b.name()
+            )));
+        }
+        Err(TypeError(format!(
+            "cannot infer type arguments for `{}` from this constructor call; write \
+             `new {}<...>(...)` explicitly",
+            class_name, class_name
+        )))
+    }
+
     /// The declared type parameter a value of type `ty` refers to, if any.
     /// `T` appears as `Type::GenericParam("T")` or — since the parser emits
     /// plain idents as class types — `Type::Class("T", [])` when no class of
@@ -3496,15 +3568,27 @@ impl TypeChecker {
                         class_name
                     )));
                 }
+                let arg_types: Vec<Type> = args
+                    .iter()
+                    .map(|a| self.infer_expr(a, class, locals, in_instance, return_ty, generic_params))
+                    .collect::<Result<_, _>>()?;
+                // Generic type inference at construction: `new Box(42)`
+                // binds the class's type parameters by unifying constructor
+                // parameters against the argument types, exactly like
+                // generic-method call sites.
+                let inferred: Vec<Type>;
+                let type_args: &Vec<Type> =
+                    if type_args.is_empty() && !class_info.generic_params.is_empty() {
+                        inferred = self.infer_new_type_args(class_info, class_name, &arg_types)?;
+                        &inferred
+                    } else {
+                        type_args
+                    };
                 self.validate_type_args(class_name, type_args, generic_params)?;
                 for arg in type_args {
                     self.validate_type_with_generics(arg, generic_params)?;
                 }
                 let subst = build_subst(&class_info.generic_params, type_args);
-                let arg_types: Vec<Type> = args
-                    .iter()
-                    .map(|a| self.infer_expr(a, class, locals, in_instance, return_ty, generic_params))
-                    .collect::<Result<_, _>>()?;
                 let selected = class_info
                     .constructors
                     .iter()
