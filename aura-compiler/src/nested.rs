@@ -172,7 +172,7 @@ impl Ctx<'_> {
                     .map(|gp| GenericParam {
                         name: gp.name.clone(),
                         variance: gp.variance,
-                        constraint: gp.constraint.as_ref().map(|c| self.ty(c)),
+                        bounds: gp.bounds.iter().map(|c| self.ty(c)).collect(),
                         union: gp.union.iter().map(|t| self.ty(t)).collect(),
                         requires_new: gp.requires_new,
                     })

@@ -1,0 +1,46 @@
+// Generic constraints with multiple bounds.
+//
+// `where T : Entity, ICloneable` requires the type argument to satisfy
+// every bound — a base class and any number of interfaces — and members of
+// every bound become callable on T values. Bounds can also combine with
+// new(): `where T : ICloneable, new()`.
+
+class Entity {
+    int id;
+    Entity(int id) { this.id = id; }
+    int getId() { return this.id; }
+}
+
+interface ICloneable {
+    string cloneLabel();
+}
+
+class Document : Entity, ICloneable {
+    Document(int id) : super(id) { }
+    string cloneLabel() { return "doc-copy"; }
+}
+
+class Repository<T> where T : Entity, ICloneable {
+    T item;
+    Repository(T item) { this.item = item; }
+
+    string describe() {
+        return "#{this.item.getId()} ({this.item.cloneLabel()})";
+    }
+}
+
+class Program {
+    static <T> string tag(T v) where T : Entity, ICloneable {
+        return "{v.cloneLabel()}/{v.getId()}";
+    }
+
+    static void Main() {
+        Repository<Document> repo = new Repository<Document>(new Document(42));
+        print(repo.describe()); println();
+        print(Program.tag(new Document(7))); println();
+
+        // These would be compile errors:
+        //   Repository<Entity> r = ...;   // Entity is no ICloneable
+        //   where T : int | float, Entity // unions never combine with bounds
+    }
+}

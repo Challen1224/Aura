@@ -708,7 +708,7 @@ impl TypeChecker {
                     .map(|n| GenericParam {
                         name: n.to_string(),
                         variance: Variance::Invariant,
-                        constraint: None,
+                        bounds: Vec::new(),
                         union: Vec::new(),
                         requires_new: false,
                     })
@@ -4723,12 +4723,32 @@ impl TypeChecker {
                 // parameters have no callable members.
                 if args.is_empty() {
                     if let Some(gp) = generic_params.iter().find(|gp| gp.name == *name) {
-                        match &gp.constraint {
-                            Some(Type::Class(cn, cargs)) => (cn.clone(), cargs.clone()),
-                            _ => {
+                        // With several bounds, the first one declaring the
+                        // method answers the call.
+                        let hit = gp.bounds.iter().find_map(|b| match b {
+                            Type::Class(cn, cargs)
+                                if self.find_method(cn, &call.method).is_some() =>
+                            {
+                                Some((cn.clone(), cargs.clone()))
+                            }
+                            _ => None,
+                        });
+                        match hit {
+                            Some(h) => h,
+                            None => {
                                 return Err(TypeError(format!(
-                                    "cannot call `{}` on type parameter `{}` without a constraint",
-                                    call.method, name
+                                    "cannot call `{}` on type parameter `{}`: no bound declares it (bounds: {})",
+                                    call.method,
+                                    name,
+                                    if gp.bounds.is_empty() {
+                                        "none".to_string()
+                                    } else {
+                                        gp.bounds
+                                            .iter()
+                                            .map(|b| b.name())
+                                            .collect::<Vec<_>>()
+                                            .join(", ")
+                                    }
                                 )));
                             }
                         }
@@ -5070,7 +5090,7 @@ impl TypeChecker {
                         gp.name, call.method
                     )));
                 };
-                if let Some(constraint) = &gp.constraint {
+                for constraint in &gp.bounds {
                     if !self.is_assignable(constraint, bound) {
                         return Err(TypeError(format!(
                             "inferred type {} for `{}` in `{}` does not satisfy constraint {}",
@@ -5418,7 +5438,7 @@ impl TypeChecker {
             if is_param {
                 continue;
             }
-            if let Some(constraint) = &param.constraint {
+            for constraint in &param.bounds {
                 if !self.is_assignable(constraint, arg) {
                     return Err(TypeError(format!(
                         "type argument {} for parameter `{}` of `{}` does not satisfy constraint {}",

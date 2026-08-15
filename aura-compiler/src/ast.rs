@@ -160,8 +160,10 @@ pub struct GenericParam {
     /// parameters). Checked conservatively: any occurrence in the wrong
     /// side's types is rejected, including nested ones.
     pub variance: Variance,
-    /// Optional constraint (interface/class that the type must implement/extend).
-    pub constraint: Option<Type>,
+    /// Subtype bounds the type argument must satisfy, all of them:
+    /// `where T : Entity, ICloneable`. Members of every bound are callable
+    /// on `T` values (first bound declaring the member wins).
+    pub bounds: Vec<Type>,
     /// Union constraint: `where T : int | float`. When non-empty, a type
     /// argument must be assignable to one of the alternatives. Compile-time
     /// only (checked at instantiation and call sites); all-numeric unions

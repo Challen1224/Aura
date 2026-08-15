@@ -400,11 +400,11 @@ fn expand_generic_params(
                 union: Vec::new(),
                 requires_new: false,
                 name: gp.name.clone(),
-                constraint: gp
-                    .constraint
-                    .as_ref()
+                bounds: gp
+                    .bounds
+                    .iter()
                     .map(|c| expand(c, aliases, &mut Vec::new()))
-                    .transpose()?,
+                    .collect::<Result<Vec<_>, _>>()?,
             })
         })
         .collect()
@@ -1233,7 +1233,7 @@ impl<'a> Parser<'a> {
             let mut gp = GenericParam {
                 name,
                 variance,
-                constraint: None,
+                bounds: Vec::new(),
                 union: Vec::new(),
                 requires_new: false,
             };
@@ -1270,16 +1270,16 @@ impl<'a> Parser<'a> {
             return Ok(());
         }
         let first = self.parse_type()?;
-        if gp.constraint.is_some() || !gp.union.is_empty() {
-            return Err(format!(
-                "type parameter `{}` is already constrained",
-                gp.name
-            ));
-        }
         if self.check(Token::Pipe) {
-            if gp.requires_new {
+            if !gp.union.is_empty() {
                 return Err(format!(
-                    "`new()` cannot be combined with a union constraint on `{}`",
+                    "type parameter `{}` is already constrained",
+                    gp.name
+                ));
+            }
+            if gp.requires_new || !gp.bounds.is_empty() {
+                return Err(format!(
+                    "a union constraint on `{}` cannot be combined with other constraints",
                     gp.name
                 ));
             }
@@ -1289,7 +1289,14 @@ impl<'a> Parser<'a> {
             }
             gp.union = alts;
         } else {
-            gp.constraint = Some(first);
+            if !gp.union.is_empty() {
+                return Err(format!(
+                    "a union constraint on `{}` cannot be combined with other constraints",
+                    gp.name
+                ));
+            }
+            // Multiple subtype bounds accumulate: `where T : Entity, ICloneable`.
+            gp.bounds.push(first);
         }
         Ok(())
     }

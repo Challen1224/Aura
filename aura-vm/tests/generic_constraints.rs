@@ -150,12 +150,13 @@ fn constraint_rules_are_enforced() {
                 .to_string(),
             "no type parameter of that name is declared",
         ),
-        // One constraint per parameter.
+        // Unions stand alone: a bound cannot join one. (Message changed
+        // when multiple bounds landed; the rejection is unchanged.)
         (
             "class C<T : int | float> where T : IShow { int v; } \
              interface IShow { int show(); } class Program { static void Main() { } }"
                 .to_string(),
-            "already constrained",
+            "cannot be combined with other constraints",
         ),
         // Arithmetic on T needs a numeric union...
         (

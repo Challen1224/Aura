@@ -247,7 +247,7 @@ impl Emitter {
                 let class_generic_params: Vec<aura_bytecode::GenericParam> = class.generic_params.iter().map(|gp| {
                     aura_bytecode::GenericParam {
                         name: gp.name.clone(),
-                        constraint: gp.constraint.as_ref().map(|c| map_type(c, &class_ids, &enum_ids, &[])),
+                        constraint: gp.bounds.first().map(|c| map_type(c, &class_ids, &enum_ids, &[])),
                         variance: match gp.variance {
                             crate::ast::Variance::Covariant => aura_bytecode::Variance::Covariant,
                             crate::ast::Variance::Contravariant => aura_bytecode::Variance::Contravariant,
@@ -514,7 +514,7 @@ impl Emitter {
             generic_params: m.generic_params.iter().map(|gp| {
                 aura_bytecode::GenericParam {
                     name: gp.name.clone(),
-                    constraint: gp.constraint.as_ref().map(|c| map_type(c, class_ids, enum_ids, class_generic_params)),
+                    constraint: gp.bounds.first().map(|c| map_type(c, class_ids, enum_ids, class_generic_params)),
                     variance: aura_bytecode::Variance::Invariant,
                 }
             }).collect(),
@@ -2739,6 +2739,40 @@ impl<'a> MethodEmitter<'a> {
         Ok(())
     }
 
+    /// A receiver typed as a generic parameter resolves through its
+    /// bounds: the first bound whose class (or a base/extended interface)
+    /// declares the method answers. Mirrors the typer's bounded
+    /// polymorphism.
+    fn bounded_receiver(&self, name: &str, method: &str) -> Option<(String, Vec<Type>)> {
+        let gp = self
+            .method
+            .generic_params
+            .iter()
+            .chain(self.class_info.generic_params.iter())
+            .find(|g| g.name == name)?;
+        gp.bounds.iter().find_map(|b| {
+            let Type::Class(cn, cargs) = b else { return None };
+            let mut queue = vec![cn.clone()];
+            let mut seen = std::collections::HashSet::new();
+            while let Some(k) = queue.pop() {
+                if !seen.insert(k.clone()) {
+                    continue;
+                }
+                let Some(info) = self.program.classes.get(&k) else {
+                    continue;
+                };
+                if info.methods.contains_key(method) {
+                    return Some((cn.clone(), cargs.clone()));
+                }
+                if let Some(sup) = &info.super_class {
+                    queue.push(sup.clone());
+                }
+                queue.extend(info.interfaces.iter().cloned());
+            }
+            None
+        })
+    }
+
     /// Parameter types of the method a call resolves to, with the
     /// receiver's class-level substitution applied — used to target-type
     /// lambda arguments. Mirrors `call_return_type`'s resolution.
@@ -3215,6 +3249,17 @@ impl<'a> MethodEmitter<'a> {
                     let Type::Class(c, args) = obj_ty else {
                         return Err("cannot determine call target class".to_string());
                     };
+                    if !self.program.classes.contains_key(&c) {
+                        if let Some((bc, bargs)) = self.bounded_receiver(&c, &call.method) {
+                            class_name = bc;
+                            receiver_type_args = bargs;
+                            is_instance = true;
+                            method_name = call.method.clone();
+                            return self.resolve_method_return(
+                                class_name, method_name, is_instance, receiver_type_args, call,
+                            );
+                        }
+                    }
                     class_name = c;
                     receiver_type_args = args;
                     is_instance = true;
@@ -3233,6 +3278,17 @@ impl<'a> MethodEmitter<'a> {
                 let Type::Class(c, args) = obj_ty else {
                     return Err("cannot determine call target class".to_string());
                 };
+                if !self.program.classes.contains_key(&c) {
+                    if let Some((bc, bargs)) = self.bounded_receiver(&c, &call.method) {
+                        return self.resolve_method_return(
+                            bc,
+                            call.method.clone(),
+                            true,
+                            bargs,
+                            call,
+                        );
+                    }
+                }
                 class_name = c;
                 receiver_type_args = args;
                 is_instance = true;
@@ -3265,6 +3321,19 @@ impl<'a> MethodEmitter<'a> {
             is_instance = false;
             method_name = call.method.clone();
         }
+        self.resolve_method_return(class_name, method_name, is_instance, receiver_type_args, call)
+    }
+
+    /// Tail of `call_return_type`: resolve `class_name.method_name` through
+    /// the superclass chain and substitute the receiver's type arguments.
+    fn resolve_method_return(
+        &self,
+        class_name: String,
+        method_name: String,
+        is_instance: bool,
+        receiver_type_args: Vec<Type>,
+        call: &CallExpr,
+    ) -> Result<Type, String> {
         // Substitute the receiver's type arguments into the return type so
         // chained calls on generic receivers keep concrete types.
         let subst = self

@@ -177,7 +177,7 @@ class Util {
 }
 class Program { static void Main() { } }
 "#,
-        "without a constraint",
+        "no bound declares it",
     );
 }
 

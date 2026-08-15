@@ -739,10 +739,24 @@
   both tiers (aura-vm/tests/multi_param_generics.rs,
   examples/multi_param_generics.aura).
 
-- [ ] **Generic constraints with multiple bounds**
+- [x] **Generic constraints with multiple bounds**
   ```aura
   class Repository<T> where T : Entity, ICloneable { }
   ```
+  `GenericParam` now carries a bound *list* rather than a single
+  constraint: a type argument must satisfy every bound (class and any
+  number of interfaces), each violation naming the failing bound, at
+  instantiations and generic-method call sites alike. Bounded member
+  access searches all bounds — the first bound declaring the method
+  answers, and a method no bound declares gets an error listing the
+  bounds. The emitter learned bounded receivers too (previously chained
+  calls on a bounded `T`, like `v.name().Length`, could not be typed at
+  emission — latent single-bound gap). Bounds combine with `new()`;
+  union constraints stand alone and reject any combination (two
+  existing tests pinned the old wordings — `already constrained`,
+  `without a constraint` — and were updated to the new messages;
+  rejections unchanged). Verified under both tiers
+  (aura-vm/tests/multiple_bounds.rs, examples/multiple_bounds.aura).
 
 **P2 - Medium Priority**
 - [ ] **Variadic generics**
