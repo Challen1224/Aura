@@ -1162,7 +1162,80 @@ impl<'a> Parser<'a> {
             }
         }
         let ty = self.parse_type()?;
-        let name = self.consume_ident("expected member name")?;
+        let mut name = self.consume_ident("expected member name")?;
+
+        // Operator overload: `Vector operator+(Vector other) { ... }`. The
+        // declaration is an ordinary instance method named `operator+`;
+        // `a + b` lowers to a call on the left operand. (`operator` alone
+        // remains a valid member name.)
+        if name == "operator" {
+            let sym = if self.match_token(Token::Plus) {
+                Some("+")
+            } else if self.match_token(Token::Minus) {
+                Some("-")
+            } else if self.match_token(Token::Star) {
+                Some("*")
+            } else if self.match_token(Token::Slash) {
+                Some("/")
+            } else if self.match_token(Token::Percent) {
+                Some("%")
+            } else if self.match_token(Token::Eq) {
+                Some("==")
+            } else if self.match_token(Token::Lt) {
+                Some("<")
+            } else if self.match_token(Token::Le) {
+                Some("<=")
+            } else if self.match_token(Token::Gt) {
+                Some(">")
+            } else if self.match_token(Token::Ge) {
+                Some(">=")
+            } else if self.check(Token::Ne) {
+                return Err(
+                    "`operator!=` cannot be declared: declare `operator==` and `!=` is \
+                     derived as its negation"
+                        .to_string(),
+                );
+            } else {
+                None
+            };
+            if let Some(sym) = sym {
+                if in_interface {
+                    return Err(format!(
+                        "interface `{}` cannot declare `operator{}`: operator overloads \
+                         must be declared on a class",
+                        class_name, sym
+                    ));
+                }
+                if is_static || is_virtual || is_override || is_abstract || is_final {
+                    return Err(format!(
+                        "`operator{}` cannot be {}: operator overloads are plain instance \
+                         methods",
+                        sym,
+                        if is_static {
+                            "static"
+                        } else if is_virtual {
+                            "virtual"
+                        } else if is_override {
+                            "override"
+                        } else if is_abstract {
+                            "abstract"
+                        } else {
+                            "final"
+                        }
+                    ));
+                }
+                if visibility != Visibility::Public {
+                    return Err(format!("`operator{}` must be public", sym));
+                }
+                if !generic_params.is_empty() {
+                    return Err(format!("`operator{}` cannot have generic parameters", sym));
+                }
+                if !self.check(Token::LParen) {
+                    return Err(format!("expected parameter list after `operator{}`", sym));
+                }
+                name = format!("operator{}", sym);
+            }
+        }
 
         if self.check(Token::LParen) {
             let params = self.parse_params()?;
@@ -2077,13 +2150,21 @@ impl<'a> Parser<'a> {
                 if let Expr::Var(ref class_name) = expr {
                     let is_type_name = class_name.chars().next().map_or(false, |c| c.is_ascii_uppercase());
                     if is_type_name {
+                        // Explicit type arguments on a static generic call:
+                        // `Util.Pick<int>(...)`. The lookahead keeps
+                        // comparisons (`Config.Min < x`) as expressions.
+                        let type_args = if self.check(Token::Lt) && self.lookahead_is_type_args() {
+                            self.parse_type_args()?
+                        } else {
+                            Vec::new()
+                        };
                         if self.check(Token::LParen) {
                             let args = self.parse_args()?;
                             expr = Expr::Call(CallExpr {
                                 target: None,
                                 class_or_target: class_name.clone(),
                                 method: name,
-                                type_args: Vec::new(),
+                                type_args,
                                 args,
                             });
                         } else {
@@ -2166,22 +2247,40 @@ impl<'a> Parser<'a> {
     }
 
     fn lookahead_is_type_args(&mut self) -> bool {
-        // Simple heuristic: if we see `<` followed by an identifier, it's likely type args
-        // This doesn't handle all cases but works for common patterns
+        // `<` starts type arguments only when a balanced list of type-shaped
+        // tokens closes with `>` immediately followed by `(` — a generic
+        // method call is the only expression form type args can precede.
+        // Anything else (`a.n < other.n`) is a comparison.
         if !self.check(Token::Lt) {
             return false;
         }
-        // Look at the next token
-        let mut lookahead = self.pos + 1;
-        while lookahead < self.tokens.len() {
-            match &self.tokens[lookahead] {
-                Token::Newline => {
-                    lookahead += 1;
-                    continue;
+        let mut i = self.pos + 1;
+        let mut depth = 1usize;
+        while i < self.tokens.len() {
+            match &self.tokens[i] {
+                Token::Newline => {}
+                Token::Lt => depth += 1,
+                Token::Gt => {
+                    depth -= 1;
+                    if depth == 0 {
+                        let mut j = i + 1;
+                        while matches!(self.tokens.get(j), Some(Token::Newline)) {
+                            j += 1;
+                        }
+                        return matches!(self.tokens.get(j), Some(Token::LParen));
+                    }
                 }
-                Token::Ident(_) => return true,
+                Token::Ident(_)
+                | Token::Comma
+                | Token::Question
+                | Token::Int
+                | Token::Float
+                | Token::Bool
+                | Token::String
+                | Token::Void => {}
                 _ => return false,
             }
+            i += 1;
         }
         false
     }

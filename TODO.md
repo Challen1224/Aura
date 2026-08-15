@@ -390,13 +390,33 @@
   - [x] Static properties
 
 **P2 - Medium Priority**
-- [ ] **Operator overloading**
+- [x] **Operator overloading**
   ```aura
   class Vector {
-      operator+(Vector other) -> Vector { }
-      operator==(Vector other) -> bool { }
+      Vector operator+(Vector other) { ... }
+      bool operator==(Vector other) { ... }
   }
   ```
+  Overloadable: `+ - * / %` and `== < <= > >=`. An overload is an
+  instance method named `operator+` etc. — `a + b` lowers to a call on
+  the left operand (JIT-transparent: plain `CallVirt`, left-to-right
+  evaluation preserved via a temp), so overloads are inherited and
+  generic receivers substitute their type arguments. One parameter, the
+  right operand — any type, so `vector * 2.0` works. Rules, each its own
+  error: public, non-static/virtual/abstract, one parameter, real return
+  type; comparisons must return bool; `operator!=` cannot be declared
+  (`!=` is always the negation of `operator==`); `&&`/`||` are not
+  overloadable (short-circuit); a nullable left operand must be narrowed
+  first. `==`/`!=` without an overload stay reference equality (records
+  keep structural equality); ordering a class *without* `operator<` is
+  now a compile error (it silently pointer-compared before). Also fixed
+  two latent parser bugs the feature exposed: `a.f < b.n` was mis-parsed
+  as generic type args (lookahead now requires a balanced `<...>` then
+  `(`), and explicit type args on static generic calls
+  (`Util.Pick<int>(...)`) never parsed at all. Not included: unary
+  operator overloads and `[]` indexing. Verified under both tiers
+  (aura-vm/tests/operator_overloading.rs,
+  examples/operator_overloading.aura).
 
 - [ ] **Extension methods**
   ```aura

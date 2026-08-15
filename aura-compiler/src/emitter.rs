@@ -1439,6 +1439,22 @@ impl<'a> MethodEmitter<'a> {
                 self.ops[end_jump] = Op::Br(end_target);
             }
             Expr::Binary(op, left, right) => {
+                // User-defined operator: `a + b` is a method call on `a`.
+                // `CallVirt` wants arguments below the receiver, so the left
+                // operand is stashed in a temp — which also keeps
+                // left-to-right evaluation order. `!=` negates `operator==`.
+                if let Some((mname, _)) = self.user_operator(*op, left) {
+                    let tmp = self.push_local("__op_lhs".to_string()) as u16;
+                    self.emit_expr(left)?;
+                    self.ops.push(Op::Stloc(tmp));
+                    self.emit_expr(right)?;
+                    self.ops.push(Op::Ldloc(tmp));
+                    self.ops.push(Op::CallVirt(mname));
+                    if matches!(op, BinOp::Ne) {
+                        self.ops.push(Op::Not);
+                    }
+                    return Ok(());
+                }
                 self.emit_expr(left)?;
                 self.emit_expr(right)?;
                 if matches!(op, BinOp::Eq | BinOp::Ne) {
@@ -2355,7 +2371,12 @@ impl<'a> MethodEmitter<'a> {
                     _ => None,
                 }
             }
-            _ => None,
+            // Anything else (operator-call results, chained calls, ...):
+            // fall back to full expression typing.
+            _ => match self.expr_ty(expr).map(Self::strip_nullable) {
+                Ok(Type::Class(c, _)) => Some(c),
+                _ => None,
+            },
         }
     }
 
@@ -2421,6 +2442,30 @@ impl<'a> MethodEmitter<'a> {
     fn is_record_type(&self, ty: &Type) -> bool {
         matches!(ty, Type::Class(name, _)
             if self.program.classes.get(name).map(|c| c.is_record).unwrap_or(false))
+    }
+
+    /// User-defined operator on the left operand's class (or a base): the
+    /// method name to `CallVirt` and its return type with the receiver's
+    /// type arguments substituted. The typer has already validated the
+    /// operand types; this only decides the lowering.
+    fn user_operator(&self, op: BinOp, left: &Expr) -> Option<(String, Type)> {
+        let mname = crate::typer::operator_method_name(op)?;
+        let Ok(Type::Class(name, type_args)) = self.expr_ty(left) else {
+            return None;
+        };
+        let mut cur = name.clone();
+        loop {
+            let info = self.program.classes.get(&cur)?;
+            if let Some(mi) = info.methods.get(mname) {
+                let receiver = self.program.classes.get(&name)?;
+                let subst = crate::typer::build_subst(&receiver.generic_params, &type_args);
+                return Some((
+                    mname.to_string(),
+                    crate::typer::substitute_type(&mi.return_ty, &subst),
+                ));
+            }
+            cur = info.super_class.clone()?;
+        }
     }
 
     /// Lightweight expression type inference for constructor argument matching.
@@ -2534,9 +2579,13 @@ impl<'a> MethodEmitter<'a> {
                     BinOp::Eq | BinOp::Ne | BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge
                     | BinOp::And | BinOp::Or => Type::Bool,
                     _ => {
-                        let lt = self.expr_ty(left).unwrap_or(Type::Int32);
-                        let rt = self.expr_ty(right).unwrap_or(Type::Int32);
-                        promote(&lt, &rt).unwrap_or(Type::Int32)
+                        if let Some((_, ret)) = self.user_operator(*op, left) {
+                            ret
+                        } else {
+                            let lt = self.expr_ty(left).unwrap_or(Type::Int32);
+                            let rt = self.expr_ty(right).unwrap_or(Type::Int32);
+                            promote(&lt, &rt).unwrap_or(Type::Int32)
+                        }
                     }
                 }
             }

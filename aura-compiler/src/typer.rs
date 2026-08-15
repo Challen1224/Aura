@@ -273,6 +273,52 @@ pub fn build_subst(generic_params: &[GenericParam], type_args: &[Type]) -> TypeS
     subst
 }
 
+/// If `name` is an operator-overload method name (`operator+`, `operator==`,
+/// ...), the operator symbol; `None` for ordinary method names, including
+/// identifiers that merely start with "operator".
+pub fn operator_symbol_of(name: &str) -> Option<&str> {
+    let sym = name.strip_prefix("operator")?;
+    matches!(sym, "+" | "-" | "*" | "/" | "%" | "==" | "<" | "<=" | ">" | ">=").then_some(sym)
+}
+
+/// The operator-overload method name a binary operator resolves through, if
+/// the operator is overloadable. `!=` resolves through `operator==` (it is
+/// always the negation); `&&`/`||` are never overloadable (short-circuit).
+pub fn operator_method_name(op: BinOp) -> Option<&'static str> {
+    Some(match op {
+        BinOp::Add => "operator+",
+        BinOp::Sub => "operator-",
+        BinOp::Mul => "operator*",
+        BinOp::Div => "operator/",
+        BinOp::Rem => "operator%",
+        BinOp::Eq | BinOp::Ne => "operator==",
+        BinOp::Lt => "operator<",
+        BinOp::Le => "operator<=",
+        BinOp::Gt => "operator>",
+        BinOp::Ge => "operator>=",
+        BinOp::And | BinOp::Or => return None,
+    })
+}
+
+/// Source symbol of a binary operator, for error messages.
+pub fn binop_symbol(op: BinOp) -> &'static str {
+    match op {
+        BinOp::Add => "+",
+        BinOp::Sub => "-",
+        BinOp::Mul => "*",
+        BinOp::Div => "/",
+        BinOp::Rem => "%",
+        BinOp::Eq => "==",
+        BinOp::Ne => "!=",
+        BinOp::Lt => "<",
+        BinOp::Le => "<=",
+        BinOp::Gt => ">",
+        BinOp::Ge => ">=",
+        BinOp::And => "&&",
+        BinOp::Or => "||",
+    }
+}
+
 /// Type checking error.
 #[derive(Debug, thiserror::Error)]
 #[error("{0}")]
@@ -871,6 +917,33 @@ impl TypeChecker {
                                         c.name, m.name
                                     )));
                                 }
+                                // Operator overloads (`operator+` etc.): one
+                                // parameter (the right operand; `this` is the
+                                // left), a real result, and comparisons must
+                                // yield bool so `a < b` stays a condition.
+                                if let Some(sym) = operator_symbol_of(&m.name) {
+                                    if m.params.len() != 1 {
+                                        return Err(TypeError(format!(
+                                            "`operator{}` on class `{}` must take exactly one \
+                                             parameter (the right operand)",
+                                            sym, c.name
+                                        )));
+                                    }
+                                    if m.return_ty == Type::Unit {
+                                        return Err(TypeError(format!(
+                                            "`operator{}` on class `{}` must return a value",
+                                            sym, c.name
+                                        )));
+                                    }
+                                    if matches!(sym, "==" | "<" | "<=" | ">" | ">=")
+                                        && m.return_ty != Type::Bool
+                                    {
+                                        return Err(TypeError(format!(
+                                            "`operator{}` on class `{}` must return bool",
+                                            sym, c.name
+                                        )));
+                                    }
+                                }
                                 let is_abstract =
                                     m.is_abstract || (c.is_interface && m.body.is_empty());
                                 let is_virtual = !m.is_final
@@ -1266,6 +1339,25 @@ impl TypeChecker {
             }
         }
         None
+    }
+
+    /// Resolve a user-defined operator for a binary op whose left operand
+    /// has type `lt`: the left class (or a base) declares the operator
+    /// method. Returns the (parameter, return) types with the receiver's
+    /// type arguments substituted.
+    fn user_operator(&self, op: BinOp, lt: &Type) -> Option<(Type, Type)> {
+        let mname = operator_method_name(op)?;
+        let Type::Class(name, type_args) = lt else { return None };
+        if name == "null" {
+            return None;
+        }
+        let (_, mi) = self.find_method(name, mname)?;
+        let info = self.classes.get(name)?;
+        let subst = build_subst(&info.generic_params, type_args);
+        Some((
+            substitute_type(&mi.params[0], &subst),
+            substitute_type(&mi.return_ty, &subst),
+        ))
     }
 
     /// Require that a value of `ty` is disposable: its class (or a base class /
@@ -2835,9 +2927,53 @@ impl TypeChecker {
                     let lt_is_null = matches!(&lt, Type::Class(n, _) if n == "null");
                     let rt_is_null = matches!(&rt, Type::Class(n, _) if n == "null");
                     if !lt_is_null && !rt_is_null {
+                        // User-defined operators: the left class declares
+                        // `operator==` / `operator<` etc.; `!=` is always the
+                        // negation of `operator==`. A nullable left operand
+                        // must be narrowed first — silently falling back to
+                        // reference comparison would change meaning.
+                        if let Some((param, _)) = self.user_operator(*op, &lt) {
+                            if !self.is_assignable(&param, &rt) {
+                                return Err(self.mismatch_error(
+                                    format!(
+                                        "cannot apply `{}`: right operand does not fit `{}`",
+                                        binop_symbol(*op),
+                                        lt.name()
+                                    ),
+                                    &param,
+                                    &rt,
+                                ));
+                            }
+                            return Ok(Type::Bool);
+                        }
+                        if let Type::Nullable(inner) = &lt {
+                            if self.user_operator(*op, inner).is_some() {
+                                return Err(TypeError(format!(
+                                    "left operand of `{}` has type {} and may be null; \
+                                     narrow it (`!= null`, `!`) before using the operator \
+                                     overload",
+                                    binop_symbol(*op),
+                                    lt.name()
+                                )));
+                            }
+                        }
                         // T and T? compare as their underlying type.
                         let lt_u = if let Type::Nullable(t) = &lt { (**t).clone() } else { lt.clone() };
                         let rt_u = if let Type::Nullable(t) = &rt { (**t).clone() } else { rt.clone() };
+                        // Ordering a class requires an overload; only `==`/`!=`
+                        // (reference identity) come built in.
+                        if matches!(op, BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge) {
+                            if let Type::Class(n, _) = &lt_u {
+                                if self.classes.contains_key(n) {
+                                    return Err(TypeError(format!(
+                                        "class `{}` does not define `operator{}`; ordering \
+                                         comparisons on objects need an operator overload",
+                                        n,
+                                        binop_symbol(*op)
+                                    )));
+                                }
+                            }
+                        }
                         if !self.is_numeric(&lt_u) || !self.is_numeric(&rt_u) {
                             // String literals compare with strings, and with
                             // literal unions when the literal is a member.
@@ -2874,6 +3010,40 @@ impl TypeChecker {
                     }
                     Ok(Type::Bool)
                 } else {
+                    // User-defined arithmetic operators on the left class.
+                    if let Some((param, ret)) = self.user_operator(*op, &lt) {
+                        if !self.is_assignable(&param, &rt) {
+                            return Err(self.mismatch_error(
+                                format!(
+                                    "cannot apply `{}`: right operand does not fit `{}`",
+                                    binop_symbol(*op),
+                                    lt.name()
+                                ),
+                                &param,
+                                &rt,
+                            ));
+                        }
+                        return Ok(ret);
+                    }
+                    if let Type::Nullable(inner) = &lt {
+                        if self.user_operator(*op, inner).is_some() {
+                            return Err(TypeError(format!(
+                                "left operand of `{}` has type {} and may be null; narrow \
+                                 it (`!= null`, `!`) before using the operator overload",
+                                binop_symbol(*op),
+                                lt.name()
+                            )));
+                        }
+                    }
+                    if let Type::Class(n, _) = &lt {
+                        if n != "null" && self.classes.contains_key(n) {
+                            return Err(TypeError(format!(
+                                "class `{}` does not define `operator{}`",
+                                n,
+                                binop_symbol(*op)
+                            )));
+                        }
+                    }
                     self.arithmetic_type(&lt, &rt)
                 }
             }

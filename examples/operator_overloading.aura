@@ -1,0 +1,37 @@
+// Operator overloading.
+//
+// `Vector operator+(Vector other) { ... }` declares an instance method the
+// compiler calls when the class appears on the left of `+`. One parameter
+// (the right operand — any type, so `v * 2.0` works), and a real result.
+// `==` must return bool; `!=` is always derived as its negation. `&&` and
+// `||` cannot be overloaded (they short-circuit).
+
+class Vector {
+    float x;
+    float y;
+
+    Vector(float x, float y) { this.x = x; this.y = y; }
+
+    Vector operator+(Vector other) { return new Vector(this.x + other.x, this.y + other.y); }
+    Vector operator-(Vector other) { return new Vector(this.x - other.x, this.y - other.y); }
+    Vector operator*(float s) { return new Vector(this.x * s, this.y * s); }
+    bool operator==(Vector other) { return this.x == other.x && this.y == other.y; }
+    bool operator<(Vector other) {
+        return this.x * this.x + this.y * this.y < other.x * other.x + other.y * other.y;
+    }
+}
+
+class Program {
+    static void Main() {
+        Vector a = new Vector(1.0, 2.0);
+        Vector b = new Vector(3.0, 4.0);
+
+        Vector c = a + b * 2.0;
+        print("a + b * 2 = ("); print(c.x); print(", "); print(c.y); print(")"); println();
+
+        print("a + b == (4, 6): "); print(a + b == new Vector(4.0, 6.0)); println();
+        print("a != b: "); print(a != b); println();
+        print("a < b: "); print(a < b); println();
+        print("(b - a).y = "); print((b - a).y); println();
+    }
+}
