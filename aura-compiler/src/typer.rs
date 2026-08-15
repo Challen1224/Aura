@@ -576,7 +576,12 @@ impl TypeChecker {
                 generic_params: ic
                     .generic_params
                     .iter()
-                    .map(|n| GenericParam { name: n.to_string(), constraint: None })
+                    .map(|n| GenericParam {
+                        name: n.to_string(),
+                        constraint: None,
+                        union: Vec::new(),
+                        requires_new: false,
+                    })
                     .collect(),
                 is_interface: false,
                 // Static classes (no constructor) are marked abstract so
@@ -1436,6 +1441,61 @@ impl TypeChecker {
             }
         }
         None
+    }
+
+    /// The declared type parameter a value of type `ty` refers to, if any.
+    /// `T` appears as `Type::GenericParam("T")` or — since the parser emits
+    /// plain idents as class types — `Type::Class("T", [])` when no class of
+    /// that name exists.
+    fn generic_param_of<'a>(
+        &self,
+        ty: &Type,
+        generic_params: &'a [GenericParam],
+    ) -> Option<&'a GenericParam> {
+        let name = match ty {
+            Type::GenericParam(n) => n,
+            Type::Class(n, args) if args.is_empty() && !self.classes.contains_key(n) => n,
+            _ => return None,
+        };
+        generic_params.iter().find(|gp| gp.name == *name)
+    }
+
+    /// True when the parameter carries a union constraint whose alternatives
+    /// are all numeric (`where T : int | float`) — the license for
+    /// arithmetic and ordering on `T` values.
+    fn union_is_numeric(&self, gp: &GenericParam) -> bool {
+        !gp.union.is_empty() && gp.union.iter().all(|t| self.is_numeric(t))
+    }
+
+    /// Enforce a `new()` constraint: the argument must be a concrete class
+    /// with a parameterless (or no declared) constructor.
+    fn require_default_constructible(
+        &self,
+        arg: &Type,
+        param: &str,
+        owner: &str,
+    ) -> Result<(), TypeError> {
+        let ok = match arg {
+            Type::Class(n, _) => self.classes.get(n).is_some_and(|info| {
+                !info.is_interface
+                    && !info.is_abstract
+                    && !info.is_static
+                    && (info.constructors.is_empty()
+                        || info.constructors.iter().any(|c| c.params.is_empty()))
+            }),
+            _ => false,
+        };
+        if ok {
+            Ok(())
+        } else {
+            Err(TypeError(format!(
+                "type argument {} for parameter `{}` of `{}` does not satisfy `new()`: \
+                 it must be a concrete class with a parameterless constructor",
+                arg.name(),
+                param,
+                owner
+            )))
+        }
     }
 
     /// Resolve a user-defined operator for a binary op whose left operand
@@ -3068,8 +3128,27 @@ impl TypeChecker {
                         let lt_u = if let Type::Nullable(t) = &lt { (**t).clone() } else { lt.clone() };
                         let rt_u = if let Type::Nullable(t) = &rt { (**t).clone() } else { rt.clone() };
                         // Ordering a class requires an overload; only `==`/`!=`
-                        // (reference identity) come built in.
+                        // (reference identity) come built in. Type parameters
+                        // order only under an all-numeric union constraint
+                        // (`where T : int | float`), against another `T`.
                         if matches!(op, BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge) {
+                            if let Some(gp) = self.generic_param_of(&lt_u, generic_params) {
+                                let rhs_same = self
+                                    .generic_param_of(&rt_u, generic_params)
+                                    .is_some_and(|r| r.name == gp.name);
+                                if self.union_is_numeric(gp) && rhs_same {
+                                    return Ok(Type::Bool);
+                                }
+                                return Err(TypeError(format!(
+                                    "cannot order type parameter `{}` with `{}`: constrain \
+                                     it with a numeric union (`where {} : int | float`) and \
+                                     compare two `{}` values",
+                                    gp.name,
+                                    binop_symbol(*op),
+                                    gp.name,
+                                    gp.name
+                                )));
+                            }
                             if let Type::Class(n, _) = &lt_u {
                                 if self.classes.contains_key(n) {
                                     return Err(TypeError(format!(
@@ -3151,6 +3230,26 @@ impl TypeChecker {
                             )));
                         }
                     }
+                    // Union-constrained type parameters: `where T : int |
+                    // float` allows arithmetic between two `T` values (every
+                    // alternative supports it; the runtime op is dynamic).
+                    if let Some(gp) = self.generic_param_of(&lt, generic_params) {
+                        let rhs_same = self
+                            .generic_param_of(&rt, generic_params)
+                            .is_some_and(|r| r.name == gp.name);
+                        if self.union_is_numeric(gp) && rhs_same {
+                            return Ok(lt.clone());
+                        }
+                        return Err(TypeError(format!(
+                            "cannot apply `{}` to type parameter `{}`: constrain it with a \
+                             numeric union (`where {} : int | float`) and use two `{}` \
+                             operands",
+                            binop_symbol(*op),
+                            gp.name,
+                            gp.name,
+                            gp.name
+                        )));
+                    }
                     self.arithmetic_type(&lt, &rt)
                 }
             }
@@ -3191,6 +3290,14 @@ impl TypeChecker {
             Expr::Call(call) => self.check_call(call, class, locals, in_instance, return_ty, generic_params, false),
             Expr::New(class_name, type_args, args) => {
                 let Some(class_info) = self.classes.get(class_name) else {
+                    if generic_params.iter().any(|gp| gp.name == *class_name) {
+                        return Err(TypeError(format!(
+                            "cannot construct type parameter `{}`: generics are erased at \
+                             runtime, so `new {}()` is not supported yet (`new()` \
+                             constraints are enforced at call sites)",
+                            class_name, class_name
+                        )));
+                    }
                     return Err(TypeError(format!("unknown class `{}`", class_name)));
                 };
                 if class_info.is_static {
@@ -4309,6 +4416,24 @@ impl TypeChecker {
                         )));
                     }
                 }
+                if !gp.union.is_empty()
+                    && !gp.union.iter().any(|alt| self.is_assignable(alt, bound))
+                {
+                    return Err(TypeError(format!(
+                        "inferred type {} for `{}` in `{}` must be one of {}",
+                        bound.name(),
+                        gp.name,
+                        call.method,
+                        gp.union
+                            .iter()
+                            .map(|t| t.name())
+                            .collect::<Vec<_>>()
+                            .join(" | ")
+                    )));
+                }
+                if gp.requires_new {
+                    self.require_default_constructible(bound, &gp.name, &call.method)?;
+                }
                 subst.insert(gp.name.clone(), bound.clone());
             }
         }
@@ -4574,11 +4699,16 @@ impl TypeChecker {
             )));
         }
         for (param, arg) in info.generic_params.iter().zip(args.iter()) {
+            // An argument that is itself an enclosing type parameter cannot
+            // be checked here; its own use sites are.
+            let is_param = matches!(arg, Type::GenericParam(_))
+                || matches!(arg, Type::Class(n, a) if a.is_empty()
+                    && generic_params.iter().any(|gp| gp.name == *n));
+            if is_param {
+                continue;
+            }
             if let Some(constraint) = &param.constraint {
-                let is_param = matches!(arg, Type::GenericParam(_))
-                    || matches!(arg, Type::Class(n, a) if a.is_empty()
-                        && generic_params.iter().any(|gp| gp.name == *n));
-                if !is_param && !self.is_assignable(constraint, arg) {
+                if !self.is_assignable(constraint, arg) {
                     return Err(TypeError(format!(
                         "type argument {} for parameter `{}` of `{}` does not satisfy constraint {}",
                         arg.name(),
@@ -4587,6 +4717,25 @@ impl TypeChecker {
                         constraint.name()
                     )));
                 }
+            }
+            if !param.union.is_empty()
+                && !param.union.iter().any(|alt| self.is_assignable(alt, arg))
+            {
+                return Err(TypeError(format!(
+                    "type argument {} for parameter `{}` of `{}` must be one of {}",
+                    arg.name(),
+                    param.name,
+                    name,
+                    param
+                        .union
+                        .iter()
+                        .map(|t| t.name())
+                        .collect::<Vec<_>>()
+                        .join(" | ")
+                )));
+            }
+            if param.requires_new {
+                self.require_default_constructible(arg, &param.name, name)?;
             }
         }
         Ok(())

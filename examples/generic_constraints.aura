@@ -1,0 +1,81 @@
+// Generic constraints.
+//
+// `where` clauses bound what a type parameter can be, in three forms:
+//   where T : ISomeInterface   — T must implement/extend the bound, and
+//                                bounded members become callable on T
+//   where T : int | float      — T must be one of the alternatives; an
+//                                all-numeric union licenses arithmetic and
+//                                ordering between two T values
+//   where T : new()            — T must be a concrete class with a
+//                                parameterless constructor
+// The inline form `<T : int | float>` accepts the same constraints, and a
+// bound may combine with new(): `where T : Base, new()`.
+
+interface IPriced {
+    int price();
+}
+
+class Book : IPriced {
+    int pages;
+    Book(int pages) { this.pages = pages; }
+    int price() { return this.pages * 2; }
+}
+
+class Cart<T> where T : IPriced {
+    List<int> prices;
+    Cart() { this.prices = new List<int>(); }
+    void add(T item) { this.prices.Add(item.price()); }
+    int total() {
+        int sum = 0;
+        for (var p in this.prices) { sum = sum + p; }
+        return sum;
+    }
+}
+
+class Stats<T> where T : int | float {
+    T low;
+    T high;
+    Stats(T low, T high) { this.low = low; this.high = high; }
+    T range() { return this.high - this.low; }
+    bool valid() { return this.low < this.high; }
+}
+
+class Session {
+    int id;
+    Session() { this.id = 42; }
+}
+
+class Pool<T> where T : new() {
+    string label;
+    Pool(string label) { this.label = label; }
+}
+
+class Program {
+    static <T> T max(T a, T b) where T : int | float {
+        if (a < b) { return b; }
+        return a;
+    }
+
+    static void Main() {
+        Cart<Book> cart = new Cart<Book>();
+        cart.add(new Book(100));
+        cart.add(new Book(250));
+        print("cart total: "); print(cart.total()); println();
+
+        Stats<int> laps = new Stats<int>(12, 87);
+        print("lap range: "); print(laps.range()); print(" valid: "); print(laps.valid()); println();
+
+        Stats<float> temps = new Stats<float>(36.5, 39.0);
+        print("temp range: "); print(temps.range()); println();
+
+        Pool<Session> pool = new Pool<Session>("sessions");
+        print("pool: "); print(pool.label); println();
+
+        print("max: "); print(Program.max(3, 11)); print(" "); print(Program.max(2.5, 1.5)); println();
+
+        // These would be compile errors:
+        //   new Cart<string>();      // string does not implement IPriced
+        //   new Stats<string>(...);  // must be one of int32 | float64
+        //   new Pool<IPriced>(...);  // interfaces are not new()-constructible
+    }
+}

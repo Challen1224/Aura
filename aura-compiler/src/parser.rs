@@ -385,6 +385,8 @@ fn expand_generic_params(
         .iter()
         .map(|gp| {
             Ok(GenericParam {
+                union: Vec::new(),
+                requires_new: false,
                 name: gp.name.clone(),
                 constraint: gp
                     .constraint
@@ -894,7 +896,7 @@ impl<'a> Parser<'a> {
         is_record: bool,
     ) -> Result<ClassDecl, String> {
         let name = self.consume_ident("expected class name")?;
-        let generic_params = if self.check(Token::Lt) {
+        let mut generic_params = if self.check(Token::Lt) {
             self.parse_generic_params()?
         } else {
             Vec::new()
@@ -927,6 +929,7 @@ impl<'a> Parser<'a> {
         } else {
             Vec::new()
         };
+        self.parse_where_clauses(&mut generic_params)?;
         let mut members = Vec::new();
         if is_record && self.match_token(Token::Semi) {
             // `record Point(int x, int y);` shorthand: no explicit members.
@@ -1186,18 +1189,91 @@ impl<'a> Parser<'a> {
         let mut params = Vec::new();
         loop {
             let name = self.consume_ident("expected generic parameter name")?;
-            let constraint = if self.match_token(Token::Colon) {
-                Some(self.parse_type()?)
-            } else {
-                None
+            let mut gp = GenericParam {
+                name,
+                constraint: None,
+                union: Vec::new(),
+                requires_new: false,
             };
-            params.push(GenericParam { name, constraint });
+            if self.match_token(Token::Colon) {
+                self.parse_one_constraint(&mut gp)?;
+            }
+            params.push(gp);
             if !self.match_token(Token::Comma) {
                 break;
             }
         }
         self.consume(Token::Gt, "expected `>`")?;
         Ok(params)
+    }
+
+    /// Parse one constraint atom onto `gp`: a bound type (`IComparable`), a
+    /// union (`int | float`), or `new()`. Used by both the inline form
+    /// (`<T : int | float>`) and `where` clauses, which may comma-combine a
+    /// bound with `new()`.
+    fn parse_one_constraint(&mut self, gp: &mut GenericParam) -> Result<(), String> {
+        if self.match_token(Token::New) {
+            self.consume(Token::LParen, "expected `(` after `new` in a constraint")?;
+            self.consume(Token::RParen, "expected `)` after `new(` in a constraint")?;
+            if gp.requires_new {
+                return Err(format!("duplicate `new()` constraint on `{}`", gp.name));
+            }
+            if !gp.union.is_empty() {
+                return Err(format!(
+                    "`new()` cannot be combined with a union constraint on `{}`",
+                    gp.name
+                ));
+            }
+            gp.requires_new = true;
+            return Ok(());
+        }
+        let first = self.parse_type()?;
+        if gp.constraint.is_some() || !gp.union.is_empty() {
+            return Err(format!(
+                "type parameter `{}` is already constrained",
+                gp.name
+            ));
+        }
+        if self.check(Token::Pipe) {
+            if gp.requires_new {
+                return Err(format!(
+                    "`new()` cannot be combined with a union constraint on `{}`",
+                    gp.name
+                ));
+            }
+            let mut alts = vec![first];
+            while self.match_token(Token::Pipe) {
+                alts.push(self.parse_type()?);
+            }
+            gp.union = alts;
+        } else {
+            gp.constraint = Some(first);
+        }
+        Ok(())
+    }
+
+    /// Parse zero or more `where T : constraint` clauses following a class
+    /// header or method signature, attaching each to its declared type
+    /// parameter.
+    fn parse_where_clauses(&mut self, params: &mut [GenericParam]) -> Result<(), String> {
+        while matches!(self.peek(), Some(Token::Ident(k)) if k == "where") {
+            self.advance();
+            let pname = self.consume_ident("expected type parameter name after `where`")?;
+            self.consume(Token::Colon, "expected `:` in `where` clause")?;
+            let Some(gp) = params.iter_mut().find(|g| g.name == pname) else {
+                return Err(format!(
+                    "`where {}`: no type parameter of that name is declared",
+                    pname
+                ));
+            };
+            loop {
+                self.parse_one_constraint(gp)?;
+                if !self.match_token(Token::Comma) {
+                    break;
+                }
+            }
+        }
+        Ok(())
     }
 
     fn parse_member(&mut self, in_interface: bool, class_name: &str) -> Result<Member, String> {
@@ -1230,7 +1306,7 @@ impl<'a> Parser<'a> {
                 break;
             }
         }
-        let generic_params = if self.check(Token::Lt) {
+        let mut generic_params = if self.check(Token::Lt) {
             self.parse_generic_params()?
         } else {
             Vec::new()
@@ -1398,6 +1474,7 @@ impl<'a> Parser<'a> {
 
         if self.check(Token::LParen) {
             let params = self.parse_params()?;
+            self.parse_where_clauses(&mut generic_params)?;
             let body = if is_abstract || (in_interface && !self.check(Token::LBrace)) {
                 if is_static || is_virtual {
                     return Err(format!("abstract method `{}` cannot be {}",

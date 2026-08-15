@@ -2678,7 +2678,15 @@ impl<'a> MethodEmitter<'a> {
                         } else {
                             let lt = self.expr_ty(left).unwrap_or(Type::Int32);
                             let rt = self.expr_ty(right).unwrap_or(Type::Int32);
-                            promote(&lt, &rt).unwrap_or(Type::Int32)
+                            match promote(&lt, &rt) {
+                                Some(t) => t,
+                                // Type parameters (`T + T` under a numeric
+                                // union constraint) keep their own type: the
+                                // runtime op is dynamic, and the result must
+                                // not be re-narrowed with a `Conv`.
+                                None if lt == rt => lt,
+                                None => Type::Int32,
+                            }
                         }
                     }
                 }

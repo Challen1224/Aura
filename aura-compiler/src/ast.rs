@@ -153,6 +153,15 @@ pub struct GenericParam {
     pub name: String,
     /// Optional constraint (interface/class that the type must implement/extend).
     pub constraint: Option<Type>,
+    /// Union constraint: `where T : int | float`. When non-empty, a type
+    /// argument must be assignable to one of the alternatives. Compile-time
+    /// only (checked at instantiation and call sites); all-numeric unions
+    /// additionally allow arithmetic and ordering on `T` values in bodies.
+    pub union: Vec<Type>,
+    /// `where T : new()`: a type argument must be a concrete class with a
+    /// parameterless (or no declared) constructor. `new T()` itself is not
+    /// supported yet — generics are erased at runtime.
+    pub requires_new: bool,
 }
 
 /// Class member.

@@ -164,6 +164,8 @@ impl Ctx<'_> {
                     .map(|gp| GenericParam {
                         name: gp.name.clone(),
                         constraint: gp.constraint.as_ref().map(|c| self.ty(c)),
+                        union: gp.union.iter().map(|t| self.ty(t)).collect(),
+                        requires_new: gp.requires_new,
                     })
                     .collect(),
                 body: md.body.iter().map(|s| self.stmt(s)).collect(),

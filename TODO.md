@@ -594,12 +594,35 @@
 #### ⏳ Planned
 
 **P0 - Critical**
-- [ ] **Generic constraints**
+- [x] **Generic constraints**
   ```aura
-  class Comparable<T> where T : IComparable<T> { }
+  class Comparable<T> where T : IComparable { }
   class Numeric<T> where T : int | float { }
   class DefaultConstructible<T> where T : new() { }
   ```
+  `where` clauses on classes and generic methods (`static <T> T Max(...)
+  where T : int | float`), plus the same constraints inline
+  (`<T : int | float>`). Three forms: a subtype bound (member access on
+  `T` via the existing bounded polymorphism), a union — the type
+  argument must fit one alternative, and an all-numeric union
+  additionally licenses arithmetic and ordering between two `T` values
+  in bodies (the runtime ops are dynamic, so int and float
+  instantiations share one compiled body) — and `new()`, requiring a
+  concrete class with a parameterless (or no declared) constructor. A
+  bound may comma-combine with `new()` (`where T : Base, new()`); a
+  union may not. Enforced at class instantiation and at generic-method
+  call sites against inferred arguments, each violation with its own
+  error. Also tightened: ordering (`<`) on a type parameter without a
+  numeric union constraint is now a compile error (it previously
+  type-checked and died or pointer-compared at runtime), and `T op T`
+  requires both operands to be the same `T` — `T + 1` is rejected since
+  a float instantiation would mix types at runtime. Not included,
+  documented: `new T()` (needs reified generics — targeted error points
+  at `new()` being a call-site contract), self-referential bounds
+  (`IComparable<T>`), and constraint checking when the argument is
+  itself an enclosing type parameter (skipped, as before). Verified
+  under both tiers (aura-vm/tests/generic_constraints.rs,
+  examples/generic_constraints.aura).
 
 - [ ] **Variance annotations**
   ```aura
