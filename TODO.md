@@ -923,7 +923,18 @@
   under both tiers (aura-vm/tests/async_await.rs,
   examples/async_await.aura).
 
-- [ ] **Fibers / green threads**
+- [x] **Fibers / green threads** (research) — study written:
+      docs/research/fibers.md. Conclusion: park indefinitely. The
+      async/await tasks are functionally a green-thread system already;
+      the only remaining delta is yield-at-any-call-depth, and that is
+      precisely an interpreter re-architecture (the op loop executes
+      nested calls by Rust recursion, so mid-chain suspension would have
+      to capture native frames) plus an unsolvable-here JIT wall (compiled
+      frames can never suspend without deopt machinery). Function coloring
+      is the price that keeps Aura's implementation small and sound. If
+      concurrency work continues, the valuable next steps are task
+      combinators (`Tasks.all`/`race`), async lambdas, and async I/O
+      natives — not fibers.
 - [ ] **Task parallelism**
   ```aura
   Task<int> computeAsync(int x) {
