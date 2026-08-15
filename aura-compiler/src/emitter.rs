@@ -1217,6 +1217,9 @@ impl<'a> MethodEmitter<'a> {
                 self.emit_expr(inner)?;
                 self.ops.push(Op::NativeCall(aura_bytecode::natives::NativeId::AssertNonNull as u16));
             }
+            Expr::Hole => {
+                return Err("type hole reached code emission (checker bug)".to_string());
+            }
             Expr::Is(subject, ty, binding) => {
                 let Type::Class(name, _) = ty else {
                     return Err(format!("`is` requires a class type, got {}", ty.name()));

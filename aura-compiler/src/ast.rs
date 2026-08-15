@@ -591,6 +591,10 @@ pub enum Expr {
     /// Non-null assertion: `value!`. Asserts a nullable value is non-null,
     /// raising a runtime error if it is null.
     NonNullAssert(Box<Expr>),
+    /// A typed hole (`_` in expression position): always a compile error,
+    /// but one that reports the type expected at this position and the
+    /// in-scope values that would fit.
+    Hole,
     /// Runtime type test with optional binding: `expr is Type` /
     /// `expr is Type name`. Evaluates to bool; in narrowing positions the
     /// binding holds the subject typed as the tested type.

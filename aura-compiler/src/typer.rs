@@ -1700,6 +1700,51 @@ impl TypeChecker {
         }
     }
 
+    /// Build the error for a typed hole (`_`) where `expected` is known:
+    /// name the type, list in-scope values that fit, and suggest a way to
+    /// construct one when the type has an obvious constructor form.
+    fn hole_error(&self, expected: &Type, locals: &HashMap<String, Type>) -> TypeError {
+        let mut msg = format!(
+            "type hole: an expression of type {} is needed here",
+            expected.name()
+        );
+        let mut candidates: Vec<String> = locals
+            .iter()
+            .filter(|(name, ty)| *name != "this" && self.is_assignable(expected, ty))
+            .map(|(name, ty)| format!("`{}` ({})", name, ty.name()))
+            .collect();
+        candidates.sort();
+        if !candidates.is_empty() {
+            let shown = candidates.len().min(6);
+            let more = if candidates.len() > 6 { ", ..." } else { "" };
+            msg.push_str(&format!(
+                "; in scope: {}{}",
+                candidates[..shown].join(", "),
+                more
+            ));
+        }
+        match expected {
+            Type::LiteralUnion(_, members) => {
+                let shown: Vec<String> =
+                    members.iter().take(6).map(|m| format!("{:?}", m)).collect();
+                msg.push_str(&format!("; members: {}", shown.join(" | ")));
+            }
+            Type::Newtype(n, _) => {
+                msg.push_str(&format!("; or construct one: `{}(...)`", n));
+            }
+            Type::Bool => msg.push_str("; or `true` / `false`"),
+            Type::Class(n, _) => {
+                if let Some(info) = self.classes.get(n) {
+                    if !info.is_interface && !info.is_abstract {
+                        msg.push_str(&format!("; or construct one: `new {}(...)`", n));
+                    }
+                }
+            }
+            _ => {}
+        }
+        TypeError(msg)
+    }
+
     /// Format a mismatch error with the hint appended when one applies.
     fn mismatch_error(&self, base: String, target: &Type, source: &Type) -> TypeError {
         match self.mismatch_hint(target, source) {
@@ -1865,6 +1910,12 @@ impl TypeChecker {
                             name
                         )));
                     };
+                    if matches!(init, Expr::Hole) {
+                        return Err(TypeError(format!(
+                            "`var {}` cannot infer from a hole; annotate the type",
+                            name
+                        )));
+                    }
                     let init_ty = self.infer_expr(init, class, locals, in_instance, return_ty, generic_params)?;
                     let inferred = self.resolve_literal(&init_ty);
                     if matches!(&inferred, Type::Unit)
@@ -1891,6 +1942,9 @@ impl TypeChecker {
                     )));
                 }
                 if let Some(init) = init {
+                    if matches!(init, Expr::Hole) {
+                        return Err(self.hole_error(ty, locals));
+                    }
                     let init_ty = self.infer_expr(init, class, locals, in_instance, return_ty, generic_params)?;
                     if !self.is_assignable(ty, &init_ty) {
                         return Err(self.mismatch_error(
@@ -1936,6 +1990,9 @@ impl TypeChecker {
                 if let AssignTarget::Local(name) = target {
                     let declared = self.narrowed.borrow().get(name).cloned();
                     if let Some(declared) = declared {
+                        if matches!(value, Expr::Hole) {
+                            return Err(self.hole_error(&declared, locals));
+                        }
                         let value_ty = self.infer_expr(value, class, locals, in_instance, return_ty, generic_params)?;
                         if !self.is_assignable(&declared, &value_ty) {
                             return Err(self.mismatch_error(
@@ -1955,6 +2012,9 @@ impl TypeChecker {
                     }
                 }
                 let target_ty = self.infer_assign_target(target, class, locals, in_instance, return_ty, generic_params)?;
+                if matches!(value, Expr::Hole) {
+                    return Err(self.hole_error(&target_ty, locals));
+                }
                 let value_ty = self.infer_expr(value, class, locals, in_instance, return_ty, generic_params)?;
                 if !self.is_assignable(&target_ty, &value_ty) {
                     return Err(TypeError(format!(
@@ -1965,6 +2025,9 @@ impl TypeChecker {
                 }
             }
             Stmt::Return(Some(e)) => {
+                if matches!(e, Expr::Hole) {
+                    return Err(self.hole_error(return_ty, locals));
+                }
                 let ty = self.infer_expr(e, class, locals, in_instance, return_ty, generic_params)?;
                 if !self.is_assignable(return_ty, &ty) {
                     return Err(self.mismatch_error(
@@ -2598,6 +2661,10 @@ impl TypeChecker {
                 }
                 Ok(ty)
             }
+            Expr::Hole => Err(TypeError(
+                "type hole: the expected type cannot be determined at this position; use `_` where a typed value is expected (an initializer, argument, or return value)"
+                    .to_string(),
+            )),
             Expr::Is(subject, ty, _binding) => {
                 let subject_ty = self.infer_expr(subject, class, locals, in_instance, return_ty, generic_params)?;
                 let subject_core = match &subject_ty {
@@ -3725,6 +3792,11 @@ impl TypeChecker {
                 method_info.params.len(),
                 call.args.len()
             )));
+        }
+        for (arg, param) in call.args.iter().zip(method_info.params.iter()) {
+            if matches!(arg, Expr::Hole) {
+                return Err(self.hole_error(&substitute_type(param, subst), locals));
+            }
         }
         let arg_tys: Vec<Type> = call
             .args

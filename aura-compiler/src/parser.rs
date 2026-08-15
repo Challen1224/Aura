@@ -504,6 +504,7 @@ fn expand_expr(expr: &mut Expr, aliases: &HashMap<String, TypeAliasDecl>) -> Res
             *ty = expand_type(ty)?;
             expand_expr(subject, aliases)?;
         }
+        Expr::Hole => {}
         Expr::NonNullAssert(inner) => {
             expand_expr(inner, aliases)?;
         }
@@ -2267,6 +2268,11 @@ impl<'a> Parser<'a> {
             Some(Token::Ident(name)) => {
                 let name = name.clone();
                 self.advance();
+                // `_` in expression position is a typed hole: the checker
+                // reports the expected type and in-scope candidates.
+                if name == "_" && !self.check(Token::LParen) {
+                    return Ok(Expr::Hole);
+                }
                 if self.check(Token::LParen) {
                     let args = self.parse_args()?;
                     if name == "print" || name == "println" {

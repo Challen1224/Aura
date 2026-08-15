@@ -241,7 +241,20 @@
         both signatures), and numeric narrowing. Hints fire on
         assignments, arguments, and returns. Markers are proven
         behavior-neutral by the full suite (aura-vm/tests/diagnostics.rs).
-  - [ ] Type hole suggestions
+  - [x] Type hole suggestions — `_` in expression position is a typed
+        hole: always a compile error, but one that names the expected type
+        and lists the fits. Positions with a known expected type
+        (declaration initializers, assignments, return values, call
+        arguments) report it exactly, list in-scope locals/params whose
+        types fit (never non-matching ones), and add a construction
+        suggestion when the type has an obvious one: literal-union
+        members, `Name(...)` for newtypes, `new X(...)` for concrete
+        classes, `true`/`false` for bool. Untyped positions (`1 + _`) say
+        honestly that the expected type cannot be determined; `var x = _`
+        points at annotating. Declaring `_` still parses (write-only
+        discard); reading it is a hole. Pattern wildcards are unaffected
+        (separate `Pattern::Wildcard`). Verified:
+        aura-vm/tests/type_holes.rs.
 
 **P3 - Nice to Have**
 - [ ] **Experimental features**
