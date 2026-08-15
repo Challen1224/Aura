@@ -715,6 +715,13 @@ impl<'a> Parser<'a> {
                 decls.push(Decl::Class(self.parse_class(false, is_abstract, true)?));
             } else if self.match_token(Token::Record) {
                 decls.push(Decl::Class(self.parse_record()?));
+            } else if self.match_token(Token::Static) {
+                // `static class Name { ... }`: the namespace idiom. No
+                // instances, no inheritance, all members static.
+                self.consume(Token::Class, "expected `class` after `static`")?;
+                let mut c = self.parse_class(false, false, true)?;
+                c.is_static = true;
+                decls.push(Decl::Class(c));
             } else {
                 self.consume(Token::Class, "expected `class`, `record`, or `interface`")?;
                 decls.push(Decl::Class(self.parse_class(false, false, false)?));
@@ -725,6 +732,7 @@ impl<'a> Parser<'a> {
         decls.insert(0, Decl::Class(ClassDecl {
             name: "Exception".to_string(),
             module: String::new(),
+            is_static: false,
             generic_params: vec![],
             bases: vec![],
             is_interface: false,
@@ -738,12 +746,14 @@ impl<'a> Parser<'a> {
                     visibility: Visibility::Public,
                     ty: Type::String,
                     name: "message".to_string(),
+                    init: None,
                 }),
                 Member::Field(FieldDecl {
                     is_static: false,
                     visibility: Visibility::Public,
                     ty: Type::String,
                     name: "stackTrace".to_string(),
+                    init: None,
                 }),
             ],
         }));
@@ -814,6 +824,7 @@ impl<'a> Parser<'a> {
             return Ok(ClassDecl {
                 name,
             module: String::new(),
+            is_static: false,
                 generic_params,
                 bases,
                 is_interface,
@@ -836,6 +847,7 @@ impl<'a> Parser<'a> {
         Ok(ClassDecl {
             name,
             module: String::new(),
+            is_static: false,
             generic_params,
             bases,
             is_interface,
@@ -1253,12 +1265,18 @@ impl<'a> Parser<'a> {
                 return Err(format!("`{}` cannot be used on a field",
                     if is_abstract { "abstract" } else if is_virtual { "virtual" } else if is_override { "override" } else { "final" }));
             }
+            let init = if self.match_token(Token::Assign) {
+                Some(self.parse_expr()?)
+            } else {
+                None
+            };
             self.consume(Token::Semi, "expected `;`")?;
             Ok(Member::Field(FieldDecl {
                 is_static,
                 visibility,
                 ty,
                 name,
+                init,
             }))
         }
     }

@@ -295,16 +295,28 @@ pub struct Vm {
 impl Vm {
     /// Create a VM for the given module.
     pub fn new(module: Arc<Module>) -> Self {
+        let mut heap = Heap::new();
         let mut static_fields = HashMap::new();
         for (id, class) in &module.classes {
-            static_fields.insert(
-                *id,
-                class.static_fields.iter().map(|f| default_value(&f.ty)).collect(),
-            );
+            let values: Vec<Value> = class
+                .static_fields
+                .iter()
+                .map(|f| match &f.init {
+                    Some(aura_bytecode::ConstInit::Int(v)) => Value::Int(*v),
+                    Some(aura_bytecode::ConstInit::Float(v)) => Value::Float(*v),
+                    Some(aura_bytecode::ConstInit::Bool(v)) => Value::Bool(*v),
+                    Some(aura_bytecode::ConstInit::Char(v)) => Value::Char(*v),
+                    Some(aura_bytecode::ConstInit::Str(v)) => {
+                        Value::String(heap.allocate(AuraObject::String(v.clone())))
+                    }
+                    None => default_value(&f.ty),
+                })
+                .collect();
+            static_fields.insert(*id, values);
         }
         Self {
             module,
-            heap: Heap::new(),
+            heap,
             call_stack: Vec::new(),
             static_fields,
             overflow_checks: false,

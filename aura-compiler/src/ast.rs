@@ -105,6 +105,9 @@ pub struct ClassDecl {
     /// Names after `:` (base class and/or interfaces). The type checker splits
     /// these into a single super class and a list of implemented interfaces.
     pub bases: Vec<String>,
+    /// Whether this is a static class (namespace idiom): no instances, no
+    /// inheritance, all members static.
+    pub is_static: bool,
     /// Whether this is an interface declaration.
     pub is_interface: bool,
     /// Whether this is an abstract class (cannot be instantiated).
@@ -204,6 +207,10 @@ pub struct FieldDecl {
     pub ty: Type,
     /// Field name.
     pub name: String,
+    /// Optional initializer. Static fields accept constant literals
+    /// (applied at VM startup); instance fields do not support
+    /// initializers yet.
+    pub init: Option<Expr>,
 }
 
 /// Method declaration.

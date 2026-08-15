@@ -257,12 +257,14 @@ pub enum Variance {
 }
 
 /// Field descriptor.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct FieldDef {
     /// Field name.
     pub name: String,
     /// Type descriptor.
     pub ty: TypeDesc,
+    /// Constant initializer (static fields only), applied at VM startup.
+    pub init: Option<ConstInit>,
 }
 
 /// Method descriptor.
@@ -309,7 +311,7 @@ pub struct ExceptionHandler {
 }
 
 /// Class descriptor.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct ClassDef {
     /// Class name.
     pub name: String,
@@ -336,7 +338,7 @@ pub struct ClassDef {
 }
 
 /// Enum variant descriptor.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct VariantDef {
     /// Variant name.
     pub name: String,
@@ -345,12 +347,27 @@ pub struct VariantDef {
 }
 
 /// Enum descriptor.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct EnumDef {
     /// Enum name.
     pub name: String,
     /// Variants in declaration order.
     pub variants: Vec<VariantDef>,
+}
+
+/// A constant initializer for a static field, applied at VM startup.
+#[derive(Debug, Clone, PartialEq)]
+pub enum ConstInit {
+    /// Integer constant.
+    Int(i64),
+    /// Float constant.
+    Float(f64),
+    /// Boolean constant.
+    Bool(bool),
+    /// Character constant.
+    Char(char),
+    /// String constant (allocated on the heap at startup).
+    Str(String),
 }
 
 /// Type descriptor used by bytecode metadata and the type checker.
@@ -466,7 +483,7 @@ impl fmt::Display for TypeDesc {
 }
 
 /// A complete compiled Aura module.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct Module {
     /// Module name.
     pub name: String,

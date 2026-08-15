@@ -302,6 +302,8 @@ pub struct ClassInfo {
     pub name: String,
     /// Source module (file) the class was declared in; scopes `internal`.
     pub module: String,
+    /// Whether this is a static class (no instances, all members static).
+    pub is_static: bool,
     /// Generic parameters for this class.
     pub generic_params: Vec<GenericParam>,
     /// Whether this is an interface declaration.
@@ -516,6 +518,7 @@ impl TypeChecker {
             let info = ClassInfo {
                 name: ic.name.to_string(),
                 module: String::new(),
+                is_static: false,
                 generic_params: ic
                     .generic_params
                     .iter()
@@ -613,12 +616,94 @@ impl TypeChecker {
                             c.name
                         )));
                     }
+                    if c.is_static {
+                        if !c.bases.is_empty() {
+                            return Err(TypeError(format!(
+                                "static class `{}` cannot inherit or implement interfaces",
+                                c.name
+                            )));
+                        }
+                        for member in &c.members {
+                            let (is_static, what, mname): (bool, &str, &str) = match member {
+                                Member::Field(f) => (f.is_static, "field", &f.name),
+                                Member::Method(m) if m.is_constructor => {
+                                    return Err(TypeError(format!(
+                                        "static class `{}` cannot declare a constructor",
+                                        c.name
+                                    )));
+                                }
+                                Member::Method(m) => (m.is_static, "method", &m.name),
+                                Member::Property(p) => (p.is_static, "property", &p.name),
+                            };
+                            if !is_static {
+                                return Err(TypeError(format!(
+                                    "static class `{}` cannot declare instance {} `{}`; all members must be static",
+                                    c.name, what, mname
+                                )));
+                            }
+                        }
+                    }
+                    // Field initializers: static fields accept constant
+                    // literals only (applied at VM startup); instance field
+                    // initializers need constructor injection and are not
+                    // supported yet.
+                    for member in &c.members {
+                        if let Member::Field(f) = member {
+                            if let Some(init) = &f.init {
+                                if !f.is_static {
+                                    return Err(TypeError(format!(
+                                        "instance field `{}.{}` cannot have an initializer yet; assign it in a constructor",
+                                        c.name, f.name
+                                    )));
+                                }
+                                let lit_ty = match init {
+                                    Expr::IntLit(v, suffix) => self.suffixed_int_type(*suffix, *v)?,
+                                    Expr::FloatLit(_, _) => Type::Float64,
+                                    Expr::Bool(_) => Type::Bool,
+                                    Expr::Char(_) => Type::Char,
+                                    Expr::String(v) => Type::StringLit(v.clone()),
+                                    Expr::Unary(UnaryOp::Neg, inner) => match inner.as_ref() {
+                                        Expr::IntLit(v, suffix) => {
+                                            self.suffixed_int_type(*suffix, -*v)?
+                                        }
+                                        Expr::FloatLit(_, _) => Type::Float64,
+                                        _ => {
+                                            return Err(TypeError(format!(
+                                                "static field `{}.{}` initializer must be a constant literal",
+                                                c.name, f.name
+                                            )));
+                                        }
+                                    },
+                                    _ => {
+                                        return Err(TypeError(format!(
+                                            "static field `{}.{}` initializer must be a constant literal",
+                                            c.name, f.name
+                                        )));
+                                    }
+                                };
+                                if !self.is_assignable(&f.ty, &lit_ty) {
+                                    return Err(self.mismatch_error(
+                                        format!(
+                                            "cannot initialize static field `{}.{}` of type {} with {}",
+                                            c.name,
+                                            f.name,
+                                            f.ty.name(),
+                                            lit_ty.name()
+                                        ),
+                                        &f.ty,
+                                        &lit_ty,
+                                    ));
+                                }
+                            }
+                        }
+                    }
                     if self.enums.contains_key(&c.name) {
                         return Err(TypeError(format!("`{}` is already defined as an enum", c.name)));
                     }
                     let mut info = ClassInfo {
                         name: c.name.clone(),
                         module: c.module.clone(),
+                        is_static: c.is_static,
                         generic_params: c.generic_params.clone(),
                         is_interface: c.is_interface,
                         is_abstract: c.is_abstract,
@@ -940,6 +1025,14 @@ impl TypeChecker {
             if let Decl::Class(c) = decl {
                 let mut super_class = None;
                 let mut interfaces = Vec::new();
+                for base in &c.bases {
+                    if self.classes.get(base).map(|i| i.is_static).unwrap_or(false) {
+                        return Err(TypeError(format!(
+                            "cannot inherit from static class `{}`",
+                            base
+                        )));
+                    }
+                }
                 for base in &c.bases {
                     let base_info = self
                         .classes
@@ -2823,6 +2916,12 @@ impl TypeChecker {
                 let Some(class_info) = self.classes.get(class_name) else {
                     return Err(TypeError(format!("unknown class `{}`", class_name)));
                 };
+                if class_info.is_static {
+                    return Err(TypeError(format!(
+                        "cannot instantiate static class `{}`",
+                        class_name
+                    )));
+                }
                 if class_info.is_abstract || class_info.is_interface {
                     return Err(TypeError(format!(
                         "cannot instantiate {} `{}`",
@@ -4152,6 +4251,12 @@ impl TypeChecker {
                 }
                 if !self.classes.contains_key(name) && !self.enums.contains_key(name) {
                     return Err(TypeError(format!("unknown type `{}`", name)));
+                }
+                if self.classes.get(name).map(|i| i.is_static).unwrap_or(false) {
+                    return Err(TypeError(format!(
+                        "static class `{}` cannot be used as a type",
+                        name
+                    )));
                 }
                 self.validate_type_args(name, args, generic_params)?;
                 for arg in args {

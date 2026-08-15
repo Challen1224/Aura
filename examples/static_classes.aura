@@ -1,0 +1,70 @@
+// Static classes: the namespace idiom.
+//
+// `static class` declares a container of constants and functions with no
+// instances: it cannot be constructed, inherited from, or used as a type,
+// and every member must be static. Static fields take constant-literal
+// initializers, applied when the program starts (they stay mutable —
+// initializers are starting values, not consts).
+
+static class MathUtil {
+    static float PI = 3.14159;
+    static int Answer = 42;
+
+    static int Max(int a, int b) {
+        if (a > b) { return a; }
+        return b;
+    }
+
+    static int Clamp(int v, int lo, int hi) {
+        if (v < lo) { return lo; }
+        if (v > hi) { return hi; }
+        return v;
+    }
+}
+
+static class Strings {
+    static string Sep = ", ";
+
+    static string Join(List<string> parts) {
+        var out = "";
+        var first = true;
+        for (var p in parts) {
+            if (first) {
+                out = "{p}";
+                first = false;
+            } else {
+                out = "{out}{Strings.Sep}{p}";
+            }
+        }
+        return out;
+    }
+}
+
+class Program {
+    static void Main() {
+        print("max: ");
+        print(MathUtil.Max(3, 9));
+        println();
+        print("clamped: ");
+        print(MathUtil.Clamp(99, 0, 10));
+        println();
+        print("pi-ish: ");
+        print(MathUtil.PI);
+        println();
+        print("answer: ");
+        print(MathUtil.Answer);
+        println();
+
+        var parts = new List<string>();
+        parts.Add("alpha");
+        parts.Add("beta");
+        parts.Add("gamma");
+        print(Strings.Join(parts));
+        println();
+
+        // These would be compile errors:
+        //   new MathUtil();            // cannot instantiate a static class
+        //   MathUtil m = null;         // cannot be used as a type
+        //   class X : MathUtil { }     // cannot inherit from it
+    }
+}

@@ -355,13 +355,27 @@
   - [x] `final override` (override a virtual method and seal it)
   - [x] Cannot mix `final` with `virtual`/`abstract`, `sealed` with `abstract`
 
-- [ ] **Static classes / namespaces**
+- [x] **Static classes / namespaces**
   ```aura
   static class Math {
       static float PI = 3.14159;
-      static int max(int a, int b) { }
+      static int Max(int a, int b) { ... }
   }
   ```
+  `static class` is the namespace idiom with C# rules: cannot be
+  instantiated, inherited from, or used as a type; no constructors; every
+  member must be static — each rule its own compile error. This also
+  landed **static field initializers** (on any class, not just static
+  ones): constant literals only (int/float/bool/char/string, optionally
+  negated), type-checked against the field, stored as `ConstInit` in the
+  bytecode `FieldDef`, and applied at VM startup (string constants
+  allocate on the heap and are GC roots via static fields). Initialized
+  statics remain mutable — initializers are starting values, not consts.
+  Not included, documented: instance field initializers (need constructor
+  injection; a dedicated error points at assigning in a constructor) and
+  arbitrary initializer expressions (need static constructors). Verified
+  under both tiers (aura-vm/tests/static_classes.rs,
+  examples/static_classes.aura).
 
 - [x] **Properties**
   ```aura

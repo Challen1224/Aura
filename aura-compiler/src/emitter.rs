@@ -202,6 +202,7 @@ impl Emitter {
                             FieldDef {
                                 name: f.name.clone(),
                                 ty: map_type(&f.ty, &class_ids, &enum_ids, &[]),
+                                init: None,
                             }
                         }).collect(),
                     }
@@ -239,6 +240,7 @@ impl Emitter {
                     .map(|(name, ty)| FieldDef {
                         name: name.clone(),
                         ty: map_type(ty, &class_ids, &enum_ids, &class_generic_params),
+                        init: None,
                     })
                     .collect();
                 let static_fields: Vec<FieldDef> = info
@@ -247,6 +249,7 @@ impl Emitter {
                     .map(|(name, ty)| FieldDef {
                         name: name.clone(),
                         ty: map_type(ty, &class_ids, &enum_ids, &class_generic_params),
+                        init: static_field_init(class, name),
                     })
                     .collect();
 
@@ -2874,6 +2877,32 @@ fn arith_conv(ty: &Type) -> Option<TypeDesc> {
         Type::Float32 => Some(TypeDesc::Float32),
         _ => None,
     }
+}
+
+/// The constant initializer of static field `name` on `class`, if declared.
+/// The typer has already restricted initializers to constant literals.
+fn static_field_init(class: &ClassDecl, name: &str) -> Option<aura_bytecode::ConstInit> {
+    use aura_bytecode::ConstInit;
+    for member in &class.members {
+        if let Member::Field(f) = member {
+            if f.is_static && f.name == name {
+                return match f.init.as_ref()? {
+                    Expr::IntLit(v, _) => Some(ConstInit::Int(*v)),
+                    Expr::FloatLit(v, _) => Some(ConstInit::Float(*v)),
+                    Expr::Bool(b) => Some(ConstInit::Bool(*b)),
+                    Expr::Char(c) => Some(ConstInit::Char(*c)),
+                    Expr::String(s) => Some(ConstInit::Str(s.clone())),
+                    Expr::Unary(UnaryOp::Neg, inner) => match inner.as_ref() {
+                        Expr::IntLit(v, _) => Some(ConstInit::Int(-*v)),
+                        Expr::FloatLit(v, _) => Some(ConstInit::Float(-*v)),
+                        _ => None,
+                    },
+                    _ => None,
+                };
+            }
+        }
+    }
+    None
 }
 
 fn map_type(ty: &Type, class_ids: &HashMap<String, ClassId>, enum_ids: &HashMap<String, EnumId>, generic_params: &[aura_bytecode::GenericParam]) -> TypeDesc {

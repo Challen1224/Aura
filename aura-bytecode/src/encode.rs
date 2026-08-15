@@ -3,7 +3,7 @@
 //! This is intentionally simple: length-prefixed strings and vectors, with
 //! opcodes stored as a single byte plus fixed-size operands.
 
-use crate::{ClassDef, ClassId, EnumDef, EnumId, ExceptionHandler, FieldDef, GenericParam, MethodDef, MethodId, Module, Op, TypeDesc, VariantDef, Variance};
+use crate::{ClassDef, ClassId, ConstInit, EnumDef, EnumId, ExceptionHandler, FieldDef, GenericParam, MethodDef, MethodId, Module, Op, TypeDesc, VariantDef, Variance};
 use std::collections::HashMap;
 use std::io::{self, Read, Write};
 
@@ -160,13 +160,56 @@ fn read_variant<R: Read>(r: &mut R) -> io::Result<VariantDef> {
 
 fn write_field<W: Write>(w: &mut W, f: &FieldDef) -> io::Result<()> {
     write_string(w, &f.name)?;
-    write_type(w, &f.ty)
+    write_type(w, &f.ty)?;
+    match &f.init {
+        None => write_u8(w, 0),
+        Some(ConstInit::Int(v)) => {
+            write_u8(w, 1)?;
+            w.write_all(&v.to_le_bytes())
+        }
+        Some(ConstInit::Float(v)) => {
+            write_u8(w, 2)?;
+            w.write_all(&v.to_bits().to_le_bytes())
+        }
+        Some(ConstInit::Bool(v)) => {
+            write_u8(w, 3)?;
+            write_u8(w, *v as u8)
+        }
+        Some(ConstInit::Char(v)) => {
+            write_u8(w, 4)?;
+            w.write_all(&(*v as u32).to_le_bytes())
+        }
+        Some(ConstInit::Str(v)) => {
+            write_u8(w, 5)?;
+            write_string(w, v)
+        }
+    }
 }
 
 fn read_field<R: Read>(r: &mut R) -> io::Result<FieldDef> {
     let name = read_string(r)?;
     let ty = read_type(r)?;
-    Ok(FieldDef { name, ty })
+    let init = match read_u8(r)? {
+        0 => None,
+        1 => Some(ConstInit::Int(read_i64(r)?)),
+        2 => {
+            let mut b = [0u8; 8];
+            r.read_exact(&mut b)?;
+            Some(ConstInit::Float(f64::from_bits(u64::from_le_bytes(b))))
+        }
+        3 => Some(ConstInit::Bool(read_u8(r)? != 0)),
+        4 => Some(ConstInit::Char(
+            char::from_u32(read_u32(r)?).unwrap_or('\0'),
+        )),
+        5 => Some(ConstInit::Str(read_string(r)?)),
+        other => {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("bad field init tag {other}"),
+            ))
+        }
+    };
+    Ok(FieldDef { name, ty, init })
 }
 
 fn write_method<W: Write>(w: &mut W, m: &MethodDef) -> io::Result<()> {
