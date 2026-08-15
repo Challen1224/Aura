@@ -1,0 +1,53 @@
+// Extension methods.
+//
+// `extension Name on Target { ... }` adds callable methods to an existing
+// type without touching its declaration. Inside the body, `this` is the
+// receiver. Under the hood the block is a static class whose methods take
+// the receiver as their first parameter — `"noon".isPalindrome()` and
+// `StringExtensions.isPalindrome("noon")` are the same call. A real method
+// on the target always wins over an extension, and extensions on a base
+// class apply to subclass receivers. Targets: `string` or a user class.
+
+extension StringExtensions on string {
+    bool isPalindrome() {
+        int i = 0;
+        int j = this.Length - 1;
+        while (i < j) {
+            if (this.Substring(i, 1) != this.Substring(j, 1)) { return false; }
+            i = i + 1;
+            j = j - 1;
+        }
+        return true;
+    }
+
+    string shout() { return "{this.ToUpper()}!"; }
+}
+
+class Point {
+    int x;
+    int y;
+    Point(int x, int y) { this.x = x; this.y = y; }
+}
+
+extension PointExtensions on Point {
+    int manhattan() {
+        int ax = this.x; if (ax < 0) { ax = 0 - ax; }
+        int ay = this.y; if (ay < 0) { ay = 0 - ay; }
+        return ax + ay;
+    }
+
+    Point flipped() { return new Point(this.y, this.x); }
+}
+
+class Program {
+    static void Main() {
+        print("racecar is palindrome: "); print("racecar".isPalindrome()); println();
+        print("aura is palindrome: "); print("aura".isPalindrome()); println();
+        print("hey".shout()); println();
+
+        Point p = new Point(-3, 7);
+        print("manhattan: "); print(p.manhattan()); println();
+        print("flipped.x: "); print(p.flipped().x); println();
+        print("static form: "); print(StringExtensions.isPalindrome("noon")); println();
+    }
+}

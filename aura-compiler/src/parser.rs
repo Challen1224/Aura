@@ -233,6 +233,10 @@ pub fn expand_type_aliases(program: &Program) -> Result<Program, String> {
                     .iter()
                     .map(|m| expand_member(m, &aliases))
                     .collect::<Result<Vec<_>, _>>()?;
+                c.extension_on = match &c.extension_on {
+                    Some(t) => Some(expand_type(t, &aliases)?),
+                    None => None,
+                };
                 Decl::Class(c)
             }
             Decl::Enum(e) => {
@@ -669,12 +673,15 @@ pub struct Parser<'a> {
     /// 1-based source line of each token (parallel to `tokens`).
     lines: &'a [usize],
     pos: usize,
+    /// Inside an extension body: `this` in expressions parses as the
+    /// synthesized `__self` receiver parameter.
+    substitute_this: bool,
 }
 
 impl<'a> Parser<'a> {
     /// Create a parser over a token slice.
     pub fn new(tokens: &'a [Token], lines: &'a [usize]) -> Self {
-        Self { tokens, lines, pos: 0 }
+        Self { tokens, lines, pos: 0, substitute_this: false }
     }
 
     /// Source line of the current token (or the last one at EOF).
@@ -722,6 +729,10 @@ impl<'a> Parser<'a> {
                 let mut c = self.parse_class(false, false, true)?;
                 c.is_static = true;
                 decls.push(Decl::Class(c));
+            } else if matches!(self.peek(), Some(Token::Ident(k)) if k == "extension") {
+                // `extension Name on Target { ... }` (contextual keyword).
+                self.advance();
+                decls.push(Decl::Class(self.parse_extension()?));
             } else {
                 self.consume(Token::Class, "expected `class`, `record`, or `interface`")?;
                 decls.push(Decl::Class(self.parse_class(false, false, false)?));
@@ -756,6 +767,7 @@ impl<'a> Parser<'a> {
                     init: None,
                 }),
             ],
+            extension_on: None,
         }));
         Ok(Program { decls })
     }
@@ -775,6 +787,101 @@ impl<'a> Parser<'a> {
     /// been consumed.
     fn parse_record(&mut self) -> Result<ClassDecl, String> {
         self.parse_class_impl(false, false, false, true)
+    }
+
+    /// Parse `extension Name on Target { methods }` (the leading `extension`
+    /// keyword has already been consumed) and desugar it to a static class:
+    /// every method becomes static with a leading `__self` parameter of the
+    /// target type, and `this` in bodies parses as `__self`.
+    fn parse_extension(&mut self) -> Result<ClassDecl, String> {
+        let name = self.consume_ident("expected extension name")?;
+        match self.peek() {
+            Some(Token::Ident(k)) if k == "on" => {
+                self.advance();
+            }
+            _ => return Err(format!("expected `on` after `extension {}`", name)),
+        }
+        let target = self.parse_type()?;
+        self.consume(Token::LBrace, "expected `{`")?;
+        self.substitute_this = true;
+        let mut members = Vec::new();
+        while !self.check(Token::RBrace) && !self.is_at_end() {
+            self.skip_newlines();
+            if self.check(Token::RBrace) {
+                break;
+            }
+            members.push(self.parse_member(false, &name)?);
+        }
+        self.substitute_this = false;
+        self.consume(Token::RBrace, "expected `}`")?;
+        for member in &mut members {
+            let Member::Method(m) = member else {
+                return Err(format!(
+                    "extension `{}` can only contain methods",
+                    name
+                ));
+            };
+            if m.is_constructor {
+                return Err(format!(
+                    "extension `{}` cannot declare a constructor",
+                    name
+                ));
+            }
+            if crate::typer::operator_symbol_of(&m.name).is_some() {
+                return Err(format!(
+                    "extension `{}` cannot declare `{}`: operator overloads must be \
+                     declared on the class itself",
+                    name, m.name
+                ));
+            }
+            if m.is_static || m.is_virtual || m.is_override || m.is_abstract || m.is_final {
+                return Err(format!(
+                    "extension method `{}.{}` cannot be {}: extension methods are \
+                     written like instance methods",
+                    name,
+                    m.name,
+                    if m.is_static {
+                        "static"
+                    } else if m.is_virtual {
+                        "virtual"
+                    } else if m.is_override {
+                        "override"
+                    } else if m.is_abstract {
+                        "abstract"
+                    } else {
+                        "final"
+                    }
+                ));
+            }
+            if m.visibility != Visibility::Public {
+                return Err(format!(
+                    "extension method `{}.{}` must be public",
+                    name, m.name
+                ));
+            }
+            m.is_static = true;
+            m.params.insert(
+                0,
+                Param {
+                    ty: target.clone(),
+                    name: "__self".to_string(),
+                },
+            );
+        }
+        Ok(ClassDecl {
+            name,
+            module: String::new(),
+            is_static: true,
+            generic_params: Vec::new(),
+            bases: Vec::new(),
+            is_interface: false,
+            is_abstract: false,
+            is_sealed: true,
+            is_record: false,
+            record_params: Vec::new(),
+            members,
+            extension_on: Some(target),
+        })
     }
 
     fn parse_class_impl(
@@ -833,6 +940,7 @@ impl<'a> Parser<'a> {
                 is_record,
                 record_params,
                 members,
+                extension_on: None,
             });
         }
         self.consume(Token::LBrace, "expected `{`")?;
@@ -856,6 +964,7 @@ impl<'a> Parser<'a> {
             is_record,
             record_params,
             members,
+            extension_on: None,
         })
     }
 
@@ -2383,8 +2492,13 @@ impl<'a> Parser<'a> {
                 }
             }
             Some(Token::Ident(name)) => {
-                let name = name.clone();
+                let mut name = name.clone();
                 self.advance();
+                // Inside an extension body the receiver is the synthesized
+                // `__self` parameter; `this` refers to it.
+                if name == "this" && self.substitute_this {
+                    name = "__self".to_string();
+                }
                 // `_` in expression position is a typed hole: the checker
                 // reports the expected type and in-scope candidates.
                 if name == "_" && !self.check(Token::LParen) {

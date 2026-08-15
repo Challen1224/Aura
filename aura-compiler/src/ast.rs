@@ -121,6 +121,11 @@ pub struct ClassDecl {
     pub record_params: Vec<Param>,
     /// Member declarations.
     pub members: Vec<Member>,
+    /// For an `extension Name on Target { ... }` declaration, the target
+    /// type. The declaration itself desugars to a static class whose methods
+    /// take the receiver as a leading `__self` parameter; call sites resolve
+    /// `x.Foo()` here when `x`'s type declares no real `Foo`.
+    pub extension_on: Option<Type>,
 }
 
 /// Member visibility.

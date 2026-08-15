@@ -418,12 +418,33 @@
   (aura-vm/tests/operator_overloading.rs,
   examples/operator_overloading.aura).
 
-- [ ] **Extension methods**
+- [x] **Extension methods**
   ```aura
   extension StringExtensions on string {
-      bool isPalindrome() { }
+      bool isPalindrome() { ... }
   }
   ```
+  `extension Name on Target { methods }` adds callable methods to an
+  existing type; `this` in bodies is the receiver. Desugars to a static
+  class whose methods take the receiver as a leading parameter, so
+  `"noon".isPalindrome()` and `StringExtensions.isPalindrome("noon")` are
+  the same static call (JIT-transparent, zero VM changes). Resolution: a
+  real (or inherited) method on the receiver always wins; otherwise the
+  receiver's class then its superclass chain is searched for an
+  extension. Extensions on a base class apply to subclass receivers;
+  an extension shadowed by an existing target method is rejected at
+  declaration (dead code), while a *subclass* may still declare the name.
+  Targets: `string` or a non-generic user class/interface. Extensions
+  live in ordinary modules (multi-file tested). Rules, each its own
+  error: methods only, public, no constructors/operators/modifiers;
+  targets can't be enums, newtypes, static classes, built-in collection
+  classes, primitives, or generic instantiations; duplicate extension
+  methods on one target collide; nullable receivers must be narrowed.
+  Note: the receiver evaluates before the arguments (static-call order).
+  Not included: extensions on `List`/`Map`/`Set` (needs generic targets),
+  extension properties/operators, `?.` dispatch to extensions. Verified
+  under both tiers (aura-vm/tests/extension_methods.rs,
+  examples/extension_methods.aura).
 
 - [ ] **Nested classes**
   ```aura

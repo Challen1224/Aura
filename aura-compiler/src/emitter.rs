@@ -1558,6 +1558,23 @@ impl<'a> MethodEmitter<'a> {
                                 }
                                 self.ops.push(Op::Call(method_id));
                             } else {
+                                if let Some(ext) = self.extension_call_owner(target, &call.method) {
+                                    // Extension call: static `Ext.Method(receiver, args...)`
+                                    // — the receiver is the leading `__self` parameter.
+                                    self.emit_expr(target)?;
+                                    for arg in &call.args {
+                                        self.emit_expr(arg)?;
+                                    }
+                                    let method_id = *self
+                                        .method_ids
+                                        .get(&(ext.clone(), call.method.clone(), false))
+                                        .ok_or_else(|| format!(
+                                            "unknown extension method `{}.{}`",
+                                            ext, call.method
+                                        ))?;
+                                    self.ops.push(Op::Call(method_id));
+                                    return Ok(());
+                                }
                                 // Instance call on local/field variable.
                                 // Push arguments first, then the instance.
                                 for arg in &call.args {
@@ -1567,6 +1584,23 @@ impl<'a> MethodEmitter<'a> {
                                 self.ops.push(Op::CallVirt(call.method.clone()));
                             }
                         } else {
+                            if let Some(ext) = self.extension_call_owner(target, &call.method) {
+                                // Extension call: static `Ext.Method(receiver, args...)`
+                                // — the receiver is the leading `__self` parameter.
+                                self.emit_expr(target)?;
+                                for arg in &call.args {
+                                    self.emit_expr(arg)?;
+                                }
+                                let method_id = *self
+                                    .method_ids
+                                    .get(&(ext.clone(), call.method.clone(), false))
+                                    .ok_or_else(|| format!(
+                                        "unknown extension method `{}.{}`",
+                                        ext, call.method
+                                    ))?;
+                                self.ops.push(Op::Call(method_id));
+                                return Ok(());
+                            }
                             // Push arguments first, then the instance.
                             for arg in &call.args {
                                 self.emit_expr(arg)?;
@@ -2444,6 +2478,57 @@ impl<'a> MethodEmitter<'a> {
             if self.program.classes.get(name).map(|c| c.is_record).unwrap_or(false))
     }
 
+    /// The extension class defining `method` for the target `key`, if any.
+    fn extension_class(&self, key: &str, method: &str) -> Option<String> {
+        self.program.extensions.get(key)?.get(method).cloned()
+    }
+
+    /// Return type of the extension method resolving `key.method`, if any.
+    fn extension_return_ty(&self, key: &str, method: &str) -> Option<Type> {
+        let ext = self.extension_class(key, method)?;
+        self.program
+            .classes
+            .get(&ext)
+            .and_then(|c| c.static_methods.get(method))
+            .map(|mi| mi.return_ty.clone())
+    }
+
+    /// Decide whether `target.method(...)` is an extension-method call: the
+    /// receiver's static type has no real method of that name, and an
+    /// extension on the receiver's class (or a superclass) or on `string`
+    /// defines it. Returns the extension class to `Call` statically.
+    fn extension_call_owner(&self, target: &Expr, method: &str) -> Option<String> {
+        let ty = self.expr_ty(target).ok()?;
+        match ty {
+            Type::String | Type::StringLit(_) | Type::LiteralUnion(..) => {
+                if crate::intrinsics::string_method(method).is_some() {
+                    return None;
+                }
+                self.extension_class("string", method)
+            }
+            Type::Class(name, _) => {
+                // A real (possibly inherited) instance method always wins.
+                let mut cur = Some(name.clone());
+                while let Some(k) = cur {
+                    let info = self.program.classes.get(&k)?;
+                    if info.methods.contains_key(method) {
+                        return None;
+                    }
+                    cur = info.super_class.clone();
+                }
+                let mut cur = Some(name);
+                while let Some(k) = cur {
+                    if let Some(ext) = self.extension_class(&k, method) {
+                        return Some(ext);
+                    }
+                    cur = self.program.classes.get(&k).and_then(|i| i.super_class.clone());
+                }
+                None
+            }
+            _ => None,
+        }
+    }
+
     /// User-defined operator on the left operand's class (or a base): the
     /// method name to `CallVirt` and its return type with the receiver's
     /// type arguments substituted. The typer has already validated the
@@ -2646,9 +2731,13 @@ impl<'a> MethodEmitter<'a> {
                 } else {
                     let obj_ty = Self::strip_nullable(self.expr_ty(target)?);
                     if matches!(obj_ty, Type::String | Type::StringLit(_) | Type::LiteralUnion(..)) {
-                        return crate::intrinsics::string_method(&call.method)
-                            .map(|m| m.return_ty)
-                            .ok_or_else(|| format!("unknown method `{}` on `string`", call.method));
+                        if let Some(m) = crate::intrinsics::string_method(&call.method) {
+                            return Ok(m.return_ty);
+                        }
+                        if let Some(ret) = self.extension_return_ty("string", &call.method) {
+                            return Ok(ret);
+                        }
+                        return Err(format!("unknown method `{}` on `string`", call.method));
                     }
                     let Type::Class(c, args) = obj_ty else {
                         return Err("cannot determine call target class".to_string());
@@ -2660,9 +2749,13 @@ impl<'a> MethodEmitter<'a> {
             } else {
                 let obj_ty = Self::strip_nullable(self.expr_ty(target)?);
                 if matches!(obj_ty, Type::String | Type::StringLit(_) | Type::LiteralUnion(..)) {
-                    return crate::intrinsics::string_method(&call.method)
-                        .map(|m| m.return_ty)
-                        .ok_or_else(|| format!("unknown method `{}` on `string`", call.method));
+                    if let Some(m) = crate::intrinsics::string_method(&call.method) {
+                        return Ok(m.return_ty);
+                    }
+                    if let Some(ret) = self.extension_return_ty("string", &call.method) {
+                        return Ok(ret);
+                    }
+                    return Err(format!("unknown method `{}` on `string`", call.method));
                 }
                 let Type::Class(c, args) = obj_ty else {
                     return Err("cannot determine call target class".to_string());
@@ -2739,6 +2832,17 @@ impl<'a> MethodEmitter<'a> {
                 return Ok(substitute_type(&mi.return_ty, &subst));
             }
             cur = info.super_class.clone();
+        }
+        // Extension fallback for chained typing: receiver class, then its
+        // superclass chain.
+        if is_instance {
+            let mut cur = Some(class_name.clone());
+            while let Some(k) = cur {
+                if let Some(ret) = self.extension_return_ty(&k, &method_name) {
+                    return Ok(ret);
+                }
+                cur = self.program.classes.get(&k).and_then(|i| i.super_class.clone());
+            }
         }
         Err(format!(
             "cannot determine return type of `{}.{}`",

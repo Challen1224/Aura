@@ -339,6 +339,10 @@ pub struct TypedProgram {
     /// emitter to recognize `Name(expr)` constructors, which erase to the
     /// wrapped expression.
     pub newtypes: HashMap<String, Type>,
+    /// Extension methods: target key (`string` or a class name) -> method
+    /// name -> extension class. Call sites resolve `x.Foo()` to a static
+    /// call on the extension class when `x`'s type has no real `Foo`.
+    pub extensions: HashMap<String, HashMap<String, String>>,
 }
 
 /// Class metadata populated by the type checker.
@@ -480,6 +484,8 @@ pub struct TypeChecker {
     current_line: std::cell::Cell<usize>,
     /// `Class.Method` currently being checked, for error prefixes.
     current_context: std::cell::RefCell<String>,
+    /// Extension methods: target key -> method name -> extension class.
+    extensions: HashMap<String, HashMap<String, String>>,
 }
 
 impl TypeChecker {
@@ -492,6 +498,7 @@ impl TypeChecker {
             narrowed: std::cell::RefCell::new(HashMap::new()),
             current_line: std::cell::Cell::new(0),
             current_context: std::cell::RefCell::new(String::new()),
+            extensions: HashMap::new(),
         }
     }
 
@@ -540,6 +547,7 @@ impl TypeChecker {
             classes: std::mem::take(&mut self.classes),
             enums: std::mem::take(&mut self.enums),
             newtypes: std::mem::take(&mut self.newtypes),
+            extensions: std::mem::take(&mut self.extensions),
         })
     }
 
@@ -1088,6 +1096,95 @@ impl TypeChecker {
         }
         self.split_bases(program)?;
         self.validate_hierarchy()?;
+        // Extension registration. The desugared static class was gathered
+        // like any other above; this builds and validates the call-site
+        // mapping (target -> method -> extension class). Runs after the main
+        // loop so targets declared later in the file resolve.
+        for decl in &program.decls {
+            let Decl::Class(c) = decl else { continue };
+            let Some(target) = &c.extension_on else { continue };
+            let key = match target {
+                Type::String => "string".to_string(),
+                Type::Class(n, args) if !args.is_empty() => {
+                    return Err(TypeError(format!(
+                        "extension `{}` on `{}`: generic extension targets are not \
+                         supported yet",
+                        c.name, n
+                    )));
+                }
+                Type::Class(n, _) => {
+                    if self.enums.contains_key(n) {
+                        return Err(TypeError(format!(
+                            "extension `{}`: extensions on enum `{}` are not supported",
+                            c.name, n
+                        )));
+                    }
+                    if self.newtypes.contains_key(n) {
+                        return Err(TypeError(format!(
+                            "extension `{}`: extensions on newtype `{}` are not supported",
+                            c.name, n
+                        )));
+                    }
+                    if crate::intrinsics::is_intrinsic_class(n) {
+                        return Err(TypeError(format!(
+                            "extension `{}`: extensions on built-in class `{}` are \
+                             not supported yet",
+                            c.name, n
+                        )));
+                    }
+                    let Some(info) = self.classes.get(n) else {
+                        return Err(TypeError(format!(
+                            "extension `{}` targets unknown type `{}`",
+                            c.name, n
+                        )));
+                    };
+                    if info.is_static {
+                        return Err(TypeError(format!(
+                            "extension `{}` cannot target static class `{}`: it has \
+                             no instances",
+                            c.name, n
+                        )));
+                    }
+                    n.clone()
+                }
+                other => {
+                    return Err(TypeError(format!(
+                        "extension `{}` target must be `string` or a class, not {}",
+                        c.name,
+                        other.name()
+                    )));
+                }
+            };
+            for member in &c.members {
+                let Member::Method(m) = member else { continue };
+                // A real method on the target always wins at call sites, so
+                // an extension method it shadows could never be called —
+                // reject the dead declaration outright.
+                if key == "string" {
+                    if crate::intrinsics::string_method(&m.name).is_some() {
+                        return Err(TypeError(format!(
+                            "extension method `{}.{}` conflicts with a built-in \
+                             string method",
+                            c.name, m.name
+                        )));
+                    }
+                } else if self.find_method(&key, &m.name).is_some() {
+                    return Err(TypeError(format!(
+                        "extension method `{}.{}` conflicts with an existing method \
+                         on `{}`",
+                        c.name, m.name, key
+                    )));
+                }
+                let entry = self.extensions.entry(key.clone()).or_default();
+                if let Some(prev) = entry.insert(m.name.clone(), c.name.clone()) {
+                    return Err(TypeError(format!(
+                        "duplicate extension method `{}` on `{}`: declared in both \
+                         `{}` and `{}`",
+                        m.name, key, prev, c.name
+                    )));
+                }
+            }
+        }
         Ok(())
     }
 
@@ -3796,6 +3893,42 @@ impl TypeChecker {
         }
     }
 
+    /// Try to resolve `call` as an extension method on the target key
+    /// (`string` or a class name): checks the call's arguments against the
+    /// extension method's parameters minus the leading `__self` receiver.
+    /// `Ok(None)` when no extension defines the method.
+    #[allow(clippy::too_many_arguments)]
+    fn check_extension_call(
+        &self,
+        call: &CallExpr,
+        key: &str,
+        class: &ClassInfo,
+        locals: &HashMap<String, Type>,
+        in_instance: bool,
+        return_ty: &Type,
+        generic_params: &[GenericParam],
+    ) -> Result<Option<Type>, TypeError> {
+        let Some(ext_class) = self.extensions.get(key).and_then(|m| m.get(&call.method)) else {
+            return Ok(None);
+        };
+        let info = self
+            .classes
+            .get(ext_class)
+            .and_then(|c| c.static_methods.get(&call.method))
+            .ok_or_else(|| {
+                TypeError(format!(
+                    "extension class `{}` lost method `{}`",
+                    ext_class, call.method
+                ))
+            })?;
+        let trimmed = MethodInfo {
+            params: info.params[1..].to_vec(),
+            ..info.clone()
+        };
+        self.check_call_args(call, &trimmed, class, locals, in_instance, return_ty, generic_params)
+            .map(Some)
+    }
+
     fn check_call(
         &self,
         call: &CallExpr,
@@ -3833,14 +3966,26 @@ impl TypeChecker {
                     if !in_instance {
                         return Err(TypeError("`this` in static method".to_string()));
                     }
-                    let (declared_in, method_info) = self
-                        .find_method(&class.name, &call.method)
-                        .ok_or_else(|| {
-                            TypeError(format!(
+                    let resolved = self.find_method(&class.name, &call.method);
+                    let (declared_in, method_info) = match resolved {
+                        Some(r) => r,
+                        None => {
+                            let mut cur = Some(class.name.clone());
+                            while let Some(k) = cur {
+                                if let Some(ret) = self.check_extension_call(
+                                    call, &k, class, locals, in_instance, return_ty,
+                                    generic_params,
+                                )? {
+                                    return Ok(ret);
+                                }
+                                cur = self.classes.get(&k).and_then(|i| i.super_class.clone());
+                            }
+                            return Err(TypeError(format!(
                                 "unknown method `{}` on `{}`",
                                 call.method, class.name
-                            ))
-                        })?;
+                            )));
+                        }
+                    };
                     if !self.can_access(&class.name, &declared_in, method_info.visibility) {
                         return Err(TypeError(format!(
                             "method `{}` on `{}` is {}",
@@ -3876,6 +4021,11 @@ impl TypeChecker {
             // Literals and literal-union values are strings at runtime.
             if matches!(target_ty, Type::String | Type::StringLit(_) | Type::LiteralUnion(..)) {
                 let Some(im) = crate::intrinsics::string_method(&call.method) else {
+                    if let Some(ret) = self.check_extension_call(
+                        call, "string", class, locals, in_instance, return_ty, generic_params,
+                    )? {
+                        return Ok(ret);
+                    }
                     return Err(TypeError(format!(
                         "unknown method `{}` on `string`",
                         call.method
@@ -3937,9 +4087,28 @@ impl TypeChecker {
             if !self.classes.contains_key(&name) {
                 return Err(TypeError(format!("unknown class `{}`", name)));
             }
-            let (declared_in, method_info) = self.find_method(&name, &call.method).ok_or_else(|| {
-                TypeError(format!("unknown method `{}` on `{}`", call.method, name))
-            })?;
+            let resolved = self.find_method(&name, &call.method);
+            let (declared_in, method_info) = match resolved {
+                Some(r) => r,
+                None => {
+                    // Extension fallback: the receiver's class, then its
+                    // superclass chain (a real method always wins — checked
+                    // above by `find_method`).
+                    let mut cur = Some(name.clone());
+                    while let Some(k) = cur {
+                        if let Some(ret) = self.check_extension_call(
+                            call, &k, class, locals, in_instance, return_ty, generic_params,
+                        )? {
+                            return Ok(ret);
+                        }
+                        cur = self.classes.get(&k).and_then(|i| i.super_class.clone());
+                    }
+                    return Err(TypeError(format!(
+                        "unknown method `{}` on `{}`",
+                        call.method, name
+                    )));
+                }
+            };
             if !self.can_access(&class.name, &declared_in, method_info.visibility) {
                 return Err(TypeError(format!(
                     "method `{}` on `{}` is {}",
