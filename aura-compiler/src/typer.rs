@@ -1503,12 +1503,22 @@ impl TypeChecker {
     /// Whether members declared in `declared_in` with `visibility` are
     /// accessible from code in class `current`.
     fn can_access(&self, current: &str, declared_in: &str, visibility: Visibility) -> bool {
+        // A nested class can access its enclosing class's private and
+        // protected members (`Outer.Inner` reaches into `Outer`); the
+        // reverse is not granted, as in C#.
+        let nested_in = |inner: &str, outer: &str| {
+            inner.len() > outer.len() + 1
+                && inner.starts_with(outer)
+                && inner.as_bytes()[outer.len()] == b'.'
+        };
         match visibility {
             Visibility::Public => true,
             Visibility::Protected => {
-                current == declared_in || self.is_subclass_of(current, declared_in)
+                current == declared_in
+                    || self.is_subclass_of(current, declared_in)
+                    || nested_in(current, declared_in)
             }
-            Visibility::Private => current == declared_in,
+            Visibility::Private => current == declared_in || nested_in(current, declared_in),
             // Module-scoped: accessible only from classes declared in the
             // same source module (file). Single-file programs put every
             // class in one module, so `internal` is file-wide there.

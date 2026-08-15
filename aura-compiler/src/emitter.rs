@@ -977,6 +977,15 @@ impl<'a> MethodEmitter<'a> {
                 self.emit_expr(start)?;
                 self.push_local(var_name.clone());
                 let var_idx = (self.locals.len() - 1) as u16;
+                // Register the loop variable's type: expression typing
+                // (constructor overload resolution, operator lowering)
+                // consults `local_types`, not just the slot list.
+                let loop_var_ty = if matches!(var_type, Type::Infer) {
+                    self.expr_ty(start).unwrap_or(Type::Int32)
+                } else {
+                    var_type.clone()
+                };
+                self.local_types.insert(var_name.clone(), loop_var_ty);
                 self.ops.push(Op::Stloc(var_idx));
                 
                 let loop_start = self.ops.len() as u32;

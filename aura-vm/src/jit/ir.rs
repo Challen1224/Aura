@@ -855,6 +855,22 @@ impl<'a> Lowerer<'a> {
 
         for id in 0..nb {
             if !reachable[id] {
+                // Dead bytecode (e.g. the no-match throw of a match whose
+                // last arm is irrefutable) still owns a block id. Downstream
+                // passes index `func.blocks` by id and filter on
+                // `reachable`, so an inert placeholder must occupy the slot
+                // — skipping it would leave ids pointing past the end of a
+                // shorter vec.
+                self.func.blocks.push(Block {
+                    id,
+                    params: Vec::new(),
+                    insns: Vec::new(),
+                    term: Term::Unreachable,
+                    preds: Vec::new(),
+                    succs: Vec::new(),
+                    edge_moves: HashMap::new(),
+                    reachable: false,
+                });
                 continue;
             }
             let (s, e) = self.ranges[id];

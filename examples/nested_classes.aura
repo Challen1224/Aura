@@ -1,0 +1,50 @@
+// Nested classes.
+//
+// A class declared inside another class belongs to it: `Inner` from inside
+// `Outer`, `Outer.Inner` from outside — types, `new`, static access, and
+// match patterns all understand the qualified name. Nested classes can read
+// their enclosing class's private members (the reverse is not allowed), and
+// a nested class shadows a top-level class of the same name inside its
+// outer class. Records, static classes, interfaces, and generics nest too.
+
+class Zoo {
+    private static int fed = 0;
+
+    record Meal(string food, int grams);
+
+    class Animal {
+        string name;
+        Animal(string name) { this.name = name; }
+
+        void feed(Meal m) {
+            Zoo.fed = Zoo.fed + 1;
+            print("{this.name} eats {m.grams}g of {m.food}");
+            println();
+        }
+    }
+
+    static class Stats {
+        static string Report() { return "meals served: {Zoo.fed}"; }
+    }
+
+    static Animal Adopt(string name) { return new Animal(name); }
+}
+
+class Program {
+    static void Main() {
+        Zoo.Animal cap = Zoo.Adopt("Capybara");
+        Zoo.Animal red = new Zoo.Animal("Red Panda");
+
+        cap.feed(new Zoo.Meal("melon", 300));
+        red.feed(new Zoo.Meal("bamboo", 150));
+
+        Zoo.Meal m = new Zoo.Meal("fish", 200);
+        print(match (m) {
+            Zoo.Meal(food, g) => "logged: {g}g {food}",
+        });
+        println();
+
+        print(Zoo.Stats.Report());
+        println();
+    }
+}

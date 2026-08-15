@@ -8,6 +8,7 @@ pub mod ast;
 pub mod emitter;
 pub mod intrinsics;
 pub mod lexer;
+pub mod nested;
 pub mod parser;
 pub mod typer;
 
@@ -81,6 +82,7 @@ pub fn compile_files(
         merged.decls.extend(decls);
     }
     let merged = parser::expand_type_aliases(&merged).map_err(CompileError::Parse)?;
+    let merged = nested::flatten_nested_classes(&merged).map_err(CompileError::Parse)?;
     let typed = TypeChecker::new().check(&merged).map_err(|e| CompileError::Type(e.0))?;
     let module = Emitter::new(program_name)
         .emit(&typed)

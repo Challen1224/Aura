@@ -768,6 +768,7 @@ impl<'a> Parser<'a> {
                 }),
             ],
             extension_on: None,
+            nested: Vec::new(),
         }));
         Ok(Program { decls })
     }
@@ -881,6 +882,7 @@ impl<'a> Parser<'a> {
             record_params: Vec::new(),
             members,
             extension_on: Some(target),
+            nested: Vec::new(),
         })
     }
 
@@ -941,13 +943,60 @@ impl<'a> Parser<'a> {
                 record_params,
                 members,
                 extension_on: None,
+            nested: Vec::new(),
             });
         }
         self.consume(Token::LBrace, "expected `{`")?;
+        let mut nested = Vec::new();
         while !self.check(Token::RBrace) && !self.is_at_end() {
             self.skip_newlines();
             if self.check(Token::RBrace) {
                 break;
+            }
+            // Nested class declarations: `class`, `record`, `interface`,
+            // `static class`, `abstract class`, `sealed class`.
+            let two = (self.peek(), self.tokens.get(self.pos + 1));
+            let nested_decl = match two {
+                (Some(Token::Class), _) => {
+                    self.advance();
+                    Some(self.parse_class(false, false, false)?)
+                }
+                (Some(Token::Record), _) => {
+                    self.advance();
+                    Some(self.parse_record()?)
+                }
+                (Some(Token::Interface), _) => {
+                    self.advance();
+                    Some(self.parse_class(true, false, false)?)
+                }
+                (Some(Token::Static), Some(Token::Class)) => {
+                    self.advance();
+                    self.advance();
+                    let mut c = self.parse_class(false, false, true)?;
+                    c.is_static = true;
+                    Some(c)
+                }
+                (Some(Token::Abstract), Some(Token::Class)) => {
+                    self.advance();
+                    self.advance();
+                    Some(self.parse_class(false, true, false)?)
+                }
+                (Some(Token::Sealed), Some(Token::Class)) => {
+                    self.advance();
+                    self.advance();
+                    Some(self.parse_class(false, false, true)?)
+                }
+                _ => None,
+            };
+            if let Some(n) = nested_decl {
+                if is_interface {
+                    return Err(format!(
+                        "interface `{}` cannot declare nested class `{}`",
+                        name, n.name
+                    ));
+                }
+                nested.push(n);
+                continue;
             }
             members.push(self.parse_member(is_interface, &name)?);
         }
@@ -965,6 +1014,7 @@ impl<'a> Parser<'a> {
             record_params,
             members,
             extension_on: None,
+            nested,
         })
     }
 
@@ -2426,7 +2476,16 @@ impl<'a> Parser<'a> {
             return Ok(Expr::Var("super".to_string()));
         }
         if self.match_token(Token::New) {
-            let name = self.consume_ident("expected class name after `new`")?;
+            let mut name = self.consume_ident("expected class name after `new`")?;
+            // Qualified nested-class name: `new Outer.Inner(...)`.
+            while matches!(self.peek(), Some(Token::Dot))
+                && matches!(self.tokens.get(self.pos + 1), Some(Token::Ident(_)))
+            {
+                self.advance();
+                let part = self.consume_ident("expected name after `.`")?;
+                name.push('.');
+                name.push_str(&part);
+            }
             let type_args = if self.check(Token::Lt) {
                 self.parse_type_args()?
             } else {
@@ -2777,13 +2836,22 @@ impl<'a> Parser<'a> {
                 }
             }
             Some(Token::Ident(n)) => {
-                let n = n.clone();
+                let mut n = n.clone();
                 self.advance();
                 if n == "char" {
                     return Ok(Type::Char);
                 }
                 if let Some(ty) = numeric_type_from_name(&n) {
                     return Ok(ty);
+                }
+                // Qualified nested-class name: `Outer.Inner`.
+                while matches!(self.peek(), Some(Token::Dot))
+                    && matches!(self.tokens.get(self.pos + 1), Some(Token::Ident(_)))
+                {
+                    self.advance();
+                    let part = self.consume_ident("expected name after `.`")?;
+                    n.push('.');
+                    n.push_str(&part);
                 }
                 // Check for type arguments
                 if self.check(Token::Lt) {
@@ -2835,7 +2903,19 @@ impl<'a> Parser<'a> {
         if !self.check_type_token(&self.tokens[pos]) {
             return false;
         }
+        let first_is_ident = matches!(self.tokens.get(pos), Some(Token::Ident(_)));
         pos += 1;
+        // Skip a qualified nested-class name (`Outer.Inner v = ...`) — only
+        // after an identifier head, and only when another identifier follows
+        // the dot (so `a.b = 5` stays an assignment... both shapes skip the
+        // dots; the decisive check is the trailing identifier below).
+        if first_is_ident {
+            while matches!(self.tokens.get(pos), Some(Token::Dot))
+                && matches!(self.tokens.get(pos + 1), Some(Token::Ident(_)))
+            {
+                pos += 2;
+            }
+        }
         // Skip generic type arguments if present
         if pos < self.tokens.len() && matches!(self.tokens.get(pos), Some(Token::Lt)) {
             let mut depth = 1;

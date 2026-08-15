@@ -446,12 +446,33 @@
   under both tiers (aura-vm/tests/extension_methods.rs,
   examples/extension_methods.aura).
 
-- [ ] **Nested classes**
+- [x] **Nested classes**
   ```aura
   class Outer {
       class Inner { }
   }
   ```
+  A compile-time desugar (`aura-compiler/src/nested.rs`): nested classes
+  hoist to top level under mangled names (`Outer.Inner`) and every
+  reference resolves through the enclosing scope chain — unqualified
+  `Inner` inside `Outer` (shadowing any top-level `Inner`), qualified
+  `Outer.Inner` outside, in types, `new`, static member reads AND
+  writes, `is` checks, and match patterns (`Outer.P(x, _)`). Classes,
+  records, interfaces, static classes, abstract/sealed classes, and
+  generic classes all nest, to arbitrary depth; sibling references work.
+  A nested class can read its enclosing class's private/protected
+  members from any depth; the reverse is denied, as in C#. Interfaces
+  cannot declare nested classes. Zero typer/emitter/VM/JIT changes for
+  the feature itself — but its tests exposed two pre-existing bugs, both
+  fixed: (1) the x86-64 JIT panicked (regalloc index OOB) on any method
+  containing dead bytecode blocks, e.g. a match whose last arm is
+  irrefutable — `lower_blocks` skipped unreachable blocks while ids and
+  successor lists kept sparse numbering; placeholders now hold the slots
+  (regression: aura-vm/tests/jit_dead_blocks.rs). (2) Range for-in loop
+  variables were never registered in the emitter's type map, so
+  `new C(i)` inside `for (var i in 1..=n)` failed to compile. Verified
+  under both tiers (aura-vm/tests/nested_classes.rs,
+  examples/nested_classes.aura).
 
 **P3 - Nice to Have**
 - [ ] **Mixin / Trait system** (alternative or complement to interfaces)

@@ -126,6 +126,11 @@ pub struct ClassDecl {
     /// take the receiver as a leading `__self` parameter; call sites resolve
     /// `x.Foo()` here when `x`'s type declares no real `Foo`.
     pub extension_on: Option<Type>,
+    /// Class declarations nested inside this class's body. Hoisted to top
+    /// level by `flatten_nested_classes` under mangled names
+    /// (`Outer.Inner`), with references resolved through the enclosing
+    /// scope chain. Empty after flattening.
+    pub nested: Vec<ClassDecl>,
 }
 
 /// Member visibility.
