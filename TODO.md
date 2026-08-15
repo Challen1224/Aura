@@ -676,12 +676,18 @@
   examples/construction_inference.aura).
 
 **P1 - High Priority**
-- [ ] **Higher-kinded types** (research)
-  ```aura
-  trait Functor<F<_>> {
-      F<B> map<A, B>(F<A> fa, Func<A, B> f);
-  }
-  ```
+- [x] **Higher-kinded types** (research) — study written:
+      docs/research/higher-kinded-types.md. Conclusion: park indefinitely.
+      The sketch's own `Func<A, B>` is the real finding — Aura has no
+      function types, lambdas, or closures, and that prerequisite is both
+      the blocker and the independently-valuable next feature. After
+      lambdas land, concrete `map`/`filter`/`fold` on the collections (the
+      LINQ move) captures most of the Functor payoff with zero type-system
+      work. If HKT ever earns its keep (a library ecosystem writing the
+      same container-generic code repeatedly), the path is interface
+      witnesses over the existing erased generics plus Miller-pattern
+      constructor unification — every recently landed feature (variance,
+      constraints, inference) makes that easier, not harder.
 
 - [ ] **Generic methods with multiple type parameters**
   ```aura
