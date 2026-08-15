@@ -367,6 +367,12 @@ pub(crate) fn exec_native(vm: &mut Vm, id: NativeId, args: &[Value]) -> Result<V
             }
         }
 
+        // ---------------- Tasks ----------------
+        NativeId::TaskPause => Ok(vm.spawn_pause_task()),
+        NativeId::TaskWaitStub => Err(VmError::Runtime(
+            "Task.wait must compile to the TaskWait op; this native is a guard".to_string(),
+        )),
+
         // ---------------- Console ----------------
         NativeId::ConsoleReadLine => {
             let mut line = String::new();

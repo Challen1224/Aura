@@ -579,6 +579,8 @@ pub struct MethodInfo {
     /// Declared checked exceptions: callers must catch each (or a
     /// supertype) or re-declare it. Empty = unchecked (the default).
     pub throws: Vec<String>,
+    /// `async` method: returns `Task<T>`, body may await, calls spawn.
+    pub is_async: bool,
 }
 
 /// Enum metadata.
@@ -623,6 +625,9 @@ pub struct TypeChecker {
     /// Stack of enclosing try-block catch types (one frame per `try` the
     /// checker is currently inside), for the checked-exception contract.
     handled_exceptions: std::cell::RefCell<Vec<Vec<Type>>>,
+    /// Whether the body being checked belongs to an `async` method
+    /// (gates `await`).
+    current_is_async: std::cell::Cell<bool>,
 }
 
 impl TypeChecker {
@@ -638,6 +643,7 @@ impl TypeChecker {
             extensions: HashMap::new(),
             current_throws: std::cell::RefCell::new(Vec::new()),
             handled_exceptions: std::cell::RefCell::new(Vec::new()),
+            current_is_async: std::cell::Cell::new(false),
         }
     }
 
@@ -708,6 +714,7 @@ impl TypeChecker {
                 is_abstract: false,
                 is_final: true,
                 throws: Vec::new(),
+                is_async: false,
             };
             let info = ClassInfo {
                 name: ic.name.to_string(),
@@ -1073,6 +1080,37 @@ impl TypeChecker {
                                         c.name, m.name
                                     )));
                                 }
+                                if m.is_async {
+                                    if !m.is_static {
+                                        return Err(TypeError(format!(
+                                            "async method `{}.{}` must be static (instance/virtual async is not supported yet)",
+                                            c.name, m.name
+                                        )));
+                                    }
+                                    if c.is_interface {
+                                        return Err(TypeError(format!(
+                                            "interface `{}` cannot declare async method `{}`",
+                                            c.name, m.name
+                                        )));
+                                    }
+                                    if !m.throws.is_empty() {
+                                        return Err(TypeError(format!(
+                                            "async method `{}.{}` cannot declare `throws` (task exceptions surface at await/wait sites)",
+                                            c.name, m.name
+                                        )));
+                                    }
+                                    match &m.return_ty {
+                                        Type::Class(n, args) if n == "Task" && args.len() == 1 => {}
+                                        other => {
+                                            return Err(TypeError(format!(
+                                                "async method `{}.{}` must return Task<T>, not {}",
+                                                c.name,
+                                                m.name,
+                                                other.name()
+                                            )));
+                                        }
+                                    }
+                                }
                                 // Operator overloads (`operator+` etc.): one
                                 // parameter (the right operand; `this` is the
                                 // left), a real result, and comparisons must
@@ -1118,6 +1156,7 @@ impl TypeChecker {
                                     is_abstract,
                                     is_final: m.is_final,
                                     throws: m.throws.clone(),
+                                    is_async: m.is_async,
                                 };
                                 if m.is_static {
                                     info.static_methods.insert(m.name.clone(), mi);
@@ -1914,6 +1953,7 @@ impl TypeChecker {
             _ => false,
         };
         let saved_narrow = self.narrowed.replace(HashMap::new());
+        let saved_async = self.current_is_async.replace(false);
         let result = (|| -> Result<Type, TypeError> {
             match &exp {
                 Some((_, exp_ret)) if !ret_is_open => {
@@ -1962,6 +2002,7 @@ impl TypeChecker {
             }
         })();
         self.narrowed.replace(saved_narrow);
+        self.current_is_async.set(saved_async);
         result
     }
 
@@ -2520,6 +2561,7 @@ impl TypeChecker {
                 *self.current_context.borrow_mut() = format!("{}.{}", class.name, m.name);
                 *self.current_throws.borrow_mut() = m.throws.clone();
                 self.handled_exceptions.borrow_mut().clear();
+                self.current_is_async.set(m.is_async);
                 let mut locals: HashMap<String, Type> = HashMap::new();
                 let mut all_generic_params = class_generic_params.clone();
                 all_generic_params.extend(m.generic_params.clone());
@@ -2529,9 +2571,18 @@ impl TypeChecker {
                     locals.insert(param.name.clone(), param.ty.clone());
                 }
                 self.validate_type_with_generics(&m.return_ty, &all_generic_params)?;
+                // Async bodies return the task's element type: `return 5;`
+                // inside `async Task<int>`.
+                let body_ret: Type = match (&m.is_async, &m.return_ty) {
+                    (true, Type::Class(n, args)) if n == "Task" && args.len() == 1 => {
+                        args[0].clone()
+                    }
+                    _ => m.return_ty.clone(),
+                };
                 for stmt in &m.body {
-                    self.check_stmt(stmt, &info, &mut locals, &m.return_ty, !m.is_static, &all_generic_params)?;
+                    self.check_stmt(stmt, &info, &mut locals, &body_ret, !m.is_static, &all_generic_params)?;
                 }
+                self.current_is_async.set(false);
             } else if let Member::Field(f) = member {
                 self.validate_type_with_generics(&f.ty, class_generic_params)?;
             } else if let Member::Property(p) = member {
@@ -3932,6 +3983,23 @@ impl TypeChecker {
             Expr::Lambda { params, body } => self.check_lambda(
                 params, body, None, class, locals, in_instance, generic_params,
             ),
+            Expr::Await(inner) => {
+                if !self.current_is_async.get() {
+                    return Err(TypeError(
+                        "`await` is only allowed inside `async` methods".to_string(),
+                    ));
+                }
+                let t = self.infer_expr(inner, class, locals, in_instance, return_ty, generic_params)?;
+                match &t {
+                    Type::Class(n, args) if n == "Task" && args.len() == 1 => {
+                        Ok(args[0].clone())
+                    }
+                    other => Err(TypeError(format!(
+                        "`await` needs a Task<T>, got {}",
+                        other.name()
+                    ))),
+                }
+            }
             Expr::New(class_name, type_args, args) => {
                 let Some(class_info) = self.classes.get(class_name) else {
                     if generic_params.iter().any(|gp| gp.name == *class_name) {
@@ -4825,6 +4893,7 @@ impl TypeChecker {
                     is_abstract: false,
                     is_final: true,
                     throws: Vec::new(),
+                    is_async: false,
                 };
                 return self.check_call_args(call, &info, class, locals, in_instance, return_ty, generic_params);
             }

@@ -113,6 +113,10 @@ natives! {
     FileExists = 103, "File.Exists", arity 1;
     FileDelete = 104, "File.Delete", arity 1;
     FileReadAllLines = 105, "File.ReadAllLines", arity 1;
+
+    // Tasks
+    TaskPause = 120, "Tasks.pause", arity 0;
+    TaskWaitStub = 121, "Task.wait", arity 1;
 }
 
 #[cfg(test)]

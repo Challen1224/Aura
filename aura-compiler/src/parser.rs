@@ -524,6 +524,7 @@ fn expand_expr(expr: &mut Expr, aliases: &HashMap<String, TypeAliasDecl>) -> Res
                 expand_stmt(st, aliases)?;
             }
         }
+        Expr::Await(inner) => expand_expr(inner, aliases)?,
         Expr::Cast(inner, ty) => {
             *ty = expand_type(ty)?;
             expand_expr(inner, aliases)?;
@@ -1344,9 +1345,13 @@ impl<'a> Parser<'a> {
         let mut is_override = false;
         let mut is_abstract = false;
         let mut is_final = false;
+        let mut is_async = false;
         loop {
             if self.match_token(Token::Static) {
                 is_static = true;
+            } else if matches!(self.peek(), Some(Token::Ident(k)) if k == "async") {
+                self.advance();
+                is_async = true;
             } else if self.match_token(Token::Protected) {
                 visibility = Visibility::Protected;
             } else if self.match_token(Token::Private) {
@@ -1380,6 +1385,12 @@ impl<'a> Parser<'a> {
                     if in_interface {
                         return Err(format!(
                             "interface `{}` cannot declare a constructor",
+                            class_name
+                        ));
+                    }
+                    if is_async {
+                        return Err(format!(
+                            "constructor `{}` cannot be async",
                             class_name
                         ));
                     }
@@ -1454,6 +1465,7 @@ impl<'a> Parser<'a> {
                         params,
                         throws: Vec::new(),
                         body,
+                        is_async: false,
                     }));
                 }
             }
@@ -1586,6 +1598,7 @@ impl<'a> Parser<'a> {
                 params,
                 throws,
                 body,
+                is_async,
             }))
         } else if self.check(Token::LBrace) {
             if is_virtual || is_override || is_abstract || is_final {
@@ -2349,6 +2362,28 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_unary(&mut self) -> Result<Expr, String> {
+        // `await expr` (contextual keyword): only when another
+        // expression-starting token follows, so `await` stays usable as an
+        // ordinary identifier elsewhere.
+        if matches!(self.peek(), Some(Token::Ident(k)) if k == "await")
+            && matches!(
+                self.tokens.get(self.pos + 1),
+                Some(
+                    Token::Ident(_)
+                        | Token::IntLit(..)
+                        | Token::FloatLit(..)
+                        | Token::StringLit(_)
+                        | Token::LParen
+                        | Token::New
+                        | Token::True
+                        | Token::False
+                )
+            )
+        {
+            self.advance();
+            let operand = self.parse_unary()?;
+            return Ok(Expr::Await(Box::new(operand)));
+        }
         if self.match_token(Token::Minus) {
             let operand = self.parse_unary()?;
             Ok(Expr::Unary(UnaryOp::Neg, Box::new(operand)))
@@ -3162,6 +3197,11 @@ impl<'a> Parser<'a> {
             return false;
         }
         if !self.check_type_token(&self.tokens[pos]) {
+            return false;
+        }
+        // `await expr;` starts with an identifier but is a statement
+        // expression, never a declaration type.
+        if matches!(self.tokens.get(pos), Some(Token::Ident(k)) if k == "await") {
             return false;
         }
         let first_is_ident = matches!(self.tokens.get(pos), Some(Token::Ident(_)));

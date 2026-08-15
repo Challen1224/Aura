@@ -519,6 +519,7 @@ impl Emitter {
                 }
             }).collect(),
             is_instance: !m.is_static,
+            is_async: m.is_async,
             body: me.ops,
             handlers: me.handlers,
             max_stack: 8,
@@ -572,6 +573,7 @@ fn property_accessor_decl(class_name: String, p: &PropertyDecl, is_getter: bool)
         is_virtual: false,
         is_override: false,
         is_abstract: false,
+        is_async: false,
         is_final: false,
         is_constructor: false,
         constructor_chain: None,
@@ -609,6 +611,7 @@ fn record_primary_constructor(class: &ClassDecl) -> MethodDecl {
         is_abstract: false,
         is_final: false,
         is_constructor: true,
+        is_async: false,
         constructor_chain: None,
         generic_params: Vec::new(),
         return_ty: Type::Unit,
@@ -1599,6 +1602,10 @@ impl<'a> MethodEmitter<'a> {
             Expr::Lambda { params, body } => {
                 self.emit_lambda(params, body, None)?;
             }
+            Expr::Await(inner) => {
+                self.emit_expr(inner)?;
+                self.ops.push(Op::Await);
+            }
             Expr::Call(call) => {
                 if call.class_or_target == "__intrinsics" {
                     if call.method == "print" {
@@ -1614,6 +1621,20 @@ impl<'a> MethodEmitter<'a> {
                         // lower to `NativeCall` (receiver pushed first, then
                         // arguments — unlike `CallVirt`, which takes the
                         // receiver on top).
+                        // `t.wait()` drives the scheduler: a dedicated op,
+                        // not a native (it must be able to re-raise the
+                        // task's exception through the catch machinery).
+                        if call.method == "wait" && call.args.is_empty() {
+                            if let Ok(Type::Class(n, _)) =
+                                self.expr_ty(target).map(Self::strip_nullable)
+                            {
+                                if n == "Task" {
+                                    self.emit_expr(target)?;
+                                    self.ops.push(Op::TaskWait);
+                                    return Ok(());
+                                }
+                            }
+                        }
                         if let Some(native) = self.intrinsic_call_native(call, target)? {
                             self.ops.push(Op::NativeCall(native as u16));
                             return Ok(());
@@ -1632,7 +1653,11 @@ impl<'a> MethodEmitter<'a> {
                                     )
                                 })?;
                                 self.emit_call_args(call)?;
-                                self.ops.push(Op::Call(method_id));
+                                if self.callee_is_async(class_name, &call.method) {
+                                    self.ops.push(Op::Spawn(method_id));
+                                } else {
+                                    self.ops.push(Op::Call(method_id));
+                                }
                             } else {
                                 if let Some(ext) = self.extension_call_owner(target, &call.method) {
                                     // Extension call: static `Ext.Method(receiver, args...)`
@@ -1746,7 +1771,11 @@ impl<'a> MethodEmitter<'a> {
                                     call.method, owner
                                 )
                             })?;
-                            self.ops.push(Op::Call(method_id));
+                            if self.callee_is_async(&owner, &call.method) {
+                                self.ops.push(Op::Spawn(method_id));
+                            } else {
+                                self.ops.push(Op::Call(method_id));
+                            }
                         }
                     }
                 }
@@ -2732,6 +2761,7 @@ impl<'a> MethodEmitter<'a> {
                 name: format!("__lambda{}", id.0),
                 params: lifted_params,
                 throws: Vec::new(),
+                is_async: false,
                 body: lifted_body,
             },
         ));
@@ -2740,6 +2770,16 @@ impl<'a> MethodEmitter<'a> {
         }
         self.ops.push(Op::NewClosure(id, captures.len() as u16));
         Ok(())
+    }
+
+    /// Whether the named static method is `async` (its calls spawn tasks).
+    fn callee_is_async(&self, owner: &str, method: &str) -> bool {
+        self.program
+            .classes
+            .get(owner)
+            .and_then(|c| c.static_methods.get(method))
+            .map(|mi| mi.is_async)
+            .unwrap_or(false)
     }
 
     /// A receiver typed as a generic parameter resolves through its
@@ -3186,6 +3226,12 @@ impl<'a> MethodEmitter<'a> {
                     t
                 }
             }
+            Expr::Await(inner) => match self.expr_ty(inner)? {
+                Type::Class(n, args) if n == "Task" && args.len() == 1 => args[0].clone(),
+                other => {
+                    return Err(format!("`await` needs a Task<T>, got {}", other.name()));
+                }
+            },
             Expr::Lambda { params, body } => {
                 // Only self-sufficient lambdas can be typed contextlessly:
                 // annotated parameters with an expression body. The
@@ -3797,6 +3843,7 @@ fn collect_free_vars_expr(
         | Expr::TryUnwrap(x)
         | Expr::TupleIndex(x, _) => collect_free_vars_expr(x, bound, out),
         Expr::Is(x, _, _) => collect_free_vars_expr(x, bound, out),
+        Expr::Await(x) => collect_free_vars_expr(x, bound, out),
         Expr::Ternary(c, a, b) => {
             collect_free_vars_expr(c, bound, out);
             collect_free_vars_expr(a, bound, out);

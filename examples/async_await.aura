@@ -1,0 +1,35 @@
+// Async/await: cooperative tasks.
+//
+// An `async` method returns Task<T>; calling it spawns a task that makes
+// progress whenever the scheduler runs — at any `await` (async code) or
+// `t.wait()` (sync code). `await` suspends the current task until the
+// awaited one completes; `Tasks.pause()` yields for one scheduler round,
+// letting other ready tasks run. Exceptions inside a task surface
+// (catchably) wherever it is awaited or waited on. Everything runs on one
+// thread with deterministic FIFO scheduling.
+
+class Program {
+    static async Task<string> brew(string what, int rounds) {
+        int i = 0;
+        while (i < rounds) {
+            print("  {what}: step {i + 1}/{rounds}"); println();
+            await Tasks.pause();
+            i = i + 1;
+        }
+        return "{what} ready";
+    }
+
+    static async Task<int> kitchen() {
+        var tea = Program.brew("tea", 2);
+        var coffee = Program.brew("coffee", 3);
+        print(await tea); println();
+        print(await coffee); println();
+        return 0;
+    }
+
+    static void Main() {
+        print("open kitchen"); println();
+        Program.kitchen().wait();
+        print("close kitchen"); println();
+    }
+}

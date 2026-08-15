@@ -220,6 +220,7 @@ fn write_method<W: Write>(w: &mut W, m: &MethodDef) -> io::Result<()> {
     write_u16(w, m.max_stack)?;
     write_u16(w, m.locals)?;
     write_vec(w, &m.handlers, |w, h| write_handler(w, h))?;
+    write_u8(w, if m.is_async { 1 } else { 0 })?;
     write_vec(w, &m.body, |w, op| write_op(w, op))
 }
 
@@ -231,6 +232,7 @@ fn read_method<R: Read>(r: &mut R) -> io::Result<MethodDef> {
     let max_stack = read_u16(r)?;
     let locals = read_u16(r)?;
     let handlers = read_vec(r, |r| read_handler(r))?;
+    let is_async = read_u8(r)? != 0;
     let body = read_vec(r, |r| read_op(r))?;
     Ok(MethodDef {
         name,
@@ -238,6 +240,7 @@ fn read_method<R: Read>(r: &mut R) -> io::Result<MethodDef> {
         params,
         generic_params,
         is_instance: false, // set by caller
+        is_async,
         body,
         handlers,
         max_stack,
@@ -483,6 +486,9 @@ fn write_op<W: Write>(w: &mut W, op: &Op) -> io::Result<()> {
             (112, b)
         }
         Op::Invoke(argc) => (113, argc.to_le_bytes().to_vec()),
+        Op::Spawn(MethodId(id)) => (114, id.to_le_bytes().to_vec()),
+        Op::Await => (115, vec![]),
+        Op::TaskWait => (116, vec![]),
     };
     write_u8(w, code)?;
     w.write_all(&extra)
@@ -561,6 +567,9 @@ fn read_op<R: Read>(r: &mut R) -> io::Result<Op> {
             Op::NewClosure(MethodId(id), count)
         }
         113 => Op::Invoke(read_u16(r)?),
+        114 => Op::Spawn(MethodId(read_u32(r)?)),
+        115 => Op::Await,
+        116 => Op::TaskWait,
         _ => return Err(io::Error::new(io::ErrorKind::InvalidData, "bad opcode")),
     })
 }

@@ -697,6 +697,9 @@ impl<'a> Lowerer<'a> {
                 }
                 push(stack, h, KType::Unknown);
             }
+            Op::Spawn(..) | Op::Await | Op::TaskWait => {
+                return Err("task operations are interpreter-only".into());
+            }
             Op::Invoke(argc) => {
                 for _ in 0..(*argc as usize + 1) {
                     pop(stack, h)?;
@@ -1222,6 +1225,11 @@ impl<'a> Lowerer<'a> {
                 let dst = self.new_vreg(KType::Unknown);
                 helper!(Some(dst), op.clone(), caps);
                 stack.push(dst);
+            }
+            Op::Spawn(..) | Op::Await | Op::TaskWait => {
+                // Suspension cannot cross a native JIT frame; methods that
+                // touch tasks always run in the interpreter.
+                return Err("task operations are interpreter-only".into());
             }
             Op::Invoke(argc) => {
                 // Stack: args (in order), closure on top; the helper wants
@@ -1803,6 +1811,7 @@ mod tests {
                 params,
                 generic_params: Vec::new(),
                 is_instance: false,
+            is_async: false,
                 body,
                 handlers: Vec::new(),
                 max_stack,
@@ -1850,6 +1859,7 @@ mod tests {
                 params,
                 generic_params: Vec::new(),
                 is_instance: true,
+                is_async: false,
                 body,
                 handlers: Vec::new(),
                 max_stack,

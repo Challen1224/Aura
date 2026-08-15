@@ -221,6 +221,31 @@ pub struct Frame {
     after_finally: Option<Value>,
 }
 
+/// Execution state of one cooperative task.
+#[derive(Debug)]
+struct TaskState {
+    /// The task's frame: present while unstarted or suspended, taken while
+    /// running, and dropped once done. `None` with `pause` set marks a
+    /// `Tasks.pause()` task, which completes the first time it is resumed.
+    frame: Option<Frame>,
+    /// Completed (normally or exceptionally).
+    done: bool,
+    /// Completed by exception; `result` is the exception value.
+    failed: bool,
+    /// Result value (or exception) once done.
+    result: Value,
+    /// Tasks suspended awaiting this one, woken on completion.
+    waiters: Vec<u64>,
+    /// Present in the ready queue (dedup guard).
+    queued: bool,
+    /// Suspended awaiting another task: not runnable until woken by that
+    /// task's completion (prevents cycles from spinning the ready queue).
+    waiting: bool,
+    /// A `Tasks.pause()` task: no frame, completes on first resume — one
+    /// round trip through the ready queue, i.e. a cooperative yield.
+    pause: bool,
+}
+
 impl Frame {
     fn new(method_id: MethodId, params: Vec<Value>, locals_count: u16) -> Self {
         let mut locals = Vec::with_capacity(locals_count as usize);
@@ -283,6 +308,13 @@ pub struct Vm {
     pub(crate) call_counts: HashMap<MethodId, u64>,
     /// Methods (and overflow modes) that failed to compile; never retried.
     pub(crate) jit_failed: HashSet<(MethodId, bool)>,
+    /// Cooperative task table: execution state for every spawned task,
+    /// keyed by the id its heap handle carries. Rooted for GC.
+    tasks: HashMap<u64, TaskState>,
+    /// Next task id.
+    next_task_id: u64,
+    /// Ready queue of task ids (FIFO, deterministic interleaving).
+    ready: std::collections::VecDeque<u64>,
     /// Compilation threshold in interpreter invocations.
     pub(crate) jit_threshold: u64,
     /// Native frames of JIT methods currently on the call stack, innermost
@@ -325,6 +357,9 @@ impl Vm {
             jit_enabled: false,
             call_counts: HashMap::new(),
             jit_failed: HashSet::new(),
+            tasks: HashMap::new(),
+            next_task_id: 1,
+            ready: std::collections::VecDeque::new(),
             jit_threshold: jit::JIT_THRESHOLD,
             #[cfg(target_arch = "x86_64")]
             jit_frames: Vec::new(),
@@ -378,6 +413,9 @@ impl Vm {
                 "uncaught exception: {}",
                 self.describe_exception(&e)
             ))),
+            FrameResult::Suspended(_) => Err(VmError::Runtime(
+                "async frame suspended outside the scheduler".to_string(),
+            )),
         }
     }
 
@@ -416,6 +454,164 @@ impl Vm {
         let method_id = self.current_frame().method_id;
         let method = self.resolve_method(method_id)?.clone();
         self.execute_frame(method)
+    }
+
+    // ------------------------------------------------------------------
+    // Cooperative task scheduler
+    // ------------------------------------------------------------------
+
+    /// Create a task over an unstarted frame; nothing runs until the task
+    /// is awaited or waited on.
+    fn spawn_task(&mut self, method_id: MethodId, args: Vec<Value>) -> Result<Value, VmError> {
+        let locals = self.resolve_method(method_id)?.locals;
+        let frame = Frame::new(method_id, args, locals);
+        let id = self.next_task_id;
+        self.next_task_id += 1;
+        self.tasks.insert(
+            id,
+            TaskState {
+                frame: Some(frame),
+                done: false,
+                failed: false,
+                result: Value::Unit,
+                waiters: Vec::new(),
+                queued: false,
+                waiting: false,
+                pause: false,
+            },
+        );
+        // Hot tasks: queued at spawn, so already-started work interleaves
+        // as soon as any await or wait runs the scheduler.
+        self.queue_task(id);
+        let handle = self.heap.allocate(AuraObject::Task { id });
+        Ok(Value::Object(handle))
+    }
+
+    /// Create a `Tasks.pause()` task: completes the first time the
+    /// scheduler resumes it, so awaiting it yields for one round.
+    pub(crate) fn spawn_pause_task(&mut self) -> Value {
+        let id = self.next_task_id;
+        self.next_task_id += 1;
+        self.tasks.insert(
+            id,
+            TaskState {
+                frame: None,
+                done: false,
+                failed: false,
+                result: Value::Int(0),
+                waiters: Vec::new(),
+                queued: false,
+                waiting: false,
+                pause: true,
+            },
+        );
+        Value::Object(self.heap.allocate(AuraObject::Task { id }))
+    }
+
+    /// The task id behind a task handle value.
+    fn task_id_of(&self, v: &Value) -> Result<u64, VmError> {
+        let Value::Object(handle) = v else {
+            return Err(VmError::TypeMismatch {
+                expected: "task",
+                got: v.type_name().into(),
+            });
+        };
+        match self.heap.get(*handle)? {
+            AuraObject::Task { id } => Ok(*id),
+            _ => Err(VmError::TypeMismatch {
+                expected: "task",
+                got: "object".into(),
+            }),
+        }
+    }
+
+    /// Queue a task for the scheduler unless already queued or done.
+    fn queue_task(&mut self, id: u64) {
+        if let Some(t) = self.tasks.get_mut(&id) {
+            if !t.done && !t.queued && !t.waiting {
+                t.queued = true;
+                self.ready.push_back(id);
+            }
+        }
+    }
+
+    /// Mark a task completed and wake its waiters.
+    fn complete_task(&mut self, id: u64, result: Value, failed: bool) {
+        let waiters = if let Some(t) = self.tasks.get_mut(&id) {
+            t.done = true;
+            t.failed = failed;
+            t.result = result;
+            t.frame = None;
+            std::mem::take(&mut t.waiters)
+        } else {
+            Vec::new()
+        };
+        for w in waiters {
+            if let Some(t) = self.tasks.get_mut(&w) {
+                t.waiting = false;
+            }
+            self.queue_task(w);
+        }
+    }
+
+    /// Resume one task: run its frame until it completes or suspends again.
+    fn resume_task(&mut self, id: u64) -> Result<(), VmError> {
+        let Some(t) = self.tasks.get_mut(&id) else {
+            return Err(VmError::Runtime(format!("unknown task {id}")));
+        };
+        if t.done {
+            return Ok(());
+        }
+        if t.pause {
+            self.complete_task(id, Value::Int(0), false);
+            return Ok(());
+        }
+        let Some(frame) = t.frame.take() else {
+            return Err(VmError::Runtime(format!("task {id} resumed while running")));
+        };
+        self.call_stack.push(frame);
+        match self.run_frame()? {
+            FrameResult::Normal(v) => self.complete_task(id, v, false),
+            FrameResult::Exception(e) => self.complete_task(id, e, true),
+            FrameResult::Suspended(on) => {
+                // The suspended frame was left on the call stack.
+                let frame = self.call_stack.pop().ok_or(VmError::StackUnderflow)?;
+                if let Some(t) = self.tasks.get_mut(&id) {
+                    t.frame = Some(frame);
+                    t.waiting = true;
+                }
+                if let Some(target) = self.tasks.get_mut(&on) {
+                    target.waiters.push(id);
+                }
+                self.queue_task(on);
+            }
+        }
+        Ok(())
+    }
+
+    /// Drive the scheduler until `target` completes. An empty ready queue
+    /// with the target still pending means the dependency graph cannot make
+    /// progress (an await cycle).
+    fn run_until_done(&mut self, target: u64) -> Result<(), VmError> {
+        loop {
+            if self.tasks.get(&target).map(|t| t.done).unwrap_or(false) {
+                return Ok(());
+            }
+            self.queue_task(target);
+            let Some(next) = self.ready.pop_front() else {
+                return Err(VmError::Runtime(
+                    "deadlock: awaited tasks form a cycle and cannot make progress"
+                        .to_string(),
+                ));
+            };
+            if let Some(t) = self.tasks.get_mut(&next) {
+                t.queued = false;
+                if t.done {
+                    continue;
+                }
+            }
+            self.resume_task(next)?;
+        }
     }
 
     /// Access the heap directly.
@@ -462,6 +658,20 @@ impl Vm {
         for values in self.static_fields.values() {
             for v in values {
                 roots.extend(v.contained_refs());
+            }
+        }
+        // Suspended/unstarted task frames and completed task results.
+        for t in self.tasks.values() {
+            roots.extend(t.result.contained_refs());
+            if let Some(frame) = &t.frame {
+                for v in frame
+                    .locals
+                    .iter()
+                    .chain(frame.stack.iter())
+                    .chain(frame.after_finally.iter())
+                {
+                    roots.extend(v.contained_refs());
+                }
             }
         }
         #[cfg(target_arch = "x86_64")]
@@ -718,6 +928,59 @@ impl Vm {
                     match self.invoke_frame(id, args)? {
                         FrameResult::Normal(v) => self.push(v),
                         FrameResult::Exception(e) => pending = Some(e),
+                        FrameResult::Suspended(_) => {
+                            return Err(VmError::Runtime(
+                                "async frame suspended outside the scheduler".to_string(),
+                            ));
+                        }
+                    }
+                }
+                Op::Spawn(callee) => {
+                    let params_len = self.resolve_method(callee)?.params.len();
+                    let args = self.pop_args(params_len)?;
+                    let handle = self.spawn_task(callee, args)?;
+                    self.push(handle);
+                }
+                Op::Await => {
+                    let tv = self.pop()?;
+                    let id = self.task_id_of(&tv)?;
+                    let (done, failed, result) = match self.tasks.get(&id) {
+                        Some(t) => (t.done, t.failed, t.result.clone()),
+                        None => {
+                            return Err(VmError::Runtime(format!("unknown task {id}")));
+                        }
+                    };
+                    if done {
+                        if failed {
+                            pending = Some(result);
+                        } else {
+                            self.push(result);
+                        }
+                    } else {
+                        // Suspend: rewind onto the await op with the task
+                        // handle re-pushed, so resuming re-executes it and
+                        // finds the task completed. The frame stays on the
+                        // call stack for the scheduler to take.
+                        let frame = self.current_frame();
+                        frame.pc -= 1;
+                        frame.stack.push(tv);
+                        return Ok(FrameResult::Suspended(id));
+                    }
+                }
+                Op::TaskWait => {
+                    let tv = self.pop()?;
+                    let id = self.task_id_of(&tv)?;
+                    self.run_until_done(id)?;
+                    let (failed, result) = match self.tasks.get(&id) {
+                        Some(t) => (t.failed, t.result.clone()),
+                        None => {
+                            return Err(VmError::Runtime(format!("unknown task {id}")));
+                        }
+                    };
+                    if failed {
+                        pending = Some(result);
+                    } else {
+                        self.push(result);
                     }
                 }
                 Op::NewClosure(method, count) => {
@@ -754,6 +1017,11 @@ impl Vm {
                     match self.invoke_frame(method, argv)? {
                         FrameResult::Normal(v) => self.push(v),
                         FrameResult::Exception(e) => pending = Some(e),
+                        FrameResult::Suspended(_) => {
+                            return Err(VmError::Runtime(
+                                "async frame suspended outside the scheduler".to_string(),
+                            ));
+                        }
                     }
                 }
                 Op::CallVirt(name) => {
@@ -773,6 +1041,11 @@ impl Vm {
                     match self.invoke_frame(method_id, args)? {
                         FrameResult::Normal(v) => self.push(v),
                         FrameResult::Exception(e) => pending = Some(e),
+                        FrameResult::Suspended(_) => {
+                            return Err(VmError::Runtime(
+                                "async frame suspended outside the scheduler".to_string(),
+                            ));
+                        }
                     }
                 }
                 Op::CallSuper(id) => {
@@ -788,6 +1061,11 @@ impl Vm {
                     match self.invoke_frame(id, args)? {
                         FrameResult::Normal(v) => self.push(v),
                         FrameResult::Exception(e) => pending = Some(e),
+                        FrameResult::Suspended(_) => {
+                            return Err(VmError::Runtime(
+                                "async frame suspended outside the scheduler".to_string(),
+                            ));
+                        }
                     }
                 }
                 Op::NewObj(class_id, type_args) => {

@@ -183,6 +183,13 @@ pub enum AuraObject {
         /// captured).
         captured: Vec<Value>,
     },
+    /// A cooperative task handle (`Task<T>`). The execution state lives in
+    /// the VM's task table under this id; the VM roots that table for GC,
+    /// so the handle itself holds no references.
+    Task {
+        /// Key into the VM task table.
+        id: u64,
+    },
 }
 
 impl AuraObject {
@@ -197,6 +204,7 @@ impl AuraObject {
             | AuraObject::Enum(_)
             | AuraObject::Tuple(_)
             | AuraObject::Closure { .. } => true,
+            AuraObject::Task { .. } => false,
         }
     }
 
@@ -204,7 +212,7 @@ impl AuraObject {
     pub fn references(&self) -> Vec<GcRef> {
         let mut refs = Vec::new();
         match self {
-            AuraObject::String(_) => {}
+            AuraObject::String(_) | AuraObject::Task { .. } => {}
             AuraObject::Instance { fields, .. }
             | AuraObject::Array { elements: fields }
             | AuraObject::Set { elements: fields, .. }
@@ -292,6 +300,10 @@ pub struct MethodDef {
     pub generic_params: Vec<GenericParam>,
     /// Whether the method is an instance method.
     pub is_instance: bool,
+    /// Whether this is an `async` method: its body may `await`, it is only
+    /// executed by the VM's task scheduler, and calls to it spawn a task
+    /// (`Op::Spawn`) instead of running it directly.
+    pub is_async: bool,
     /// Bytecode body, empty for runtime/intrinsic methods.
     pub body: Vec<Op>,
     /// Exception handler table covering ranges of the bytecode body.
@@ -678,6 +690,19 @@ pub enum Op {
     /// number of arguments (pushed in order below it); calls the lifted
     /// method with `captured ++ args` and pushes its result.
     Invoke(u16),
+    /// Spawn a task for an `async` method: pops the callee's arguments
+    /// (pushed in order), creates a task over them, queues it, and pushes
+    /// the task handle. Tasks make progress whenever the scheduler runs —
+    /// at any `await` or `wait()`.
+    Spawn(MethodId),
+    /// Await a task (async methods only): pops a task handle; if the task
+    /// has completed, pushes its result (or re-raises its exception).
+    /// Otherwise the current frame suspends until the task completes.
+    Await,
+    /// Synchronously drive a task to completion (`t.wait()`): pops a task
+    /// handle, runs the scheduler until that task finishes, then pushes
+    /// its result (or re-raises its exception).
+    TaskWait,
 }
 
 /// A shared immutable handle to a module (used by VM and compiler).

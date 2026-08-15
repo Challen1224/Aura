@@ -119,6 +119,7 @@ pub fn synthetic_module(body: Vec<aura_bytecode::Op>) -> Module {
                     params: vec![],
                     generic_params: vec![],
                     is_instance: false,
+                    is_async: false,
                     body,
                     handlers: vec![],
                     max_stack: 8,

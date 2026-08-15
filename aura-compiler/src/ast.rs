@@ -260,6 +260,9 @@ pub struct MethodDecl {
     pub is_final: bool,
     /// Whether this is a constructor: `Counter(int start) { ... }`.
     pub is_constructor: bool,
+    /// Whether this is an `async` method: returns `Task<T>`, may `await`,
+    /// and calls to it spawn a lazy task instead of running directly.
+    pub is_async: bool,
     /// For constructors, an optional chaining call `: super(...)` / `: this(...)`.
     pub constructor_chain: Option<ConstructorChain>,
     /// Generic parameters for this method.
@@ -689,6 +692,10 @@ pub enum Expr {
     /// Error propagation: `expr?` unwraps a `Result`-like sum type, returning
     /// the error variant from the enclosing function when it does not match.
     TryUnwrap(Box<Expr>),
+    /// Await a task inside an `async` method: `await t` suspends the
+    /// current task until `t` completes, then yields its result (or
+    /// re-raises its exception).
+    Await(Box<Expr>),
     /// Lambda expression: `x => x + 1`, `(int a, int b) => a + b`,
     /// `() => { ... }`. Parameters carry optional type annotations
     /// (inferred from the target type otherwise). Expression bodies are

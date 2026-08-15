@@ -212,6 +212,7 @@ impl Heap {
             AuraObject::Tuple(t) => {
                 t.elements.len() * std::mem::size_of::<Value>() + std::mem::size_of::<AuraObject>()
             }
+            AuraObject::Task { .. } => std::mem::size_of::<AuraObject>(),
         }
     }
 }

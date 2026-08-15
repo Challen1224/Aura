@@ -130,6 +130,9 @@ fn exec(vm: &mut Vm, op: &Op, args: &[Value]) -> Result<Option<Value>, Result<Va
             match try_vm!(vm.invoke_frame(*id, argv)) {
                 crate::FrameResult::Normal(v) => Ok(Some(v)),
                 crate::FrameResult::Exception(e) => Err(Ok(e)),
+                crate::FrameResult::Suspended(_) => Err(Err(VmError::Runtime(
+                    "async frame suspended outside the scheduler".to_string(),
+                ))),
             }
         }
         Op::NewClosure(method, count) => {
@@ -164,6 +167,9 @@ fn exec(vm: &mut Vm, op: &Op, args: &[Value]) -> Result<Option<Value>, Result<Va
             match try_vm!(vm.invoke_frame(method, argv)) {
                 crate::FrameResult::Normal(v) => Ok(Some(v)),
                 crate::FrameResult::Exception(e) => Err(Ok(e)),
+                crate::FrameResult::Suspended(_) => Err(Err(VmError::Runtime(
+                    "async frame suspended outside the scheduler".to_string(),
+                ))),
             }
         }
         Op::CallVirt(name) => {
@@ -181,6 +187,9 @@ fn exec(vm: &mut Vm, op: &Op, args: &[Value]) -> Result<Option<Value>, Result<Va
             match try_vm!(vm.invoke_frame(method_id, argv)) {
                 crate::FrameResult::Normal(v) => Ok(Some(v)),
                 crate::FrameResult::Exception(e) => Err(Ok(e)),
+                crate::FrameResult::Suspended(_) => Err(Err(VmError::Runtime(
+                    "async frame suspended outside the scheduler".to_string(),
+                ))),
             }
         }
         Op::CallSuper(id) => {
@@ -196,6 +205,9 @@ fn exec(vm: &mut Vm, op: &Op, args: &[Value]) -> Result<Option<Value>, Result<Va
             match try_vm!(vm.invoke_frame(*id, argv)) {
                 crate::FrameResult::Normal(v) => Ok(Some(v)),
                 crate::FrameResult::Exception(e) => Err(Ok(e)),
+                crate::FrameResult::Suspended(_) => Err(Err(VmError::Runtime(
+                    "async frame suspended outside the scheduler".to_string(),
+                ))),
             }
         }
         Op::NewObj(class_id, type_args) => {

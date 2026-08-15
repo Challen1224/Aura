@@ -38,6 +38,11 @@ pub enum FrameResult {
     Normal(Value),
     /// Method threw; the value is the exception.
     Exception(Value),
+    /// An async frame suspended awaiting the given task id. Only the task
+    /// scheduler receives this variant: `await` occurs solely in `async`
+    /// bodies, and those run only under the scheduler. The suspended frame
+    /// is left on the call stack for the scheduler to take.
+    Suspended(u64),
 }
 
 #[cfg(target_arch = "x86_64")]

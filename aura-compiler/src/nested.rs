@@ -419,6 +419,7 @@ impl Ctx<'_> {
             ),
             Expr::Block(b) => Expr::Block(self.stmts(b)),
             Expr::TryUnwrap(x) => Expr::TryUnwrap(Box::new(self.expr(x))),
+            Expr::Await(x) => Expr::Await(Box::new(self.expr(x))),
             Expr::InterpolatedString(parts) => Expr::InterpolatedString(
                 parts
                     .iter()

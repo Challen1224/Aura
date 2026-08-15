@@ -889,13 +889,39 @@
 #### ⏳ Planned
 
 **P1 - High Priority**
-- [ ] **Async/await**
+- [x] **Async/await**
   ```aura
-  async Task<string> fetchData(string url) {
-      let response = await http.get(url);
-      return response.body;
+  static async Task<string> brew(string what) {
+      await Tasks.pause();          // cooperative yield
+      return "{what} ready";
   }
+  var t = Program.brew("tea");      // spawns a hot task (lazy progress)
+  print(t.wait());                  // sync code drives the scheduler
   ```
+  Cooperative coroutines on interpreter frames — real, deterministic,
+  single-threaded concurrency (the sketch's `http.get` needs async I/O
+  natives that don't exist yet; this is the substrate they'd plug
+  into). An `async` method must be static and return `Task<T>`; its
+  body returns the element type and may `await` any `Task<T>`. Calls
+  spawn hot tasks (queued immediately) that progress only while the
+  scheduler runs — at any `await` or at `t.wait()` from sync code.
+  `await` suspends the current task's frame (frames are heap data:
+  locals/stack/pc lift out of the call stack and park on the awaited
+  task); FIFO scheduling makes interleaving deterministic and
+  assertable. `Tasks.pause()` yields one scheduler round. Task
+  exceptions surface catchably at every await/wait site (and keep
+  failing on repeated waits); await cycles are detected as deadlocks,
+  including self-await (a `waiting` state keeps cycles from spinning
+  the ready queue). Suspended frames and results are GC roots. The
+  three new ops (`Spawn`/`Await`/`TaskWait`) are interpreter-only —
+  methods touching them fall back from the JIT while everything else
+  tiers up (asserted). Rules, each its own error: `await` only in
+  async methods (and not in lambdas), `Task<T>` return shape, no
+  instance/interface async, no `throws` on async, `await` needs a
+  `Task<T>`. Not included, documented: async lambdas, instance/virtual
+  async, `Task.whenAll`-style combinators, real async I/O. Verified
+  under both tiers (aura-vm/tests/async_await.rs,
+  examples/async_await.aura).
 
 - [ ] **Fibers / green threads**
 - [ ] **Task parallelism**

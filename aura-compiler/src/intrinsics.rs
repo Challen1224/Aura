@@ -70,6 +70,32 @@ pub fn classes() -> Vec<IntrinsicClass> {
     use NativeId::*;
     vec![
         IntrinsicClass {
+            name: "Task",
+            generic_params: &["T"],
+            constructor: None,
+            methods: vec![
+                // `wait` compiles to the dedicated TaskWait op (the emitter
+                // special-cases it before native dispatch); the native id
+                // is a loud guard.
+                m("wait", vec![], gp("T"), TaskWaitStub),
+            ],
+            static_methods: vec![],
+            properties: vec![],
+        },
+        IntrinsicClass {
+            name: "Tasks",
+            generic_params: &[],
+            constructor: None,
+            methods: vec![],
+            static_methods: vec![m(
+                "pause",
+                vec![],
+                Type::Class("Task".to_string(), vec![Type::Int32]),
+                TaskPause,
+            )],
+            properties: vec![],
+        },
+        IntrinsicClass {
             name: "List",
             generic_params: &["T"],
             constructor: Some(ListNew),
