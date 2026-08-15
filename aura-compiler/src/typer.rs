@@ -704,7 +704,17 @@ impl TypeChecker {
         for ic in crate::intrinsics::classes() {
             let to_method_info = |m: &crate::intrinsics::IntrinsicMethod, is_instance: bool| MethodInfo {
                 name: m.name.to_string(),
-                generic_params: Vec::new(),
+                generic_params: m
+                    .generic_params
+                    .iter()
+                    .map(|n| GenericParam {
+                        name: n.to_string(),
+                        variance: Variance::Invariant,
+                        bounds: Vec::new(),
+                        union: Vec::new(),
+                        requires_new: false,
+                    })
+                    .collect(),
                 return_ty: m.return_ty.clone(),
                 params: m.params.clone(),
                 is_instance,

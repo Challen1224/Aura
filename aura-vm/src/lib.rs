@@ -244,6 +244,19 @@ struct TaskState {
     /// A `Tasks.pause()` task: no frame, completes on first resume — one
     /// round trip through the ready queue, i.e. a cooperative yield.
     pause: bool,
+    /// A combinator task (`Tasks.all` / `Tasks.race`) over other tasks:
+    /// evaluated on each resume, parks on its incomplete parts otherwise.
+    combine: Option<Combine>,
+}
+
+/// Combinator kinds for `Tasks.all` / `Tasks.race`.
+#[derive(Debug, Clone)]
+enum Combine {
+    /// Completes when every part has: results gathered in list order, or
+    /// the first failure (in list order) re-raised.
+    All(Vec<u64>),
+    /// Completes with the first part (in list order) that has completed.
+    Race(Vec<u64>),
 }
 
 impl Frame {
@@ -477,6 +490,7 @@ impl Vm {
                 waiters: Vec::new(),
                 queued: false,
                 waiting: false,
+                combine: None,
                 pause: false,
             },
         );
@@ -502,10 +516,103 @@ impl Vm {
                 waiters: Vec::new(),
                 queued: false,
                 waiting: false,
+                combine: None,
                 pause: true,
             },
         );
         Value::Object(self.heap.allocate(AuraObject::Task { id }))
+    }
+
+    /// Create a combinator task over the given parts (already-spawned
+    /// tasks); queued immediately like any spawn.
+    pub(crate) fn spawn_combine_task(&mut self, combine_all: bool, parts: Vec<u64>) -> Value {
+        let id = self.next_task_id;
+        self.next_task_id += 1;
+        let combine = if combine_all {
+            Combine::All(parts)
+        } else {
+            Combine::Race(parts)
+        };
+        self.tasks.insert(
+            id,
+            TaskState {
+                frame: None,
+                done: false,
+                failed: false,
+                result: Value::Unit,
+                waiters: Vec::new(),
+                queued: false,
+                waiting: false,
+                pause: false,
+                combine: Some(combine),
+            },
+        );
+        self.queue_task(id);
+        Value::Object(self.heap.allocate(AuraObject::Task { id }))
+    }
+
+    /// Evaluate a combinator task: complete it if its parts allow, or park
+    /// it as a waiter of every incomplete part.
+    fn resume_combine(&mut self, id: u64, combine: Combine) -> Result<(), VmError> {
+        let parts: &[u64] = match &combine {
+            Combine::All(p) | Combine::Race(p) => p,
+        };
+        let states: Vec<(u64, bool, bool, Value)> = parts
+            .iter()
+            .map(|pid| match self.tasks.get(pid) {
+                Some(t) => Ok((*pid, t.done, t.failed, t.result.clone())),
+                None => Err(VmError::Runtime(format!("unknown task {pid}"))),
+            })
+            .collect::<Result<_, _>>()?;
+        match &combine {
+            Combine::All(_) => {
+                if let Some((_, _, _, exc)) =
+                    states.iter().find(|(_, done, failed, _)| *done && *failed)
+                {
+                    let exc = exc.clone();
+                    self.complete_task(id, exc, true);
+                    return Ok(());
+                }
+                if states.iter().all(|(_, done, _, _)| *done) {
+                    let elements: Vec<Value> =
+                        states.iter().map(|(_, _, _, v)| v.clone()).collect();
+                    let list = Value::Object(
+                        self.heap.allocate(AuraObject::Array { elements }),
+                    );
+                    self.complete_task(id, list, false);
+                    return Ok(());
+                }
+            }
+            Combine::Race(_) => {
+                if let Some((_, _, failed, v)) =
+                    states.iter().find(|(_, done, _, _)| *done)
+                {
+                    let (v, failed) = (v.clone(), *failed);
+                    self.complete_task(id, v, failed);
+                    return Ok(());
+                }
+            }
+        }
+        // Park on every incomplete part; any completion wakes and
+        // re-evaluates.
+        for (pid, done, _, _) in &states {
+            if !done {
+                if let Some(t) = self.tasks.get_mut(pid) {
+                    if !t.waiters.contains(&id) {
+                        t.waiters.push(id);
+                    }
+                }
+            }
+        }
+        if let Some(t) = self.tasks.get_mut(&id) {
+            t.waiting = true;
+        }
+        Ok(())
+    }
+
+    /// The task id behind a task handle value (native-visible).
+    pub(crate) fn task_id_of_value(&self, v: &Value) -> Result<u64, VmError> {
+        self.task_id_of(v)
     }
 
     /// The task id behind a task handle value.
@@ -565,6 +672,9 @@ impl Vm {
         if t.pause {
             self.complete_task(id, Value::Int(0), false);
             return Ok(());
+        }
+        if let Some(combine) = t.combine.clone() {
+            return self.resume_combine(id, combine);
         }
         let Some(frame) = t.frame.take() else {
             return Err(VmError::Runtime(format!("task {id} resumed while running")));

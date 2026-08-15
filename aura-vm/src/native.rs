@@ -369,6 +369,34 @@ pub(crate) fn exec_native(vm: &mut Vm, id: NativeId, args: &[Value]) -> Result<V
 
         // ---------------- Tasks ----------------
         NativeId::TaskPause => Ok(vm.spawn_pause_task()),
+        NativeId::TasksAll | NativeId::TasksRace => {
+            let Value::Object(handle) = args[0] else {
+                return Err(VmError::TypeMismatch {
+                    expected: "list of tasks",
+                    got: args[0].type_name().into(),
+                });
+            };
+            let elements = match vm.heap().get(handle)? {
+                AuraObject::Array { elements } => elements.clone(),
+                _ => {
+                    return Err(VmError::TypeMismatch {
+                        expected: "list of tasks",
+                        got: "object".into(),
+                    });
+                }
+            };
+            let all = matches!(id, NativeId::TasksAll);
+            if !all && elements.is_empty() {
+                return Err(VmError::Runtime(
+                    "Tasks.race needs at least one task".to_string(),
+                ));
+            }
+            let mut parts = Vec::with_capacity(elements.len());
+            for e in &elements {
+                parts.push(vm.task_id_of_value(e)?);
+            }
+            Ok(vm.spawn_combine_task(all, parts))
+        }
         NativeId::TaskWaitStub => Err(VmError::Runtime(
             "Task.wait must compile to the TaskWait op; this native is a guard".to_string(),
         )),

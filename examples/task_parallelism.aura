@@ -1,0 +1,43 @@
+// Task parallelism: cooperative combinators.
+//
+// Tasks.all(list) completes when every task has, with results in list
+// order (the first failure in list order fails the whole, catchably).
+// Tasks.race(list) completes with the first task to finish; losers keep
+// running and stay awaitable. "Parallel" here means cooperatively
+// interleaved on one thread with deterministic FIFO scheduling — the
+// substrate real async I/O would plug into.
+
+class Program {
+    static async Task<int> fetch(string name, int rounds) {
+        int i = 0;
+        while (i < rounds) {
+            print("  {name}: round {i + 1}"); println();
+            await Tasks.pause();
+            i = i + 1;
+        }
+        return name.Length * rounds;
+    }
+
+    static async Task<int> dashboard() {
+        var sources = new List<Task<int>>();
+        sources.Add(Program.fetch("users", 2));
+        sources.Add(Program.fetch("orders", 3));
+        sources.Add(Program.fetch("stock", 1));
+
+        var results = await Tasks.all(sources);
+        int total = 0;
+        for (var r in results) { total = total + r; }
+        print("all sources loaded, score {total}"); println();
+
+        var mirrors = new List<Task<int>>();
+        mirrors.Add(Program.fetch("mirror-slow", 3));
+        mirrors.Add(Program.fetch("mirror-fast", 1));
+        int first = await Tasks.race(mirrors);
+        print("fastest mirror scored {first}"); println();
+        return total + first;
+    }
+
+    static void Main() {
+        print(Program.dashboard().wait()); println();
+    }
+}

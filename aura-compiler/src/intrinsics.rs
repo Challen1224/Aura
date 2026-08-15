@@ -24,6 +24,9 @@ pub struct IntrinsicMethod {
     pub return_ty: Type,
     /// Native implementation id.
     pub native: NativeId,
+    /// Method-level generic parameter names (inferred at call sites), e.g.
+    /// `T` in `Tasks.all(List<Task<T>>) -> Task<List<T>>`.
+    pub generic_params: &'static [&'static str],
 }
 
 /// A read-only intrinsic property (getter only).
@@ -62,7 +65,18 @@ fn list_of(elem: Type) -> Type {
 }
 
 fn m(name: &'static str, params: Vec<Type>, return_ty: Type, native: NativeId) -> IntrinsicMethod {
-    IntrinsicMethod { name, params, return_ty, native }
+    IntrinsicMethod { name, params, return_ty, native, generic_params: &[] }
+}
+
+/// An intrinsic method with method-level generic parameters.
+fn mg(
+    name: &'static str,
+    generic_params: &'static [&'static str],
+    params: Vec<Type>,
+    return_ty: Type,
+    native: NativeId,
+) -> IntrinsicMethod {
+    IntrinsicMethod { name, params, return_ty, native, generic_params }
 }
 
 /// All intrinsic classes.
@@ -87,12 +101,31 @@ pub fn classes() -> Vec<IntrinsicClass> {
             generic_params: &[],
             constructor: None,
             methods: vec![],
-            static_methods: vec![m(
-                "pause",
-                vec![],
-                Type::Class("Task".to_string(), vec![Type::Int32]),
-                TaskPause,
-            )],
+            static_methods: vec![
+                m(
+                    "pause",
+                    vec![],
+                    Type::Class("Task".to_string(), vec![Type::Int32]),
+                    TaskPause,
+                ),
+                // Cooperative parallelism: gather every result (in list
+                // order; the first failure in list order wins), or take the
+                // first task to complete.
+                mg(
+                    "all",
+                    &["T"],
+                    vec![list_of(Type::Class("Task".to_string(), vec![gp("T")]))],
+                    Type::Class("Task".to_string(), vec![list_of(gp("T"))]),
+                    TasksAll,
+                ),
+                mg(
+                    "race",
+                    &["T"],
+                    vec![list_of(Type::Class("Task".to_string(), vec![gp("T")]))],
+                    Type::Class("Task".to_string(), vec![gp("T")]),
+                    TasksRace,
+                ),
+            ],
             properties: vec![],
         },
         IntrinsicClass {

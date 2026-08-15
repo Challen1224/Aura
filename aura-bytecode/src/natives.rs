@@ -117,6 +117,8 @@ natives! {
     // Tasks
     TaskPause = 120, "Tasks.pause", arity 0;
     TaskWaitStub = 121, "Task.wait", arity 1;
+    TasksAll = 122, "Tasks.all", arity 1;
+    TasksRace = 123, "Tasks.race", arity 1;
 }
 
 #[cfg(test)]

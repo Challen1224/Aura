@@ -935,14 +935,28 @@
       concurrency work continues, the valuable next steps are task
       combinators (`Tasks.all`/`race`), async lambdas, and async I/O
       natives — not fibers.
-- [ ] **Task parallelism**
+- [x] **Task parallelism**
   ```aura
-  Task<int> computeAsync(int x) {
-      return x * x;
-  }
-  
-  let result = await computeAsync(42);
+  var parts = await Tasks.all(taskList);   // every result, in list order
+  var first = await Tasks.race(taskList);  // first completion wins
   ```
+  Cooperative combinators over the task scheduler — the follow-up the
+  fibers note sequenced. `Tasks.all(List<Task<T>>) -> Task<List<T>>`
+  completes when every part has, results in **list order** (not
+  completion order); the first failure in list order fails the whole,
+  catchably; an empty list completes immediately with an empty List.
+  `Tasks.race(List<Task<T>>) -> Task<T>` completes with the first part
+  to finish (list order breaks same-round ties); a failing winner
+  propagates (JS `Promise.race` semantics); losers keep running and
+  stay awaitable; an empty race is a hard error. Combinators are tasks
+  themselves — no frame, evaluated on resume, parked as waiters of
+  their incomplete parts — so they nest, compose, and obey the same
+  deadlock detection. This also landed method-level generic parameters
+  on intrinsic statics (`all<T>`/`race<T>` infer `T` from the
+  argument). "Parallel" means deterministically interleaved on one
+  thread; the sketch's `await computeAsync(42)` form worked already.
+  Verified under both tiers (aura-vm/tests/task_parallelism.rs,
+  examples/task_parallelism.aura).
 
 **P2 - Medium Priority**
 - [ ] **Threads**
