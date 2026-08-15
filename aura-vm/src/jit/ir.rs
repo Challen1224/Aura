@@ -940,6 +940,14 @@ impl<'a> Lowerer<'a> {
                         let result = stack.pop().ok_or("stack underflow at return")?;
                         Term::Ret(result)
                     }
+                    // `throw` terminates the block through the helper's
+                    // exception exit (the helper never returns normally);
+                    // dropping it here — the old behavior — silently fell
+                    // through into the next block.
+                    Op::Throw => {
+                        self.lower_op(&mut block, &mut stack, &term_op)?;
+                        Term::Unreachable
+                    }
                     _ => Term::Unreachable,
                 }
             };

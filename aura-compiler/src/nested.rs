@@ -157,6 +157,7 @@ impl Ctx<'_> {
             }),
             Member::Method(md) => Member::Method(MethodDecl {
                 return_ty: self.ty(&md.return_ty),
+                throws: md.throws.iter().map(|t| self.resolve(t)).collect(),
                 params: md
                     .params
                     .iter()

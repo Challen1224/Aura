@@ -98,3 +98,50 @@ class Program {
         assert!(vm.jit_compiled_count() > 0, "trial {trial}: nothing compiled");
     }
 }
+
+/// Regression: `throw` was classified as a block terminator but the
+/// terminator lowering only knew Br/BrTrue/BrFalse/Ret — the throw op was
+/// silently dropped and compiled code fell through past it, returning
+/// normal values instead of raising. A compiled method's throw must cross
+/// the tier boundary as an exception.
+#[test]
+fn compiled_throw_raises() {
+    let src = r#"
+class E : Exception {
+    E(string m) { this.message = m; }
+}
+class Program {
+    static int f(int i) {
+        if (i % 3 == 0) {
+            throw new E("boom");
+        }
+        return i;
+    }
+    static int Main() {
+        int total = 0;
+        for (var i in 1..=100) {
+            try {
+                total = total + Program.f(i);
+            } catch (Exception e) {
+                total = total + e.message.Length;
+            }
+        }
+        return total;
+    }
+}
+"#;
+    // sum(1..100) - sum(multiples of 3) + 33*4 = 5050 - 1683 + 132 = 3499.
+    for trial in 0..3 {
+        assert_parity(src, 3499);
+    }
+    let module = Arc::new(compile(src, "test").expect("compile"));
+    let mut vm = Vm::new(module);
+    vm.enable_jit();
+    vm.set_jit_threshold(30);
+    match vm.run().expect("jit threshold-30 run") {
+        Value::Int(i) => assert_eq!(i, 3499, "tier transition"),
+        other => panic!("expected int, got {other:?}"),
+    }
+    #[cfg(target_arch = "x86_64")]
+    assert!(vm.jit_compiled_count() > 0, "nothing compiled");
+}

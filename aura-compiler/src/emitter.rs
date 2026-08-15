@@ -583,6 +583,7 @@ fn property_accessor_decl(class_name: String, p: &PropertyDecl, is_getter: bool)
         } else {
             vec![Param { ty: p.ty.clone(), name: "value".to_string() }]
         },
+        throws: Vec::new(),
         body,
     }
 }
@@ -613,6 +614,7 @@ fn record_primary_constructor(class: &ClassDecl) -> MethodDecl {
         return_ty: Type::Unit,
         name: class.name.clone(),
         params: class.record_params.clone(),
+        throws: Vec::new(),
         body,
     }
 }
@@ -2729,6 +2731,7 @@ impl<'a> MethodEmitter<'a> {
                 return_ty: ret,
                 name: format!("__lambda{}", id.0),
                 params: lifted_params,
+                throws: Vec::new(),
                 body: lifted_body,
             },
         ));

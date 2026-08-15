@@ -1,0 +1,44 @@
+// Checked exceptions (opt-in).
+//
+// Exceptions are unchecked by default — throw freely. A method that
+// declares `throws IOException` opts into a contract: every caller must
+// either catch IOException (or a supertype) around the call, or declare
+// `throws IOException` itself and pass the obligation up. Overrides and
+// interface implementations may not add throws their base lacks, so the
+// contract survives virtual dispatch.
+
+class IOException : Exception {
+    IOException(string m) { this.message = m; }
+}
+
+class Config {
+    static string load(string path) throws IOException {
+        if (path.Length == 0) {
+            throw new IOException("no path given");
+        }
+        return "settings from {path}";
+    }
+}
+
+class App {
+    // Propagation: declare instead of catching.
+    static string boot(string path) throws IOException {
+        return "booted with {Config.load(path)}";
+    }
+}
+
+class Program {
+    static void Main() {
+        try {
+            print(App.boot("app.cfg")); println();
+            print(App.boot("")); println();
+        } catch (IOException e) {
+            print("failed: "); print(e.message); println();
+        }
+
+        // These would be compile errors:
+        //   Config.load("x");            // uncaught and undeclared
+        //   catch (SomeOther e) { ... }  // unrelated catch doesn't cover it
+        //   override ... throws IOException  // if the base didn't declare it
+    }
+}

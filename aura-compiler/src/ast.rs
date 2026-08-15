@@ -270,6 +270,11 @@ pub struct MethodDecl {
     pub name: String,
     /// Parameters.
     pub params: Vec<Param>,
+    /// Declared checked exceptions (`throws IOException, ParseError`):
+    /// exception class names callers must catch or re-declare. Exceptions
+    /// stay unchecked by default; a `throws` clause opts a method into the
+    /// contract.
+    pub throws: Vec<String>,
     /// Body statements.
     pub body: Vec<Stmt>,
 }

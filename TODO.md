@@ -818,10 +818,31 @@
 #### ⏳ Planned
 
 **P0 - Critical**
-- [ ] **Checked exceptions** (optional)
+- [x] **Checked exceptions** (optional)
   ```aura
-  void readFile(string path) throws IOException { }
+  static string readFile(string path) throws IOException { ... }
   ```
+  Opt-in design ("optional" taken seriously): exceptions stay unchecked
+  by default — `throw` freely, no clause needed. A method declaring
+  `throws IOException, ParseError` binds its **callers**: each declared
+  exception must be caught by an enclosing `try` (a catch of the type
+  or a supertype — `Exception` covers everything; a catch body is not
+  covered by its own try) or re-declared in the caller's own `throws`
+  clause, passing the obligation up. `throws` names must be classes
+  deriving from `Exception`; overrides and interface implementations
+  may not add throws their base declaration lacks (the contract
+  survives virtual dispatch); duplicates in one clause are rejected.
+  Purely compile-time — zero bytecode/VM/JIT changes for the feature.
+  Its tests exposed a serious pre-existing x86-64 JIT bug, fixed:
+  `throw` is a block terminator but the terminator lowering only knew
+  branches and returns, so compiled methods silently **dropped throw
+  ops and fell through**, returning normal values instead of raising
+  (verified broken at the previous HEAD; regression pinned in
+  aura-vm/tests/jit_dead_blocks.rs::compiled_throw_raises). Not
+  included, documented: throw-site checking inside unchecked methods
+  (by design), `throws` on constructors/lambdas/`Func` types. Verified
+  under both tiers (aura-vm/tests/checked_exceptions.rs,
+  examples/checked_exceptions.aura).
 
 - [ ] **Result type** (alternative to exceptions)
   ```aura

@@ -576,6 +576,9 @@ pub struct MethodInfo {
     pub is_abstract: bool,
     /// Whether this method is final (cannot be overridden or re-declared).
     pub is_final: bool,
+    /// Declared checked exceptions: callers must catch each (or a
+    /// supertype) or re-declare it. Empty = unchecked (the default).
+    pub throws: Vec<String>,
 }
 
 /// Enum metadata.
@@ -615,6 +618,11 @@ pub struct TypeChecker {
     current_context: std::cell::RefCell<String>,
     /// Extension methods: target key -> method name -> extension class.
     extensions: HashMap<String, HashMap<String, String>>,
+    /// `throws` list of the method body currently being checked.
+    current_throws: std::cell::RefCell<Vec<String>>,
+    /// Stack of enclosing try-block catch types (one frame per `try` the
+    /// checker is currently inside), for the checked-exception contract.
+    handled_exceptions: std::cell::RefCell<Vec<Vec<Type>>>,
 }
 
 impl TypeChecker {
@@ -628,6 +636,8 @@ impl TypeChecker {
             current_line: std::cell::Cell::new(0),
             current_context: std::cell::RefCell::new(String::new()),
             extensions: HashMap::new(),
+            current_throws: std::cell::RefCell::new(Vec::new()),
+            handled_exceptions: std::cell::RefCell::new(Vec::new()),
         }
     }
 
@@ -697,6 +707,7 @@ impl TypeChecker {
                 is_override: false,
                 is_abstract: false,
                 is_final: true,
+                throws: Vec::new(),
             };
             let info = ClassInfo {
                 name: ic.name.to_string(),
@@ -1106,6 +1117,7 @@ impl TypeChecker {
                                     is_override: m.is_override,
                                     is_abstract,
                                     is_final: m.is_final,
+                                    throws: m.throws.clone(),
                                 };
                                 if m.is_static {
                                     info.static_methods.insert(m.name.clone(), mi);
@@ -1233,6 +1245,60 @@ impl TypeChecker {
         }
         self.split_bases(program)?;
         self.validate_hierarchy()?;
+        // Checked-exception validation: `throws` names must be exception
+        // classes, and an override or interface implementation may not add
+        // throws its base declaration lacks (callers dispatch through the
+        // base contract).
+        for decl in &program.decls {
+            let Decl::Class(c) = decl else { continue };
+            for member in &c.members {
+                let Member::Method(m) = member else { continue };
+                for exc in &m.throws {
+                    let ok = self
+                        .classes
+                        .get(exc)
+                        .map(|i| !i.is_interface && !i.is_static)
+                        .unwrap_or(false)
+                        && (exc == "Exception" || self.is_subclass_of(exc, "Exception"));
+                    if !ok {
+                        return Err(TypeError(format!(
+                            "`{}.{}` declares `throws {}`, which is not an exception class (must derive from `Exception`)",
+                            c.name, m.name, exc
+                        )));
+                    }
+                }
+            }
+        }
+        for info in self.classes.values() {
+            for (mname, mi) in &info.methods {
+                let mut bases: Vec<(String, MethodInfo)> = Vec::new();
+                if let Some(sup) = &info.super_class {
+                    if let Some((d, base)) = self.find_method(sup, mname) {
+                        bases.push((d, base));
+                    }
+                }
+                let mut visited = HashSet::new();
+                for iface in self.all_interfaces(&info.name, &mut visited) {
+                    if let Some(im) = self.classes.get(&iface).and_then(|i| i.methods.get(mname)) {
+                        bases.push((iface.clone(), im.clone()));
+                    }
+                }
+                for (base_name, base_mi) in bases {
+                    for exc in &mi.throws {
+                        let covered = base_mi
+                            .throws
+                            .iter()
+                            .any(|b| b == exc || self.is_subclass_of(exc, b));
+                        if !covered {
+                            return Err(TypeError(format!(
+                                "`{}.{}` declares `throws {}`, but the declaration it overrides in `{}` does not: callers dispatching through `{}` could not know to handle it",
+                                info.name, mname, exc, base_name, base_name
+                            )));
+                        }
+                    }
+                }
+            }
+        }
         // Variance validation: `in`/`out` annotations are interface-only,
         // never on method type parameters, and a variant parameter may only
         // appear on its own side of member signatures — conservatively, any
@@ -2026,6 +2092,30 @@ impl TypeChecker {
         }
     }
 
+    /// Enforce the checked-exception contract at a call site: each declared
+    /// throw of the callee must be caught by an enclosing `try` (a catch of
+    /// the type or a supertype) or re-declared by the calling method's own
+    /// `throws` clause. Methods without a `throws` clause stay unchecked.
+    fn require_throws_handled(&self, mi: &MethodInfo, callee: &str) -> Result<(), TypeError> {
+        for exc in &mi.throws {
+            let caught = self.handled_exceptions.borrow().iter().flatten().any(|c| {
+                matches!(c, Type::Class(cn, _) if cn == exc || self.is_subclass_of(exc, cn))
+            });
+            let declared = self
+                .current_throws
+                .borrow()
+                .iter()
+                .any(|d| d == exc || self.is_subclass_of(exc, d));
+            if !caught && !declared {
+                return Err(TypeError(format!(
+                    "call to `{}` may throw `{}`: catch it or declare `throws {}`",
+                    callee, exc, exc
+                )));
+            }
+        }
+        Ok(())
+    }
+
     /// Resolve a user-defined operator for a binary op whose left operand
     /// has type `lt`: the left class (or a base) declares the operator
     /// method. Returns the (parameter, return) types with the receiver's
@@ -2428,6 +2518,8 @@ impl TypeChecker {
             if let Member::Method(m) = member {
                 self.current_line.set(0);
                 *self.current_context.borrow_mut() = format!("{}.{}", class.name, m.name);
+                *self.current_throws.borrow_mut() = m.throws.clone();
+                self.handled_exceptions.borrow_mut().clear();
                 let mut locals: HashMap<String, Type> = HashMap::new();
                 let mut all_generic_params = class_generic_params.clone();
                 all_generic_params.extend(m.generic_params.clone());
@@ -3121,9 +3213,19 @@ impl TypeChecker {
                 catches,
                 finally_body,
             } => {
-                for s in try_body {
-                    self.check_stmt(s, class, locals, return_ty, in_instance, generic_params)?;
-                }
+                // The catch clauses cover checked-exception contracts for
+                // calls inside the try body (only).
+                self.handled_exceptions
+                    .borrow_mut()
+                    .push(catches.iter().map(|c| c.ty.clone()).collect());
+                let try_result: Result<(), TypeError> = (|| {
+                    for s in try_body {
+                        self.check_stmt(s, class, locals, return_ty, in_instance, generic_params)?;
+                    }
+                    Ok(())
+                })();
+                self.handled_exceptions.borrow_mut().pop();
+                try_result?;
                 for catch in catches {
                     self.validate_type_with_generics(&catch.ty, generic_params)?;
                     locals.insert(catch.name.clone(), catch.ty.clone());
@@ -4596,6 +4698,7 @@ impl TypeChecker {
             params: info.params[1..].to_vec(),
             ..info.clone()
         };
+        self.require_throws_handled(&trimmed, &format!("{}.{}", ext_class, call.method))?;
         self.check_call_args(call, &trimmed, class, locals, in_instance, return_ty, generic_params)
             .map(Some)
     }
@@ -4663,6 +4766,10 @@ impl TypeChecker {
                             call.method, declared_in, visibility_name(method_info.visibility)
                         )));
                     }
+                    self.require_throws_handled(
+                        &method_info,
+                        &format!("{}.{}", declared_in, call.method),
+                    )?;
                     return self.check_call_args(call, &method_info, class, locals, in_instance, return_ty, generic_params);
                 }
                 if self.classes.contains_key(class_name) {
@@ -4680,6 +4787,10 @@ impl TypeChecker {
                             call.method, declared_in, visibility_name(method_info.visibility)
                         )));
                     }
+                    self.require_throws_handled(
+                        &method_info,
+                        &format!("{}.{}", declared_in, call.method),
+                    )?;
                     return self.check_call_args(call, &method_info, class, locals, in_instance, return_ty, generic_params);
                 }
             }
@@ -4713,6 +4824,7 @@ impl TypeChecker {
                     is_override: false,
                     is_abstract: false,
                     is_final: true,
+                    throws: Vec::new(),
                 };
                 return self.check_call_args(call, &info, class, locals, in_instance, return_ty, generic_params);
             }
@@ -4811,6 +4923,10 @@ impl TypeChecker {
             let target_class = self.classes.get(&name).unwrap();
             let subst = build_subst(&target_class.generic_params, &type_args);
             
+            self.require_throws_handled(
+                &method_info,
+                &format!("{}.{}", declared_in, call.method),
+            )?;
             // Check arguments with substituted types
             return self.check_call_args_with_subst(call, &method_info, &subst, class, locals, in_instance, return_ty, generic_params);
         } else {
@@ -4905,6 +5021,10 @@ impl TypeChecker {
                 // static method of the current class.
                 if let Some((declared_in, method_info)) = self.find_static_method(&class.name, &call.method) {
                     if self.can_access(&class.name, &declared_in, method_info.visibility) {
+                        self.require_throws_handled(
+                            &method_info,
+                            &format!("{}.{}", declared_in, call.method),
+                        )?;
                         return self.check_call_args(call, &method_info, class, locals, in_instance, return_ty, generic_params);
                     }
                 }
@@ -4924,6 +5044,10 @@ impl TypeChecker {
                     call.method, declared_in, visibility_name(method_info.visibility)
                 )));
             }
+            self.require_throws_handled(
+                &method_info,
+                &format!("{}.{}", declared_in, call.method),
+            )?;
             return self.check_call_args(call, &method_info, class, locals, in_instance, return_ty, generic_params);
         }
     }

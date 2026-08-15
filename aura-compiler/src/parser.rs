@@ -1440,6 +1440,7 @@ impl<'a> Parser<'a> {
                         return_ty: Type::Unit,
                         name: class_name.to_string(),
                         params,
+                        throws: Vec::new(),
                         body,
                     }));
                 }
@@ -1523,6 +1524,29 @@ impl<'a> Parser<'a> {
 
         if self.check(Token::LParen) {
             let params = self.parse_params()?;
+            // Checked-exception contract: `throws IOException, ParseError`.
+            let mut throws: Vec<String> = Vec::new();
+            if matches!(self.peek(), Some(Token::Ident(k)) if k == "throws") {
+                self.advance();
+                loop {
+                    let mut n = self.consume_ident("expected exception type after `throws`")?;
+                    while matches!(self.peek(), Some(Token::Dot))
+                        && matches!(self.tokens.get(self.pos + 1), Some(Token::Ident(_)))
+                    {
+                        self.advance();
+                        let part = self.consume_ident("expected name after `.`")?;
+                        n.push('.');
+                        n.push_str(&part);
+                    }
+                    if throws.contains(&n) {
+                        return Err(format!("`{}` is listed in `throws` more than once", n));
+                    }
+                    throws.push(n);
+                    if !self.match_token(Token::Comma) {
+                        break;
+                    }
+                }
+            }
             self.parse_where_clauses(&mut generic_params)?;
             let body = if is_abstract || (in_interface && !self.check(Token::LBrace)) {
                 if is_static || is_virtual {
@@ -1548,6 +1572,7 @@ impl<'a> Parser<'a> {
                 return_ty: ty,
                 name,
                 params,
+                throws,
                 body,
             }))
         } else if self.check(Token::LBrace) {
