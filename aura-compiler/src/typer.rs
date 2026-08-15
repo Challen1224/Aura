@@ -300,6 +300,19 @@ pub fn operator_method_name(op: BinOp) -> Option<&'static str> {
     })
 }
 
+/// Whether `name` occurs anywhere inside `ty` (as a class-position ident or
+/// generic-param reference, at any nesting depth). Used by the conservative
+/// variance position check.
+pub fn type_mentions(ty: &Type, name: &str) -> bool {
+    match ty {
+        Type::Class(n, args) => n == name || args.iter().any(|a| type_mentions(a, name)),
+        Type::GenericParam(n) => n == name,
+        Type::Nullable(t) | Type::Newtype(_, t) => type_mentions(t, name),
+        Type::Tuple(ts) => ts.iter().any(|t| type_mentions(t, name)),
+        _ => false,
+    }
+}
+
 /// Source symbol of a binary operator, for error messages.
 pub fn binop_symbol(op: BinOp) -> &'static str {
     match op {
@@ -368,6 +381,10 @@ pub struct ClassInfo {
     pub super_class: Option<String>,
     /// Interfaces implemented (classes) or extended (interfaces).
     pub interfaces: Vec<String>,
+    /// Declared type arguments for each directly implemented generic
+    /// interface (`class CatBox : IProducer<Cat>` records `IProducer ->
+    /// [Cat]`). Non-generic interfaces map to an empty list.
+    pub interface_args: HashMap<String, Vec<Type>>,
     /// Instance field names and types in declaration order.
     pub instance_fields: Vec<(String, Type)>,
     /// Static field names and types in declaration order.
@@ -578,6 +595,7 @@ impl TypeChecker {
                     .iter()
                     .map(|n| GenericParam {
                         name: n.to_string(),
+                        variance: Variance::Invariant,
                         constraint: None,
                         union: Vec::new(),
                         requires_new: false,
@@ -591,6 +609,7 @@ impl TypeChecker {
                 is_record: false,
                 super_class: None,
                 interfaces: Vec::new(),
+            interface_args: HashMap::new(),
                 instance_fields: Vec::new(),
                 static_fields: Vec::new(),
                 protected_fields: HashSet::new(),
@@ -770,6 +789,7 @@ impl TypeChecker {
                         is_record: c.is_record,
                         super_class: None,
                         interfaces: Vec::new(),
+                        interface_args: HashMap::new(),
                         instance_fields: Vec::new(),
                         static_fields: Vec::new(),
                         protected_fields: HashSet::new(),
@@ -1101,6 +1121,98 @@ impl TypeChecker {
         }
         self.split_bases(program)?;
         self.validate_hierarchy()?;
+        // Variance validation: `in`/`out` annotations are interface-only,
+        // never on method type parameters, and a variant parameter may only
+        // appear on its own side of member signatures — conservatively, any
+        // occurrence (however nested) on the wrong side is rejected.
+        for decl in &program.decls {
+            let Decl::Class(c) = decl else { continue };
+            for member in &c.members {
+                if let Member::Method(m) = member {
+                    if let Some(gp) = m
+                        .generic_params
+                        .iter()
+                        .find(|g| g.variance != Variance::Invariant)
+                    {
+                        return Err(TypeError(format!(
+                            "variance annotation on `{}` in `{}.{}`: `in`/`out` are only \
+                             allowed on interface type parameters",
+                            gp.name, c.name, m.name
+                        )));
+                    }
+                }
+            }
+            let variant: Vec<&GenericParam> = c
+                .generic_params
+                .iter()
+                .filter(|g| g.variance != Variance::Invariant)
+                .collect();
+            if variant.is_empty() {
+                continue;
+            }
+            if !c.is_interface {
+                return Err(TypeError(format!(
+                    "variance annotation on `{}` of `{}`: `in`/`out` are only allowed on \
+                     interface type parameters",
+                    variant[0].name, c.name
+                )));
+            }
+            for gp in variant {
+                for member in &c.members {
+                    match member {
+                        Member::Method(m) => match gp.variance {
+                            Variance::Covariant => {
+                                if let Some(p) =
+                                    m.params.iter().find(|p| type_mentions(&p.ty, &gp.name))
+                                {
+                                    return Err(TypeError(format!(
+                                        "covariant `out {}` cannot appear in parameter \
+                                         `{}` of `{}.{}`: `out` parameters are \
+                                         output-only (returns)",
+                                        gp.name, p.name, c.name, m.name
+                                    )));
+                                }
+                            }
+                            Variance::Contravariant => {
+                                if type_mentions(&m.return_ty, &gp.name) {
+                                    return Err(TypeError(format!(
+                                        "contravariant `in {}` cannot appear in the \
+                                         return type of `{}.{}`: `in` parameters are \
+                                         input-only (method parameters)",
+                                        gp.name, c.name, m.name
+                                    )));
+                                }
+                            }
+                            Variance::Invariant => {}
+                        },
+                        Member::Property(p) => {
+                            if type_mentions(&p.ty, &gp.name) {
+                                let bad = match gp.variance {
+                                    Variance::Covariant => p.setter.is_some(),
+                                    Variance::Contravariant => p.getter.is_some(),
+                                    Variance::Invariant => false,
+                                };
+                                if bad {
+                                    return Err(TypeError(format!(
+                                        "variant `{}` cannot appear in property `{}.{}`: \
+                                         a {} makes it flow the wrong way",
+                                        gp.name,
+                                        c.name,
+                                        p.name,
+                                        if gp.variance == Variance::Covariant {
+                                            "setter"
+                                        } else {
+                                            "getter"
+                                        }
+                                    )));
+                                }
+                            }
+                        }
+                        Member::Field(_) => {}
+                    }
+                }
+            }
+        }
         // Extension registration. The desugared static class was gathered
         // like any other above; this builds and validates the call-site
         // mapping (target -> method -> extension class). Runs after the main
@@ -1200,7 +1312,8 @@ impl TypeChecker {
             if let Decl::Class(c) = decl {
                 let mut super_class = None;
                 let mut interfaces = Vec::new();
-                for base in &c.bases {
+                let mut interface_args: HashMap<String, Vec<Type>> = HashMap::new();
+                for (base, _) in &c.bases {
                     if self.classes.get(base).map(|i| i.is_static).unwrap_or(false) {
                         return Err(TypeError(format!(
                             "cannot inherit from static class `{}`",
@@ -1208,7 +1321,7 @@ impl TypeChecker {
                         )));
                     }
                 }
-                for base in &c.bases {
+                for (base, base_args) in &c.bases {
                     let base_info = self
                         .classes
                         .get(base)
@@ -1217,7 +1330,31 @@ impl TypeChecker {
                         })?;
                     let is_interface = base_info.is_interface;
                     if is_interface {
+                        // A generic interface must be implemented at an
+                        // instantiation; the declared arguments drive
+                        // conformance checking and variance-aware
+                        // assignability.
+                        if base_info.generic_params.len() != base_args.len() {
+                            return Err(TypeError(format!(
+                                "interface `{}` expects {} type argument(s), but `{}` \
+                                 implements it with {}",
+                                base,
+                                base_info.generic_params.len(),
+                                c.name,
+                                base_args.len()
+                            )));
+                        }
+                        for arg in base_args {
+                            self.validate_type_with_generics(arg, &c.generic_params)?;
+                        }
                         interfaces.push(base.clone());
+                        interface_args.insert(base.clone(), base_args.clone());
+                    } else if !base_args.is_empty() {
+                        return Err(TypeError(format!(
+                            "class `{}` extends `{}` with type arguments: generic base \
+                             classes are not supported yet",
+                            c.name, base
+                        )));
                     } else if c.is_record {
                         return Err(TypeError(format!(
                             "record `{}` cannot inherit from class `{}`",
@@ -1247,6 +1384,7 @@ impl TypeChecker {
                 let info = self.classes.get_mut(&c.name).unwrap();
                 info.super_class = super_class;
                 info.interfaces = interfaces;
+                info.interface_args = interface_args;
             }
         }
         Ok(())
@@ -1439,6 +1577,40 @@ impl TypeChecker {
             if let Some(r) = self.find_method_inner(iface, method, visited) {
                 return Some(r);
             }
+        }
+        None
+    }
+
+    /// The type arguments with which `class_name` (instantiated at
+    /// `class_args`) implements interface `iface`, if it does: the directly
+    /// declared instantiation, or one inherited from a superclass or an
+    /// extended interface. Only the top-level class's own parameters need
+    /// substituting — generic base classes are unsupported, so deeper
+    /// declarations are already concrete.
+    fn declared_interface_args(
+        &self,
+        class_name: &str,
+        class_args: &[Type],
+        iface: &str,
+    ) -> Option<Vec<Type>> {
+        let top = self.classes.get(class_name)?;
+        let subst = build_subst(&top.generic_params, class_args);
+        let mut queue = vec![class_name.to_string()];
+        let mut seen = HashSet::new();
+        while let Some(c) = queue.pop() {
+            if !seen.insert(c.clone()) {
+                continue;
+            }
+            let Some(info) = self.classes.get(&c) else {
+                continue;
+            };
+            if let Some(args) = info.interface_args.get(iface) {
+                return Some(args.iter().map(|a| substitute_type(a, &subst)).collect());
+            }
+            if let Some(sup) = &info.super_class {
+                queue.push(sup.clone());
+            }
+            queue.extend(info.interfaces.iter().cloned());
         }
         None
     }
@@ -1841,7 +2013,18 @@ impl TypeChecker {
                                 info.name, m_name, declared_in
                             )));
                         }
-                        if found.return_ty != mi.return_ty || found.params != mi.params {
+                        // Compare against the interface signature at the
+                        // declared instantiation: `class CatBox :
+                        // IProducer<Cat>` must implement `produce()` at
+                        // `Cat`, not at the interface's own `T`.
+                        let iargs = self
+                            .declared_interface_args(&info.name, &[], &iface)
+                            .unwrap_or_default();
+                        let isubst = build_subst(&ii.generic_params, &iargs);
+                        let want_ret = substitute_type(&mi.return_ty, &isubst);
+                        let want_params: Vec<Type> =
+                            mi.params.iter().map(|p| substitute_type(p, &isubst)).collect();
+                        if found.return_ty != want_ret || found.params != want_params {
                             return Err(TypeError(format!(
                                 "method `{}.{}` has a different signature than interface method `{}.{}`",
                                 info.name, m_name, iface, m_name
@@ -4588,16 +4771,62 @@ impl TypeChecker {
             (Type::Class(target_name, target_args), Type::Class(source_name, source_args)) => {
                 // Same-name reference: compare type arguments elementwise so a
                 // sum type like `Result<int, string>` is checked against an
-                // inferred `Result<int, T>`.
+                // inferred `Result<int, T>`. Variance annotations steer the
+                // per-argument direction: `out` compares target←source
+                // (covariant, also the pre-existing permissive default for
+                // unannotated parameters), `in` compares source←target.
                 if target_name == source_name
                     && !target_args.is_empty()
                     && !source_args.is_empty()
                 {
-                    return target_args.len() == source_args.len()
-                        && target_args
-                            .iter()
-                            .zip(source_args)
-                            .all(|(t, s)| self.is_assignable(t, s));
+                    if target_args.len() != source_args.len() {
+                        return false;
+                    }
+                    let variances: Vec<Variance> = self
+                        .classes
+                        .get(target_name)
+                        .map(|i| i.generic_params.iter().map(|g| g.variance).collect())
+                        .unwrap_or_default();
+                    return target_args.iter().zip(source_args).enumerate().all(
+                        |(i, (t, s))| match variances.get(i).copied() {
+                            Some(Variance::Contravariant) => self.is_assignable(s, t),
+                            _ => self.is_assignable(t, s),
+                        },
+                    );
+                }
+                // Generic interface target: the source must implement it at
+                // a declared instantiation, compared variance-aware — `out`
+                // widens (IProducer<Cat> into IProducer<Animal>), `in`
+                // narrows (IComparer<Animal> into IComparer<Cat>),
+                // unannotated parameters must match exactly. The name-only
+                // subclass walk below would ignore the arguments.
+                if !target_args.is_empty()
+                    && self
+                        .classes
+                        .get(target_name)
+                        .map(|i| i.is_interface && !i.generic_params.is_empty())
+                        .unwrap_or(false)
+                {
+                    let Some(sargs) =
+                        self.declared_interface_args(source_name, source_args, target_name)
+                    else {
+                        return false;
+                    };
+                    if sargs.len() != target_args.len() {
+                        return false;
+                    }
+                    let variances: Vec<Variance> = self
+                        .classes
+                        .get(target_name)
+                        .map(|i| i.generic_params.iter().map(|g| g.variance).collect())
+                        .unwrap_or_default();
+                    return target_args.iter().zip(&sargs).enumerate().all(
+                        |(i, (t, s))| match variances.get(i).copied() {
+                            Some(Variance::Covariant) => self.is_assignable(t, s),
+                            Some(Variance::Contravariant) => self.is_assignable(s, t),
+                            _ => t == s,
+                        },
+                    );
                 }
                 // Strict nullability: null is NOT assignable to a plain class
                 // reference — only to `T?` (handled above).

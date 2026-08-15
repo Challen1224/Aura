@@ -102,9 +102,12 @@ pub struct ClassDecl {
     pub module: String,
     /// Generic parameters (e.g., `<T>`, `<K, V>`).
     pub generic_params: Vec<GenericParam>,
-    /// Names after `:` (base class and/or interfaces). The type checker splits
-    /// these into a single super class and a list of implemented interfaces.
-    pub bases: Vec<String>,
+    /// Bases after `:` (base class and/or interfaces), each with declared
+    /// type arguments (`: IProducer<Cat>`). The type checker splits these
+    /// into a single super class and a list of implemented interfaces, and
+    /// records generic-interface instantiations for conformance checking
+    /// and variance-aware assignability.
+    pub bases: Vec<(String, Vec<Type>)>,
     /// Whether this is a static class (namespace idiom): no instances, no
     /// inheritance, all members static.
     pub is_static: bool,
@@ -151,6 +154,12 @@ pub enum Visibility {
 pub struct GenericParam {
     /// Parameter name (e.g., "T", "K", "V").
     pub name: String,
+    /// Variance annotation (`out T` / `in T`), interfaces only. A covariant
+    /// parameter may only appear in output positions (returns, getter-only
+    /// properties); a contravariant one only in input positions (method
+    /// parameters). Checked conservatively: any occurrence in the wrong
+    /// side's types is rejected, including nested ones.
+    pub variance: Variance,
     /// Optional constraint (interface/class that the type must implement/extend).
     pub constraint: Option<Type>,
     /// Union constraint: `where T : int | float`. When non-empty, a type
@@ -288,6 +297,17 @@ pub struct Param {
     pub ty: Type,
     /// Parameter name.
     pub name: String,
+}
+
+/// Variance annotation on an interface type parameter.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Variance {
+    /// `out T`: covariant — `I<Derived>` flows into `I<Base>`.
+    Covariant,
+    /// `in T`: contravariant — `I<Base>` flows into `I<Derived>`.
+    Contravariant,
+    /// No annotation.
+    Invariant,
 }
 
 /// Suffix applied to an integer literal, e.g. `42i8`, `5u32`.

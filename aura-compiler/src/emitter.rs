@@ -232,7 +232,11 @@ impl Emitter {
                     aura_bytecode::GenericParam {
                         name: gp.name.clone(),
                         constraint: gp.constraint.as_ref().map(|c| map_type(c, &class_ids, &enum_ids, &[])),
-                        variance: aura_bytecode::Variance::Invariant,
+                        variance: match gp.variance {
+                            crate::ast::Variance::Covariant => aura_bytecode::Variance::Covariant,
+                            crate::ast::Variance::Contravariant => aura_bytecode::Variance::Contravariant,
+                            crate::ast::Variance::Invariant => aura_bytecode::Variance::Invariant,
+                        },
                     }
                 }).collect();
                 let fields: Vec<FieldDef> = field_layouts[&class.name]

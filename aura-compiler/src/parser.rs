@@ -385,6 +385,7 @@ fn expand_generic_params(
         .iter()
         .map(|gp| {
             Ok(GenericParam {
+                variance: Variance::Invariant,
                 union: Vec::new(),
                 requires_new: false,
                 name: gp.name.clone(),
@@ -911,16 +912,22 @@ impl<'a> Parser<'a> {
             Vec::new()
         };
         let bases = if self.match_token(Token::Colon) {
-            let mut bases = Vec::new();
+            let mut bases: Vec<(String, Vec<Type>)> = Vec::new();
             loop {
                 let base = self.consume_ident("expected base type name after `:`")?;
                 if base == name {
                     return Err(format!("`{}` cannot inherit from itself", name));
                 }
-                if bases.contains(&base) {
+                if bases.iter().any(|(b, _)| *b == base) {
                     return Err(format!("`{}` lists base type `{}` more than once", name, base));
                 }
-                bases.push(base);
+                // Generic interface instantiation: `: IProducer<Cat>`.
+                let args = if self.check(Token::Lt) {
+                    self.parse_type_args()?
+                } else {
+                    Vec::new()
+                };
+                bases.push((base, args));
                 if !self.match_token(Token::Comma) {
                     break;
                 }
@@ -1188,9 +1195,23 @@ impl<'a> Parser<'a> {
         self.consume(Token::Lt, "expected `<`")?;
         let mut params = Vec::new();
         loop {
+            // Variance annotation: `<out T>` (covariant) / `<in T>`
+            // (contravariant). `out` is contextual — only a variance marker
+            // when another identifier follows.
+            let variance = if self.match_token(Token::In) {
+                Variance::Contravariant
+            } else if matches!(self.peek(), Some(Token::Ident(k)) if k == "out")
+                && matches!(self.tokens.get(self.pos + 1), Some(Token::Ident(_)))
+            {
+                self.advance();
+                Variance::Covariant
+            } else {
+                Variance::Invariant
+            };
             let name = self.consume_ident("expected generic parameter name")?;
             let mut gp = GenericParam {
                 name,
+                variance,
                 constraint: None,
                 union: Vec::new(),
                 requires_new: false,

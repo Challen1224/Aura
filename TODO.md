@@ -624,11 +624,34 @@
   under both tiers (aura-vm/tests/generic_constraints.rs,
   examples/generic_constraints.aura).
 
-- [ ] **Variance annotations**
+- [x] **Variance annotations**
   ```aura
-  interface IEnumerable<out T> { }  // Covariant
-  interface IComparer<in T> { }     // Contravariant
+  interface IProducer<out T> { T produce(); }      // Covariant
+  interface IComparer<in T> { int compare(T a, T b); }  // Contravariant
   ```
+  `out T` (covariant): `IProducer<Cat>` flows into `IProducer<Animal>`.
+  `in T` (contravariant): `IComparer<Animal>` flows into
+  `IComparer<Cat>`. Unannotated parameters are invariant across
+  instantiations. Soundness checked conservatively: `out T` may not
+  occur anywhere in a method parameter type (nested included, e.g.
+  `List<T>`), `in T` may not occur in a return type, properties follow
+  their accessors, and annotations are interface-only (classes and
+  method type parameters reject them). This feature also made
+  **generic-interface implementation real**: base lists now take type
+  arguments (`class CatFactory : IProducer<Cat>` — previously
+  unparseable), the declared instantiation is recorded, conformance is
+  checked against the substituted interface signatures (generic
+  implementors like `class Repeat<E> : IProducer<E>` included), a
+  generic interface implemented without arguments is an error, and
+  assignability into a generic-interface type resolves the source's
+  declared instantiation through its superclass/interface chain and
+  compares variance-aware. Not included, documented: generic *base
+  classes* with type arguments (explicit error), interface-extends
+  argument substitution beyond direct declarations, and tightening the
+  pre-existing permissive covariance of same-name non-interface
+  generics (`List<Cat>` into `List<Animal>` still passes; separate
+  cleanup). Verified under both tiers (aura-vm/tests/variance.rs,
+  examples/variance.aura).
 
 - [ ] **Generic type inference**
   ```aura

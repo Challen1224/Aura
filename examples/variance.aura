@@ -1,0 +1,50 @@
+// Variance annotations.
+//
+// `out T` marks a type parameter covariant: the interface only produces T,
+// so IProducer<Cat> can stand in wherever an IProducer<Animal> is wanted.
+// `in T` marks it contravariant: the interface only consumes T, so a
+// comparer that handles any Animal also handles Cats. Unannotated
+// parameters are invariant across instantiations. The compiler rejects
+// declarations whose members would leak T the wrong way.
+
+class Animal {
+    virtual string name() { return "animal"; }
+}
+class Cat : Animal {
+    override string name() { return "cat"; }
+}
+
+interface IProducer<out T> {
+    T produce();
+}
+
+interface IComparer<in T> {
+    int compare(T a, T b);
+}
+
+class CatFactory : IProducer<Cat> {
+    Cat produce() { return new Cat(); }
+}
+
+class NameLengthComparer : IComparer<Animal> {
+    int compare(Animal a, Animal b) {
+        return a.name().Length - b.name().Length;
+    }
+}
+
+class Program {
+    static void Main() {
+        // Covariance: a Cat producer is an Animal producer.
+        IProducer<Animal> animals = new CatFactory();
+        print("produced: "); print(animals.produce().name()); println();
+
+        // Contravariance: an Animal comparer compares Cats.
+        IComparer<Cat> catComparer = new NameLengthComparer();
+        print("compare: "); print(catComparer.compare(new Cat(), new Cat())); println();
+
+        // These would be compile errors:
+        //   IProducer<Cat> pc = animals;          // covariance never narrows
+        //   IComparer<Animal> ca = catComparer;   // contravariance never widens
+        //   interface IBad<out T> { void put(T v); }  // out is output-only
+    }
+}

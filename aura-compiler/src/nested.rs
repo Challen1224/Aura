@@ -40,7 +40,11 @@ pub fn flatten_nested_classes(program: &Program) -> Result<Program, String> {
     let mut decls = rest;
     for (mut class, scope) in flat {
         let ctx = Ctx { scope, names: &names };
-        class.bases = class.bases.iter().map(|b| ctx.resolve(b)).collect();
+        class.bases = class
+            .bases
+            .iter()
+            .map(|(b, args)| (ctx.resolve(b), args.iter().map(|t| ctx.ty(t)).collect()))
+            .collect();
         class.extension_on = class.extension_on.as_ref().map(|t| ctx.ty(t));
         class.record_params = class
             .record_params
@@ -163,6 +167,7 @@ impl Ctx<'_> {
                     .iter()
                     .map(|gp| GenericParam {
                         name: gp.name.clone(),
+                        variance: gp.variance,
                         constraint: gp.constraint.as_ref().map(|c| self.ty(c)),
                         union: gp.union.iter().map(|t| self.ty(t)).collect(),
                         requires_new: gp.requires_new,
