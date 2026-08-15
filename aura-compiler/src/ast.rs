@@ -96,6 +96,10 @@ pub struct EnumVariantField {
 pub struct ClassDecl {
     /// Class name.
     pub name: String,
+    /// Source module (file stem) this class was declared in; `internal`
+    /// members are only accessible from classes with the same module.
+    /// Empty for single-source compilation and synthesized classes.
+    pub module: String,
     /// Generic parameters (e.g., `<T>`, `<K, V>`).
     pub generic_params: Vec<GenericParam>,
     /// Names after `:` (base class and/or interfaces). The type checker splits

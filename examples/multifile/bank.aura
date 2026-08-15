@@ -1,0 +1,44 @@
+// The library file: `internal` members are visible to everything in THIS
+// file, and to nothing outside it. Account balances can only change
+// through Deposit/Withdraw, and the audit hook cannot be called (or
+// spoofed) from other files.
+
+class Account {
+    internal int balance;
+    string owner;
+
+    Account(string owner) {
+        this.owner = owner;
+        this.balance = 0;
+    }
+
+    void Deposit(int amount) {
+        if (amount > 0) {
+            this.balance = this.balance + amount;
+            Audit.Log(this, "deposit");
+        }
+    }
+
+    bool Withdraw(int amount) {
+        if (amount > 0 && amount <= this.balance) {
+            this.balance = this.balance - amount;
+            Audit.Log(this, "withdraw");
+            return true;
+        }
+        return false;
+    }
+
+    int Balance() { return this.balance; }
+}
+
+class Audit {
+    internal static void Log(Account a, string action) {
+        print("[audit] ");
+        print(a.owner);
+        print(" ");
+        print(action);
+        print(" -> ");
+        print(a.balance);
+        println();
+    }
+}

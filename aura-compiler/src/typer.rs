@@ -300,6 +300,8 @@ pub struct TypedProgram {
 pub struct ClassInfo {
     /// Class name.
     pub name: String,
+    /// Source module (file) the class was declared in; scopes `internal`.
+    pub module: String,
     /// Generic parameters for this class.
     pub generic_params: Vec<GenericParam>,
     /// Whether this is an interface declaration.
@@ -326,6 +328,10 @@ pub struct ClassInfo {
     pub private_fields: HashSet<String>,
     /// Names of private static fields.
     pub private_static_fields: HashSet<String>,
+    /// Names of internal (module-scoped) instance fields.
+    pub internal_fields: HashSet<String>,
+    /// Names of internal (module-scoped) static fields.
+    pub internal_static_fields: HashSet<String>,
     /// Instance methods keyed by name.
     pub methods: HashMap<String, MethodInfo>,
     /// Static methods keyed by name.
@@ -509,6 +515,7 @@ impl TypeChecker {
             };
             let info = ClassInfo {
                 name: ic.name.to_string(),
+                module: String::new(),
                 generic_params: ic
                     .generic_params
                     .iter()
@@ -525,6 +532,8 @@ impl TypeChecker {
                 instance_fields: Vec::new(),
                 static_fields: Vec::new(),
                 protected_fields: HashSet::new(),
+                internal_fields: HashSet::new(),
+                internal_static_fields: HashSet::new(),
                 protected_static_fields: HashSet::new(),
                 private_fields: HashSet::new(),
                 private_static_fields: HashSet::new(),
@@ -609,6 +618,7 @@ impl TypeChecker {
                     }
                     let mut info = ClassInfo {
                         name: c.name.clone(),
+                        module: c.module.clone(),
                         generic_params: c.generic_params.clone(),
                         is_interface: c.is_interface,
                         is_abstract: c.is_abstract,
@@ -619,6 +629,8 @@ impl TypeChecker {
                         instance_fields: Vec::new(),
                         static_fields: Vec::new(),
                         protected_fields: HashSet::new(),
+                        internal_fields: HashSet::new(),
+                        internal_static_fields: HashSet::new(),
                         protected_static_fields: HashSet::new(),
                         private_fields: HashSet::new(),
                         private_static_fields: HashSet::new(),
@@ -665,7 +677,10 @@ impl TypeChecker {
                                         Visibility::Private => {
                                             info.private_static_fields.insert(f.name.clone());
                                         }
-                                        Visibility::Public | Visibility::Internal => {}
+                                        Visibility::Internal => {
+                                            info.internal_static_fields.insert(f.name.clone());
+                                        }
+                                        Visibility::Public => {}
                                     }
                                     info.static_fields.push((f.name.clone(), f.ty.clone()));
                                 } else {
@@ -676,7 +691,10 @@ impl TypeChecker {
                                         Visibility::Private => {
                                             info.private_fields.insert(f.name.clone());
                                         }
-                                        Visibility::Public | Visibility::Internal => {}
+                                        Visibility::Internal => {
+                                            info.internal_fields.insert(f.name.clone());
+                                        }
+                                        Visibility::Public => {}
                                     }
                                     info.instance_fields.push((f.name.clone(), f.ty.clone()));
                                 }
@@ -1050,6 +1068,8 @@ impl TypeChecker {
                         Visibility::Private
                     } else if info.protected_fields.contains(field) {
                         Visibility::Protected
+                    } else if info.internal_fields.contains(field) {
+                        Visibility::Internal
                     } else {
                         Visibility::Public
                     };
@@ -1108,6 +1128,8 @@ impl TypeChecker {
                         Visibility::Private
                     } else if info.protected_static_fields.contains(field) {
                         Visibility::Protected
+                    } else if info.internal_static_fields.contains(field) {
+                        Visibility::Internal
                     } else {
                         Visibility::Public
                     };
@@ -1205,7 +1227,15 @@ impl TypeChecker {
                 current == declared_in || self.is_subclass_of(current, declared_in)
             }
             Visibility::Private => current == declared_in,
-            Visibility::Internal => true,
+            // Module-scoped: accessible only from classes declared in the
+            // same source module (file). Single-file programs put every
+            // class in one module, so `internal` is file-wide there.
+            Visibility::Internal => {
+                let module_of = |name: &str| {
+                    self.classes.get(name).map(|i| i.module.clone()).unwrap_or_default()
+                };
+                module_of(current) == module_of(declared_in)
+            }
         }
     }
 

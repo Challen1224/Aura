@@ -307,7 +307,20 @@
   - [x] `public` (default)
   - [x] `private`
   - [x] `protected`
-  - [ ] `internal` (module-scoped)
+  - [x] `internal` (module-scoped) — previously parsed but vacuously
+        public (`can_access` returned true unconditionally, and internal
+        FIELDS weren't even tracked). Now enforced with a minimal module
+        model: **module = source file**. The CLI accepts multiple files
+        (`aura run main.aura lib.aura`); declarations share one flat
+        namespace (no imports), and `internal` members (methods, static
+        methods, fields, static fields) are only accessible from classes
+        declared in the same file. Single-file programs put everything in
+        one module, so `internal` stays file-wide there — no behavior
+        change. All language features resolve across files (inheritance,
+        duck typing, literal unions, newtypes, generics); the builtin
+        `Exception` is deduplicated across parses and belongs to no
+        module. Verified under both tiers (aura-vm/tests/modules.rs,
+        examples/multifile/).
 
 **P1 - High Priority**
 - [x] **Abstract classes and methods**

@@ -1,0 +1,18 @@
+// The program file. Run both files together:
+//   aura run examples/multifile/main.aura examples/multifile/bank.aura
+//
+// These would be compile errors here (cross-module internal access):
+//   account.balance = 1000000;      // field `balance` is internal
+//   Audit.Log(account, "fake");     // static method `Log` is internal
+
+class Program {
+    static void Main() {
+        Account account = new Account("ada");
+        account.Deposit(120);
+        account.Deposit(30);
+        account.Withdraw(50);
+        print("final: ");
+        print(account.Balance());
+        println();
+    }
+}

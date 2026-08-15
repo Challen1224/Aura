@@ -723,6 +723,7 @@ impl<'a> Parser<'a> {
         // (fields `message` and `stackTrace`, populated by the VM on throw).
         decls.insert(0, Decl::Class(ClassDecl {
             name: "Exception".to_string(),
+            module: String::new(),
             generic_params: vec![],
             bases: vec![],
             is_interface: false,
@@ -811,6 +812,7 @@ impl<'a> Parser<'a> {
             // `record Point(int x, int y);` shorthand: no explicit members.
             return Ok(ClassDecl {
                 name,
+            module: String::new(),
                 generic_params,
                 bases,
                 is_interface,
@@ -832,6 +834,7 @@ impl<'a> Parser<'a> {
         self.consume(Token::RBrace, "expected `}`")?;
         Ok(ClassDecl {
             name,
+            module: String::new(),
             generic_params,
             bases,
             is_interface,

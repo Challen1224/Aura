@@ -37,11 +37,52 @@ pub enum CompileError {
 
 /// Compile source text into an Aura [`Module`].
 pub fn compile(source: &str, module_name: &str) -> Result<Module, CompileError> {
-    let (tokens, lines) = Lexer::new(source).lex().map_err(CompileError::Lex)?;
-    let ast = Parser::new(&tokens, &lines).parse().map_err(CompileError::Parse)?;
-    let ast = parser::expand_type_aliases(&ast).map_err(CompileError::Parse)?;
-    let typed = TypeChecker::new().check(&ast).map_err(|e| CompileError::Type(e.0))?;
-    let module = Emitter::new(module_name)
+    compile_files(&[(module_name.to_string(), source.to_string())], module_name)
+}
+
+/// Compile several source files into one program. Every declaration is
+/// visible from every file (flat namespace, no imports); each file is a
+/// module, and `internal` members are only accessible from classes declared
+/// in the same file. Single-file programs leave every class in the same
+/// module, so `internal` behaves as before there.
+pub fn compile_files(
+    files: &[(String, String)],
+    program_name: &str,
+) -> Result<Module, CompileError> {
+    let mut merged = ast::Program { decls: Vec::new() };
+    let tag = files.len() > 1;
+    for (idx, (name, source)) in files.iter().enumerate() {
+        let (tokens, lines) = Lexer::new(source)
+            .lex()
+            .map_err(|e| CompileError::Lex(format!("{}: {}", name, e)))?;
+        let ast = Parser::new(&tokens, &lines)
+            .parse()
+            .map_err(|e| CompileError::Parse(format!("{}: {}", name, e)))?;
+        let mut decls = ast.decls;
+        // Every parse injects the builtin `Exception` base class at index 0;
+        // keep only the first file's copy. (A user-declared Exception still
+        // collides with the builtin, exactly as in single-file programs.)
+        if idx > 0 {
+            if matches!(decls.first(), Some(ast::Decl::Class(c)) if c.name == "Exception" && c.module.is_empty())
+            {
+                decls.remove(0);
+            }
+        }
+        if tag {
+            for decl in &mut decls {
+                if let ast::Decl::Class(c) = decl {
+                    // The builtin stays module-less: it belongs to no file.
+                    if c.name != "Exception" {
+                        c.module = name.clone();
+                    }
+                }
+            }
+        }
+        merged.decls.extend(decls);
+    }
+    let merged = parser::expand_type_aliases(&merged).map_err(CompileError::Parse)?;
+    let typed = TypeChecker::new().check(&merged).map_err(|e| CompileError::Type(e.0))?;
+    let module = Emitter::new(program_name)
         .emit(&typed)
         .map_err(CompileError::Emit)?;
     Ok(module)
