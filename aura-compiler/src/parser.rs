@@ -315,6 +315,13 @@ fn expand(ty: &Type, aliases: &HashMap<String, TypeAliasDecl>, stack: &mut Vec<S
                 t => Type::Nullable(Box::new(t)),
             })
         }
+        Type::Func(params, ret) => {
+            let params = params
+                .iter()
+                .map(|t| expand(t, aliases, stack))
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok(Type::Func(params, Box::new(expand(ret, aliases, stack)?)))
+        }
         _ => Ok(ty.clone()),
     }
 }
@@ -331,6 +338,10 @@ fn substitute(ty: &Type, subst: &HashMap<String, Type>) -> Type {
         }
         Type::Tuple(types) => Type::Tuple(types.iter().map(|t| substitute(t, subst)).collect()),
         Type::Nullable(inner) => Type::Nullable(Box::new(substitute(inner, subst))),
+        Type::Func(params, ret) => Type::Func(
+            params.iter().map(|t| substitute(t, subst)).collect(),
+            Box::new(substitute(ret, subst)),
+        ),
         _ => ty.clone(),
     }
 }
@@ -503,6 +514,16 @@ fn expand_stmt(stmt: &mut Stmt, aliases: &HashMap<String, TypeAliasDecl>) -> Res
 fn expand_expr(expr: &mut Expr, aliases: &HashMap<String, TypeAliasDecl>) -> Result<(), String> {
     let expand_type = |ty: &Type| expand(ty, aliases, &mut Vec::new());
     match expr {
+        Expr::Lambda { params, body } => {
+            for (_, ty) in params.iter_mut() {
+                if let Some(t) = ty {
+                    *t = expand_type(t)?;
+                }
+            }
+            for st in body.iter_mut() {
+                expand_stmt(st, aliases)?;
+            }
+        }
         Expr::Cast(inner, ty) => {
             *ty = expand_type(ty)?;
             expand_expr(inner, aliases)?;
@@ -2656,6 +2677,12 @@ impl<'a> Parser<'a> {
                 if name == "this" && self.substitute_this {
                     name = "__self".to_string();
                 }
+                // Single-parameter lambda: `x => x + 1`.
+                if self.check(Token::FatArrow) {
+                    self.advance();
+                    let body = self.parse_lambda_body()?;
+                    return Ok(Expr::Lambda { params: vec![(name, None)], body });
+                }
                 // `_` in expression position is a typed hole: the checker
                 // reports the expected type and in-scope candidates.
                 if name == "_" && !self.check(Token::LParen) {
@@ -2685,6 +2712,11 @@ impl<'a> Parser<'a> {
                 }
             }
             Some(Token::LParen) => {
+                // Parenthesized lambda: `() => ...`, `(a, b) => ...`,
+                // `(int x) => ...` — decided by scanning for `) =>`.
+                if self.lookahead_is_lambda() {
+                    return self.parse_lambda_parenthesized();
+                }
                 self.advance();
                 let expr = self.parse_expr()?;
                 if self.match_token(Token::Comma) {
@@ -2708,6 +2740,76 @@ impl<'a> Parser<'a> {
             }
             Some(t) => Err(format!("line {}: unexpected token {}", self.cur_line(), t)),
             None => Err("unexpected end of input".to_string()),
+        }
+    }
+
+    /// True when the upcoming `(`...`)` is a lambda parameter list — i.e.
+    /// the matching close paren is immediately followed by `=>`.
+    fn lookahead_is_lambda(&self) -> bool {
+        let mut pos = self.pos;
+        if !matches!(self.tokens.get(pos), Some(Token::LParen)) {
+            return false;
+        }
+        pos += 1;
+        let mut depth = 1usize;
+        while pos < self.tokens.len() {
+            match &self.tokens[pos] {
+                Token::LParen => depth += 1,
+                Token::RParen => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return matches!(self.tokens.get(pos + 1), Some(Token::FatArrow));
+                    }
+                }
+                _ => {}
+            }
+            pos += 1;
+        }
+        false
+    }
+
+    /// Parse `(params) => body` with the cursor on `(`. A parameter is
+    /// `name` or `Type name`.
+    fn parse_lambda_parenthesized(&mut self) -> Result<Expr, String> {
+        self.consume(Token::LParen, "expected `(`")?;
+        let mut params: Vec<(String, Option<Type>)> = Vec::new();
+        while !self.check(Token::RParen) {
+            // `Type name` when two identifier-ish tokens are adjacent
+            // (`int x`, `List<int> xs`, `Outer.Inner v`); bare `name`
+            // otherwise.
+            let typed = match (self.peek(), self.tokens.get(self.pos + 1)) {
+                (Some(Token::Ident(_)), Some(Token::Ident(_))) => true,
+                (Some(Token::Ident(_)), Some(Token::Lt | Token::Dot)) => true,
+                (Some(t), _) if self.check_type_token(t) && !matches!(t, Token::Ident(_)) => true,
+                _ => false,
+            };
+            if typed {
+                let ty = self.parse_type()?;
+                let name = self.consume_ident("expected lambda parameter name")?;
+                params.push((name, Some(ty)));
+            } else {
+                let name = self.consume_ident("expected lambda parameter name")?;
+                params.push((name, None));
+            }
+            if !self.match_token(Token::Comma) {
+                break;
+            }
+        }
+        self.consume(Token::RParen, "expected `)`")?;
+        self.consume(Token::FatArrow, "expected `=>`")?;
+        let body = self.parse_lambda_body()?;
+        Ok(Expr::Lambda { params, body })
+    }
+
+    /// Lambda body after `=>`: a block, or an expression desugared to
+    /// `return expr;`.
+    fn parse_lambda_body(&mut self) -> Result<Vec<Stmt>, String> {
+        if self.check(Token::LBrace) {
+            self.advance();
+            self.parse_block()
+        } else {
+            let e = self.parse_expr()?;
+            Ok(vec![Stmt::Return(Some(e))])
         }
     }
 
@@ -2941,6 +3043,23 @@ impl<'a> Parser<'a> {
                 }
                 if let Some(ty) = numeric_type_from_name(&n) {
                     return Ok(ty);
+                }
+                // Function types: `Func<int, string>` (last argument is the
+                // return type), `Action<int>` / `Action` (void-returning).
+                if n == "Func" && self.check(Token::Lt) {
+                    let mut args = self.parse_type_args()?;
+                    if args.is_empty() {
+                        return Err("`Func` needs at least a return type".to_string());
+                    }
+                    let ret = args.pop().unwrap();
+                    return Ok(Type::Func(args, Box::new(ret)));
+                }
+                if n == "Action" {
+                    if self.check(Token::Lt) {
+                        let args = self.parse_type_args()?;
+                        return Ok(Type::Func(args, Box::new(Type::Unit)));
+                    }
+                    return Ok(Type::Func(Vec::new(), Box::new(Type::Unit)));
                 }
                 // Qualified nested-class name: `Outer.Inner`.
                 while matches!(self.peek(), Some(Token::Dot))

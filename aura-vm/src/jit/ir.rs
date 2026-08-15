@@ -691,6 +691,18 @@ impl<'a> Lowerer<'a> {
                 pop(stack, h)?;
                 push(stack, h, KType::Int);
             }
+            Op::NewClosure(_, count) => {
+                for _ in 0..*count {
+                    pop(stack, h)?;
+                }
+                push(stack, h, KType::Unknown);
+            }
+            Op::Invoke(argc) => {
+                for _ in 0..(*argc as usize + 1) {
+                    pop(stack, h)?;
+                }
+                push(stack, h, KType::Unknown);
+            }
             Op::Br(_) => {}
             Op::BrFalse(_) | Op::BrTrue(_) => {
                 pop(stack, h)?;
@@ -1191,6 +1203,30 @@ impl<'a> Lowerer<'a> {
                 let v = pop(stack)?;
                 let dst = self.new_vreg(KType::Bool);
                 helper!(Some(dst), op.clone(), vec![v]);
+                stack.push(dst);
+            }
+            Op::NewClosure(_, count) => {
+                let mut caps = Vec::with_capacity(*count as usize);
+                for _ in 0..*count {
+                    caps.push(pop(stack)?);
+                }
+                caps.reverse();
+                let dst = self.new_vreg(KType::Unknown);
+                helper!(Some(dst), op.clone(), caps);
+                stack.push(dst);
+            }
+            Op::Invoke(argc) => {
+                // Stack: args (in order), closure on top; the helper wants
+                // [closure, args...].
+                let closure = pop(stack)?;
+                let mut args = Vec::with_capacity(*argc as usize + 1);
+                for _ in 0..*argc {
+                    args.push(pop(stack)?);
+                }
+                args.reverse();
+                args.insert(0, closure);
+                let dst = self.new_vreg(KType::Unknown);
+                helper!(Some(dst), op.clone(), args);
                 stack.push(dst);
             }
             Op::Stsfld(..) => {

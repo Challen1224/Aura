@@ -1,0 +1,34 @@
+// Generic methods with multiple type parameters.
+//
+// Type arguments are inferred at the call site in two passes: ordinary
+// arguments bind what they can first, then lambda arguments are typed
+// against the partially-solved parameter — their parameter types come from
+// the bindings so far, and their body determines what is still open.
+// `transform(21, x => x * 2)` binds T1 = int from 21, types the lambda at
+// Func<int, T2>, and binds T2 = int from the body. Explicit type
+// arguments (`transform<int, string>(...)`) always work too.
+
+class Util {
+    static <T1, T2> T2 transform(T1 value, Func<T1, T2> converter) {
+        return converter(value);
+    }
+
+    static <K, V> string label(K key, V val, Func<K, string> show) {
+        return "{show(key)} = {val}";
+    }
+}
+
+class Program {
+    static void Main() {
+        print("doubled: "); print(Util.transform(21, x => x * 2)); println();
+
+        print("length:  "); print(Util.transform("hello", s => s.Length)); println();
+
+        string unit = "cm";
+        print("tagged:  "); print(Util.transform(180, n => "{n}{unit}")); println();
+
+        print("labeled: "); print(Util.label(7, true, k => "key{k}")); println();
+
+        print("explicit: "); print(Util.transform<int, int>(6, (int n) => n * 7)); println();
+    }
+}

@@ -407,6 +407,11 @@ pub enum Type {
     IntLit(i64),
     /// Untyped float literal carrying its value. Only ever inferred.
     FloatLit(f64),
+    /// Function type: `Func<int, string>` (last argument is the return
+    /// type) or `Action<int>` / `Action` (void-returning). Structural:
+    /// two function types are compatible exactly when their signatures
+    /// match. Erased to an opaque closure at runtime.
+    Func(Vec<Type>, Box<Type>),
 }
 
 impl Type {
@@ -446,6 +451,22 @@ impl Type {
             Type::Infer => "var".to_string(),
             Type::IntLit(v) => format!("int literal {}", v),
             Type::FloatLit(_) => "float literal".to_string(),
+            Type::Func(params, ret) => {
+                if **ret == Type::Unit {
+                    if params.is_empty() {
+                        "Action".to_string()
+                    } else {
+                        format!(
+                            "Action<{}>",
+                            params.iter().map(|t| t.name()).collect::<Vec<_>>().join(", ")
+                        )
+                    }
+                } else {
+                    let mut all: Vec<String> = params.iter().map(|t| t.name()).collect();
+                    all.push(ret.name());
+                    format!("Func<{}>", all.join(", "))
+                }
+            }
         }
     }
 
@@ -661,6 +682,17 @@ pub enum Expr {
     /// Error propagation: `expr?` unwraps a `Result`-like sum type, returning
     /// the error variant from the enclosing function when it does not match.
     TryUnwrap(Box<Expr>),
+    /// Lambda expression: `x => x + 1`, `(int a, int b) => a + b`,
+    /// `() => { ... }`. Parameters carry optional type annotations
+    /// (inferred from the target type otherwise). Expression bodies are
+    /// desugared to `[Return(Some(expr))]` at parse time. Captures outer
+    /// locals (and `this`) by value.
+    Lambda {
+        /// Parameter names with optional annotated types.
+        params: Vec<(String, Option<Type>)>,
+        /// Body statements.
+        body: Vec<Stmt>,
+    },
 }
 
 /// A part of an interpolated string.

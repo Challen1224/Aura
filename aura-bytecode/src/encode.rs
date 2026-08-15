@@ -302,6 +302,7 @@ fn write_type<W: Write>(w: &mut W, t: &TypeDesc) -> io::Result<()> {
         TypeDesc::Enum(_) => 16,
         TypeDesc::Tuple(_) => 17,
         TypeDesc::Nullable(_) => 19,
+        TypeDesc::Function => 20,
     };
     write_u8(w, tag)?;
     match t {
@@ -353,6 +354,7 @@ fn read_type<R: Read>(r: &mut R) -> io::Result<TypeDesc> {
         16 => TypeDesc::Enum(EnumId(read_u32(r)?)),
         17 => TypeDesc::Tuple(read_vec(r, |r| read_type(r))?),
         19 => TypeDesc::Nullable(Box::new(read_type(r)?)),
+        20 => TypeDesc::Function,
         _ => return Err(io::Error::new(io::ErrorKind::InvalidData, "bad type tag")),
     })
 }
@@ -475,6 +477,12 @@ fn write_op<W: Write>(w: &mut W, op: &Op) -> io::Result<()> {
         Op::StringConcat(count) => (102, count.to_le_bytes().to_vec()),
         Op::NativeCall(id) => (110, id.to_le_bytes().to_vec()),
         Op::IsInst(ClassId(id)) => (111, id.to_le_bytes().to_vec()),
+        Op::NewClosure(MethodId(id), count) => {
+            let mut b = id.to_le_bytes().to_vec();
+            b.extend_from_slice(&count.to_le_bytes());
+            (112, b)
+        }
+        Op::Invoke(argc) => (113, argc.to_le_bytes().to_vec()),
     };
     write_u8(w, code)?;
     w.write_all(&extra)
@@ -547,6 +555,12 @@ fn read_op<R: Read>(r: &mut R) -> io::Result<Op> {
         102 => Op::StringConcat(read_u16(r)?),
         110 => Op::NativeCall(read_u16(r)?),
         111 => Op::IsInst(ClassId(read_u32(r)?)),
+        112 => {
+            let id = read_u32(r)?;
+            let count = read_u16(r)?;
+            Op::NewClosure(MethodId(id), count)
+        }
+        113 => Op::Invoke(read_u16(r)?),
         _ => return Err(io::Error::new(io::ErrorKind::InvalidData, "bad opcode")),
     })
 }
@@ -665,6 +679,7 @@ fn encode_type_args(type_args: &[TypeDesc]) -> Vec<u8> {
                 continue;
             }
             TypeDesc::Null => 14,
+            TypeDesc::Function => 20,
             TypeDesc::GenericParam(idx) => {
                 v.extend(idx.to_le_bytes());
                 15
@@ -707,6 +722,7 @@ fn decode_type_args_one<R: Read>(r: &mut R) -> io::Result<TypeDesc> {
         16 => TypeDesc::Enum(EnumId(read_u32(r)?)),
         17 => TypeDesc::Tuple(vec![]),
         19 => TypeDesc::Nullable(Box::new(decode_type_args_one(r)?)),
+        20 => TypeDesc::Function,
         _ => return Err(io::Error::new(io::ErrorKind::InvalidData, "bad type tag")),
     })
 }

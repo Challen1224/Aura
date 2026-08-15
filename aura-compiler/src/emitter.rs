@@ -43,6 +43,14 @@ struct MethodEmitter<'a> {
     /// Source line of the statement currently being emitted (from the
     /// parser's `Stmt::Mark` markers), for error locations.
     current_line: usize,
+    /// Scratch scope for typing lambda bodies from `&self` contexts: name
+    /// -> type pairs consulted (last wins) before `local_types`.
+    type_overlay: std::cell::RefCell<Vec<(String, Type)>>,
+    /// Shared allocator for lifted-lambda method ids.
+    lambda_counter: &'a std::cell::RefCell<u32>,
+    /// Lambdas lifted out of this body: synthesized static methods
+    /// (captures as leading parameters) awaiting compilation.
+    lifted: Vec<(MethodId, MethodDecl)>,
 }
 
 impl Emitter {
@@ -222,6 +230,14 @@ impl Emitter {
             }
         }
 
+        // Lambda lifting: lambdas encountered during body emission reserve
+        // fresh method ids from this counter and queue their synthesized
+        // static methods here; each class drains its queue after its
+        // declared members (nested lambdas re-fill it).
+        let lambda_counter = std::cell::RefCell::new(self.next_method_id);
+        let lifted_cell: std::cell::RefCell<Vec<(MethodId, MethodDecl)>> =
+            std::cell::RefCell::new(Vec::new());
+
         let mut entrypoint: Option<MethodId> = None;
         for decl in &program.program.decls {
             if let Decl::Class(class) = decl {
@@ -288,6 +304,7 @@ impl Emitter {
                                 program, class, m, info, class_id, method_id, &method_ids,
                                 &class_ids, &enum_ids, &variant_lookup, &field_layouts,
                                 &class_generic_params, &constructor_ids, &mut module,
+                                &lambda_counter, &lifted_cell,
                             )?;
 
                             if m.is_static {
@@ -308,6 +325,7 @@ impl Emitter {
                                         program, class, &property_accessor_decl(class.name.clone(), p, true),
                                         info, class_id, accessor_id, &method_ids, &class_ids, &enum_ids,
                                         &variant_lookup, &field_layouts, &class_generic_params, &constructor_ids, &mut module,
+                                        &lambda_counter, &lifted_cell,
                                     )?,
                                 ));
                             }
@@ -321,6 +339,7 @@ impl Emitter {
                                         program, class, &property_accessor_decl(class.name.clone(), p, false),
                                         info, class_id, accessor_id, &method_ids, &class_ids, &enum_ids,
                                         &variant_lookup, &field_layouts, &class_generic_params, &constructor_ids, &mut module,
+                                        &lambda_counter, &lifted_cell,
                                     )?,
                                 ));
                             }
@@ -351,6 +370,7 @@ impl Emitter {
                         program, class, &primary, info, class_id, primary_id, &method_ids,
                         &class_ids, &enum_ids, &variant_lookup, &field_layouts,
                         &class_generic_params, &constructor_ids, &mut module,
+                        &lambda_counter, &lifted_cell,
                     )?;
                     methods.insert(primary_id, method_def);
                 }
@@ -372,8 +392,30 @@ impl Emitter {
                         program, class, &default, info, class_id, default_id, &method_ids,
                         &class_ids, &enum_ids, &variant_lookup, &field_layouts,
                         &class_generic_params, &constructor_ids, &mut module,
+                        &lambda_counter, &lifted_cell,
                     )?;
                     methods.insert(default_id, method_def);
+                }
+
+                // Compile lambdas lifted out of this class's bodies (a
+                // lifted body may itself contain lambdas, so loop).
+                loop {
+                    let pending: Vec<(MethodId, MethodDecl)> = {
+                        let mut cell = lifted_cell.borrow_mut();
+                        cell.drain(..).collect()
+                    };
+                    if pending.is_empty() {
+                        break;
+                    }
+                    for (lid, decl) in pending {
+                        let (lid, def) = self.build_method_def(
+                            program, class, &decl, info, class_id, lid, &method_ids,
+                            &class_ids, &enum_ids, &variant_lookup, &field_layouts,
+                            &class_generic_params, &constructor_ids, &mut module,
+                            &lambda_counter, &lifted_cell,
+                        )?;
+                        static_methods.insert(lid, def);
+                    }
                 }
 
                 module.classes.insert(
@@ -445,6 +487,8 @@ impl Emitter {
         class_generic_params: &[aura_bytecode::GenericParam],
         constructor_ids: &HashMap<String, Vec<MethodId>>,
         module: &mut Module,
+        lambda_counter: &std::cell::RefCell<u32>,
+        lifted_out: &std::cell::RefCell<Vec<(MethodId, MethodDecl)>>,
     ) -> Result<(MethodId, MethodDef), String> {
         let mut me = MethodEmitter::new(
             class_id,
@@ -458,8 +502,10 @@ impl Emitter {
             field_layouts,
             method_ids,
             constructor_ids,
+            lambda_counter,
         );
         me.emit_body()?;
+        lifted_out.borrow_mut().extend(me.lifted.drain(..));
 
         let mut method_def = MethodDef {
             name: m.name.clone(),
@@ -603,6 +649,7 @@ impl<'a> MethodEmitter<'a> {
         field_layout: &'a HashMap<String, Vec<(String, Type)>>,
         method_ids: &'a HashMap<(String, String, bool), MethodId>,
         constructor_ids: &'a HashMap<String, Vec<MethodId>>,
+        lambda_counter: &'a std::cell::RefCell<u32>,
     ) -> Self {
         let params: Vec<String> = method.params.iter().map(|p| p.name.clone()).collect();
         let mut locals = Vec::new();
@@ -637,6 +684,9 @@ impl<'a> MethodEmitter<'a> {
             constants: Vec::new(),
             method_ids,
             constructor_ids,
+            type_overlay: std::cell::RefCell::new(Vec::new()),
+            lambda_counter,
+            lifted: Vec::new(),
             break_targets: Vec::new(),
             continue_targets: Vec::new(),
             handlers: Vec::new(),
@@ -702,7 +752,8 @@ impl<'a> MethodEmitter<'a> {
         match stmt {
             Stmt::VarDecl(ty, name, init) => {
                 if let Some(init) = init {
-                    self.emit_expr(init)?;
+                    let target = if matches!(ty, Type::Infer) { None } else { Some(ty) };
+                    self.emit_expr_with_target(init, target)?;
                 } else {
                     self.ops.push(Op::LdNull);
                 }
@@ -745,7 +796,11 @@ impl<'a> MethodEmitter<'a> {
                 }
             }
             Stmt::Assign(target, value) => {
-                self.emit_expr(value)?;
+                let target_ty: Option<Type> = match target {
+                    AssignTarget::Local(name) => self.local_types.get(name).cloned(),
+                    _ => None,
+                };
+                self.emit_expr_with_target(value, target_ty.as_ref())?;
                 match target {
                     AssignTarget::Local(name) => {
                         let idx = self.local_index(name)?;
@@ -822,7 +877,8 @@ impl<'a> MethodEmitter<'a> {
                 self.current_line = *line;
             }
             Stmt::Return(Some(e)) => {
-                self.emit_expr(e)?;
+                let ret = self.method.return_ty.clone();
+                self.emit_expr_with_target(e, Some(&ret))?;
                 self.ops.push(Op::Ret);
             }
             Stmt::Return(None) => {
@@ -1296,10 +1352,14 @@ impl<'a> MethodEmitter<'a> {
             Expr::Null => self.ops.push(Op::LdNull),
             Expr::Var(name) => {
                 if name == "this" {
-                    if self.method.is_static {
+                    // Instance methods carry `this` in slot 0; a lifted
+                    // lambda that captured it carries it as a leading
+                    // parameter (also slot 0 by capture ordering).
+                    if let Some(idx) = self.locals.iter().rposition(|n| n == "this") {
+                        self.ops.push(Op::Ldloc(idx as u16));
+                    } else {
                         return Err("`this` in static method".to_string());
                     }
-                    self.ops.push(Op::Ldloc(0));
                 } else if name == "super" {
                     return Err("`super` must be used as `super.member`".to_string());
                 } else if let Some(idx) = self.locals.iter().rposition(|n| n == name) {
@@ -1534,6 +1594,9 @@ impl<'a> MethodEmitter<'a> {
                     }
                 }
             }
+            Expr::Lambda { params, body } => {
+                self.emit_lambda(params, body, None)?;
+            }
             Expr::Call(call) => {
                 if call.class_or_target == "__intrinsics" {
                     if call.method == "print" {
@@ -1566,9 +1629,7 @@ impl<'a> MethodEmitter<'a> {
                                         call.method, class_name
                                     )
                                 })?;
-                                for arg in &call.args {
-                                    self.emit_expr(arg)?;
-                                }
+                                self.emit_call_args(call)?;
                                 self.ops.push(Op::Call(method_id));
                             } else {
                                 if let Some(ext) = self.extension_call_owner(target, &call.method) {
@@ -1590,9 +1651,7 @@ impl<'a> MethodEmitter<'a> {
                                 }
                                 // Instance call on local/field variable.
                                 // Push arguments first, then the instance.
-                                for arg in &call.args {
-                                    self.emit_expr(arg)?;
-                                }
+                                self.emit_call_args(call)?;
                                 self.emit_expr(target)?;
                                 self.ops.push(Op::CallVirt(call.method.clone()));
                             }
@@ -1615,12 +1674,27 @@ impl<'a> MethodEmitter<'a> {
                                 return Ok(());
                             }
                             // Push arguments first, then the instance.
-                            for arg in &call.args {
-                                self.emit_expr(arg)?;
-                            }
+                            self.emit_call_args(call)?;
                             self.emit_expr(target)?;
                             self.ops.push(Op::CallVirt(call.method.clone()));
                         }
+                    } else if matches!(
+                        self.local_types.get(&call.class_or_target),
+                        Some(Type::Func(..))
+                    ) {
+                        // Calling a function-typed local: `f(2)` — arguments,
+                        // then the closure on top, then Invoke.
+                        let Some(Type::Func(ps, _)) =
+                            self.local_types.get(&call.class_or_target).cloned()
+                        else {
+                            unreachable!()
+                        };
+                        for (arg, pty) in call.args.iter().zip(&ps) {
+                            self.emit_expr_with_target(arg, Some(pty))?;
+                        }
+                        let idx = self.local_index(&call.class_or_target)?;
+                        self.ops.push(Op::Ldloc(idx));
+                        self.ops.push(Op::Invoke(call.args.len() as u16));
                     } else if self.program.newtypes.contains_key(&call.method) {
                         // Newtype constructor: fully erased — the wrapped
                         // expression is the value.
@@ -1652,9 +1726,7 @@ impl<'a> MethodEmitter<'a> {
                             }
                             self.ops.push(Op::NewEnum(enum_id, variant_idx));
                         } else {
-                            for arg in &call.args {
-                                self.emit_expr(arg)?;
-                            }
+                            self.emit_call_args(call)?;
                             // Bare static method call: `foo(args)` without a
                             // class qualifier resolves to the current class.
                             let owner = if self.class_ids.contains_key(&call.class_or_target) {
@@ -2411,7 +2483,12 @@ impl<'a> MethodEmitter<'a> {
         match expr {
             Expr::Var(name) => {
                 if name == "this" {
-                    if self.method.is_static {
+                    // A lifted lambda that captured `this` carries it as an
+                    // ordinary typed parameter; instance methods answer with
+                    // the enclosing class.
+                    if let Some(Type::Class(c, _)) = self.local_types.get("this") {
+                        Some(c.clone())
+                    } else if self.method.is_static {
                         None
                     } else {
                         Some(self.class_name.to_string())
@@ -2514,6 +2591,243 @@ impl<'a> MethodEmitter<'a> {
     fn is_record_type(&self, ty: &Type) -> bool {
         matches!(ty, Type::Class(name, _)
             if self.program.classes.get(name).map(|c| c.is_record).unwrap_or(false))
+    }
+
+    /// Emit an expression that may be a target-typed lambda.
+    fn emit_expr_with_target(&mut self, e: &Expr, target: Option<&Type>) -> Result<(), String> {
+        if let Expr::Lambda { params, body } = e {
+            return self.emit_lambda(params, body, target);
+        }
+        self.emit_expr(e)
+    }
+
+    /// Compile a lambda: lift it to a fresh static method whose leading
+    /// parameters are the captured locals (`this` first), queue that method
+    /// for emission, and emit `NewClosure` over the captured values here.
+    fn emit_lambda(
+        &mut self,
+        params: &[(String, Option<Type>)],
+        body: &[Stmt],
+        target: Option<&Type>,
+    ) -> Result<(), String> {
+        let exp: Option<(Vec<Type>, Type)> = match target {
+            Some(Type::Func(p, r)) => Some((p.clone(), (**r).clone())),
+            Some(Type::Nullable(inner)) => match inner.as_ref() {
+                Type::Func(p, r) => Some((p.clone(), (**r).clone())),
+                _ => None,
+            },
+            _ => None,
+        };
+        let mut ptys: Vec<Type> = Vec::with_capacity(params.len());
+        for (i, (n, ann)) in params.iter().enumerate() {
+            let t = match (ann, &exp) {
+                (Some(t), _) => t.clone(),
+                (None, Some((eps, _))) => eps
+                    .get(i)
+                    .cloned()
+                    .ok_or_else(|| format!("lambda parameter `{}` has no matching target", n))?,
+                (None, None) => {
+                    return Err(format!(
+                        "cannot determine the type of lambda parameter `{}`",
+                        n
+                    ));
+                }
+            };
+            ptys.push(t);
+        }
+        // An expected return type naming an unbound method type parameter
+        // (two-pass inference left it open) is resolved from the body, like
+        // the no-target case.
+        let ret_open = |t: &Type| -> bool {
+            matches!(t, Type::GenericParam(_))
+                || matches!(t, Type::Class(n, a) if a.is_empty()
+                    && !self.program.classes.contains_key(n)
+                    && !self.program.enums.contains_key(n)
+                    && !self.program.newtypes.contains_key(n))
+        };
+        let expected_ret = exp.as_ref().map(|(_, r)| r.clone());
+        let ret = match expected_ret {
+            Some(r) if !ret_open(&r) => r,
+            _ => {
+                let [Stmt::Return(Some(e))] = body else {
+                    return Err("block-bodied lambda needs a target type".to_string());
+                };
+                let mut saved: Vec<(String, Option<Type>)> = Vec::new();
+                for ((n, _), t) in params.iter().zip(&ptys) {
+                    saved.push((n.clone(), self.local_types.insert(n.clone(), t.clone())));
+                }
+                let r = self.expr_ty(e).map(widen_literal).unwrap_or(Type::Unit);
+                for (n, old) in saved {
+                    match old {
+                        Some(v) => {
+                            self.local_types.insert(n, v);
+                        }
+                        None => {
+                            self.local_types.remove(&n);
+                        }
+                    }
+                }
+                r
+            }
+        };
+        // Captures: free variables of the body naming enclosing locals,
+        // `this` first (so field-access shortcuts that assume slot 0 keep
+        // working in the lifted body), then declaration order.
+        let bound: std::collections::HashSet<String> =
+            params.iter().map(|(n, _)| n.clone()).collect();
+        let mut free: Vec<String> = Vec::new();
+        collect_free_vars_stmts(body, &bound, &mut free);
+        let mut captures: Vec<String> = Vec::new();
+        if free.iter().any(|n| n == "this") && self.locals.iter().any(|l| l == "this") {
+            captures.push("this".to_string());
+        }
+        for l in &self.locals {
+            if l != "this" && free.iter().any(|f| f == l) && !captures.contains(l) {
+                captures.push(l.clone());
+            }
+        }
+        let id = {
+            let mut c = self.lambda_counter.borrow_mut();
+            let v = *c;
+            *c += 1;
+            MethodId(v)
+        };
+        let mut lifted_params: Vec<crate::ast::Param> = Vec::new();
+        for c in &captures {
+            let ty = self
+                .local_types
+                .get(c)
+                .cloned()
+                .unwrap_or_else(|| Type::Class(self.class_name.to_string(), Vec::new()));
+            lifted_params.push(crate::ast::Param { name: c.clone(), ty });
+        }
+        for ((n, _), t) in params.iter().zip(&ptys) {
+            lifted_params.push(crate::ast::Param { name: n.clone(), ty: t.clone() });
+        }
+        // `Action` with an expression body: the expression is a statement.
+        let lifted_body: Vec<Stmt> = if ret == Type::Unit {
+            if let [Stmt::Return(Some(e))] = body {
+                vec![Stmt::Expr(e.clone())]
+            } else {
+                body.to_vec()
+            }
+        } else {
+            body.to_vec()
+        };
+        self.lifted.push((
+            id,
+            MethodDecl {
+                is_static: true,
+                visibility: crate::ast::Visibility::Public,
+                is_virtual: false,
+                is_override: false,
+                is_abstract: false,
+                is_final: false,
+                is_constructor: false,
+                constructor_chain: None,
+                generic_params: Vec::new(),
+                return_ty: ret,
+                name: format!("__lambda{}", id.0),
+                params: lifted_params,
+                body: lifted_body,
+            },
+        ));
+        for c in &captures {
+            self.emit_expr(&Expr::Var(c.clone()))?;
+        }
+        self.ops.push(Op::NewClosure(id, captures.len() as u16));
+        Ok(())
+    }
+
+    /// Parameter types of the method a call resolves to, with the
+    /// receiver's class-level substitution applied — used to target-type
+    /// lambda arguments. Mirrors `call_return_type`'s resolution.
+    fn call_param_types(&self, call: &CallExpr) -> Option<Vec<Type>> {
+        if !call.args.iter().any(|a| matches!(a, Expr::Lambda { .. })) {
+            return None;
+        }
+        let (class_name, is_instance, receiver_type_args): (String, bool, Vec<Type>) =
+            if let Some(t) = &call.target {
+                if let Expr::Var(c) = t.as_ref() {
+                    if self.class_ids.contains_key(c) {
+                        (c.clone(), false, Vec::new())
+                    } else {
+                        match Self::strip_nullable(self.expr_ty(t).ok()?) {
+                            Type::Class(c, args) => (c, true, args),
+                            _ => return None,
+                        }
+                    }
+                } else {
+                    match Self::strip_nullable(self.expr_ty(t).ok()?) {
+                        Type::Class(c, args) => (c, true, args),
+                        _ => return None,
+                    }
+                }
+            } else if self.class_ids.contains_key(&call.class_or_target) {
+                (call.class_or_target.clone(), false, Vec::new())
+            } else {
+                (self.class_name.to_string(), false, Vec::new())
+            };
+        let subst = self
+            .program
+            .classes
+            .get(&class_name)
+            .filter(|_| !receiver_type_args.is_empty())
+            .map(|info| build_subst(&info.generic_params, &receiver_type_args))
+            .unwrap_or_default();
+        let mut cur = Some(class_name);
+        while let Some(c) = cur {
+            let info = self.program.classes.get(&c)?;
+            let table = if is_instance { &info.methods } else { &info.static_methods };
+            if let Some(mi) = table.get(&call.method) {
+                // Mirror the typer's two-pass inference: non-lambda
+                // arguments bind the method's type parameters before the
+                // lambda targets are computed.
+                let mut subst = subst.clone();
+                if !mi.generic_params.is_empty() {
+                    let vars: std::collections::HashSet<String> =
+                        mi.generic_params.iter().map(|g| g.name.clone()).collect();
+                    let mut bindings = HashMap::new();
+                    for (param, arg) in mi.params.iter().zip(call.args.iter()) {
+                        if matches!(arg, Expr::Lambda { .. }) {
+                            continue;
+                        }
+                        if let Ok(at) = self.expr_ty(arg) {
+                            let p = substitute_type(param, &subst);
+                            crate::typer::unify_generic_types(
+                                &p,
+                                &widen_literal(at),
+                                &vars,
+                                &mut bindings,
+                                &mut |_, prev, _| Some(prev),
+                            );
+                        }
+                    }
+                    for (k, v) in bindings {
+                        subst.insert(k, v);
+                    }
+                }
+                return Some(
+                    mi.params
+                        .iter()
+                        .map(|p| substitute_type(p, &subst))
+                        .collect(),
+                );
+            }
+            cur = info.super_class.clone();
+        }
+        None
+    }
+
+    /// Emit call arguments, target-typing any lambda arguments by the
+    /// resolved parameter types.
+    fn emit_call_args(&mut self, call: &CallExpr) -> Result<(), String> {
+        let ptys = self.call_param_types(call);
+        for (i, arg) in call.args.iter().enumerate() {
+            let target = ptys.as_ref().and_then(|p| p.get(i));
+            self.emit_expr_with_target(arg, target)?;
+        }
+        Ok(())
     }
 
     /// Mirror of the typer's construction-site inference (`new Box(42)` ->
@@ -2675,7 +2989,15 @@ impl<'a> MethodEmitter<'a> {
             Expr::String(_) | Expr::InterpolatedString(_) => Type::String,
             Expr::Null => Type::Class("null".to_string(), Vec::new()),
             Expr::Var(name) => {
-                if name == "this" && !self.method.is_static {
+                if let Some((_, t)) = self
+                    .type_overlay
+                    .borrow()
+                    .iter()
+                    .rev()
+                    .find(|(n, _)| n == name)
+                {
+                    t.clone()
+                } else if name == "this" && !self.method.is_static {
                     Type::Class(self.class_name.to_string(), Vec::new())
                 } else {
                     self.local_types
@@ -2827,6 +3149,40 @@ impl<'a> MethodEmitter<'a> {
                     t
                 }
             }
+            Expr::Lambda { params, body } => {
+                // Only self-sufficient lambdas can be typed contextlessly:
+                // annotated parameters with an expression body. The
+                // parameters become visible to the body through the type
+                // overlay (expr_ty takes `&self`).
+                let mut ptys = Vec::with_capacity(params.len());
+                for (n, ann) in params {
+                    match ann {
+                        Some(t) => ptys.push(t.clone()),
+                        None => {
+                            return Err(format!(
+                                "cannot infer the type of lambda parameter `{}` here",
+                                n
+                            ));
+                        }
+                    }
+                }
+                let [Stmt::Return(Some(e))] = &body[..] else {
+                    return Err("block-bodied lambda needs a target type".to_string());
+                };
+                {
+                    let mut overlay = self.type_overlay.borrow_mut();
+                    for ((n, _), t) in params.iter().zip(&ptys) {
+                        overlay.push((n.clone(), t.clone()));
+                    }
+                }
+                let ret = self.expr_ty(e).map(widen_literal);
+                {
+                    let mut overlay = self.type_overlay.borrow_mut();
+                    let keep = overlay.len() - params.len();
+                    overlay.truncate(keep);
+                }
+                Type::Func(ptys, Box::new(ret?))
+            }
             _ => Type::Class("null".to_string(), Vec::new()),
         };
         Ok(ty)
@@ -2890,6 +3246,10 @@ impl<'a> MethodEmitter<'a> {
                 _ => Ok(Type::Unit),
             };
         } else {
+            // A bare call may invoke a function-typed local: `f(2)`.
+            if let Some(Type::Func(_, ret)) = self.local_types.get(&call.class_or_target) {
+                return Ok((**ret).clone());
+            }
             // Newtype constructors type as the newtype itself.
             if let Some(underlying) = self.program.newtypes.get(&call.method) {
                 return Ok(Type::Newtype(call.method.clone(), Box::new(underlying.clone())));
@@ -3175,9 +3535,255 @@ fn static_field_init(class: &ClassDecl, name: &str) -> Option<aura_bytecode::Con
     None
 }
 
+
+/// Widen transient literal marker types to their carrier types.
+fn widen_literal(t: Type) -> Type {
+    match t {
+        Type::IntLit(v) => {
+            if v >= i32::MIN as i64 && v <= i32::MAX as i64 {
+                Type::Int32
+            } else {
+                Type::Int64
+            }
+        }
+        Type::FloatLit(_) => Type::Float64,
+        Type::StringLit(_) => Type::String,
+        other => other,
+    }
+}
+
+fn push_unique(out: &mut Vec<String>, name: &str) {
+    if !out.iter().any(|n| n == name) {
+        out.push(name.to_string());
+    }
+}
+
+/// Collect free variable references (including `this` and bare-call
+/// targets) in statement order. `bound` names are not free; declarations
+/// bind for the remainder of their scope. Over-approximation is safe: the
+/// caller intersects with the enclosing method's locals.
+fn collect_free_vars_stmts(
+    stmts: &[Stmt],
+    bound: &std::collections::HashSet<String>,
+    out: &mut Vec<String>,
+) {
+    let mut bound = bound.clone();
+    for stmt in stmts {
+        match stmt {
+            Stmt::VarDecl(_, name, init) => {
+                if let Some(e) = init {
+                    collect_free_vars_expr(e, &bound, out);
+                }
+                bound.insert(name.clone());
+            }
+            Stmt::TupleDecl(names, e) => {
+                collect_free_vars_expr(e, &bound, out);
+                for n in names {
+                    bound.insert(n.clone());
+                }
+            }
+            Stmt::Expr(e) | Stmt::Throw(e) => collect_free_vars_expr(e, &bound, out),
+            Stmt::Assign(target, e) => {
+                match target {
+                    AssignTarget::Local(n) => {
+                        if !bound.contains(n) {
+                            push_unique(out, n);
+                        }
+                    }
+                    AssignTarget::Field(obj, _) => collect_free_vars_expr(obj, &bound, out),
+                    AssignTarget::StaticField(..) | AssignTarget::SuperField(_) => {}
+                }
+                collect_free_vars_expr(e, &bound, out);
+            }
+            Stmt::Return(e) => {
+                if let Some(e) = e {
+                    collect_free_vars_expr(e, &bound, out);
+                }
+            }
+            Stmt::If(c, a, b) => {
+                collect_free_vars_expr(c, &bound, out);
+                collect_free_vars_stmts(a, &bound, out);
+                if let Some(b) = b {
+                    collect_free_vars_stmts(b, &bound, out);
+                }
+            }
+            Stmt::IfLet(pat, e, a, b) => {
+                collect_free_vars_expr(e, &bound, out);
+                let mut inner = bound.clone();
+                collect_pattern_bindings(pat, &mut inner);
+                let inner_stmts = a;
+                {
+                    let saved = inner;
+                    collect_free_vars_stmts(inner_stmts, &saved, out);
+                }
+                if let Some(b) = b {
+                    collect_free_vars_stmts(b, &bound, out);
+                }
+            }
+            Stmt::While { condition, body, .. } => {
+                collect_free_vars_expr(condition, &bound, out);
+                collect_free_vars_stmts(body, &bound, out);
+            }
+            Stmt::DoWhile { body, condition, .. } => {
+                collect_free_vars_stmts(body, &bound, out);
+                collect_free_vars_expr(condition, &bound, out);
+            }
+            Stmt::For { init, condition, update, body, .. } => {
+                // The init statement's binding scopes over the rest.
+                let mut seq: Vec<Stmt> = Vec::with_capacity(3 + body.len());
+                seq.push((**init).clone());
+                seq.push(Stmt::Expr(condition.clone()));
+                seq.extend(body.iter().cloned());
+                seq.push((**update).clone());
+                collect_free_vars_stmts(&seq, &bound, out);
+            }
+            Stmt::ForIn { var_name, iterable, body, .. } => {
+                collect_free_vars_expr(iterable, &bound, out);
+                let mut inner = bound.clone();
+                inner.insert(var_name.clone());
+                collect_free_vars_stmts(body, &inner, out);
+            }
+            Stmt::Block(b) => collect_free_vars_stmts(b, &bound, out),
+            Stmt::Try { try_body, catches, finally_body } => {
+                collect_free_vars_stmts(try_body, &bound, out);
+                for c in catches {
+                    let mut inner = bound.clone();
+                    inner.insert(c.name.clone());
+                    collect_free_vars_stmts(&c.body, &inner, out);
+                }
+                if let Some(f) = finally_body {
+                    collect_free_vars_stmts(f, &bound, out);
+                }
+            }
+            Stmt::Using { name, expr, body, .. } => {
+                collect_free_vars_expr(expr, &bound, out);
+                let mut inner = bound.clone();
+                if let Some(n) = name {
+                    inner.insert(n.clone());
+                }
+                collect_free_vars_stmts(body, &inner, out);
+            }
+            Stmt::Mark(_) | Stmt::Break(_) | Stmt::Continue(_) => {}
+        }
+    }
+}
+
+fn collect_pattern_bindings(pat: &Pattern, bound: &mut std::collections::HashSet<String>) {
+    match pat {
+        Pattern::Binding(n) => {
+            bound.insert(n.clone());
+        }
+        Pattern::EnumVariant(_, _, subs) | Pattern::RecordClass(_, subs) => {
+            for sp in subs {
+                collect_pattern_bindings(sp, bound);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn collect_free_vars_expr(
+    e: &Expr,
+    bound: &std::collections::HashSet<String>,
+    out: &mut Vec<String>,
+) {
+    match e {
+        Expr::Var(n) => {
+            if !bound.contains(n) {
+                push_unique(out, n);
+            }
+        }
+        Expr::Lambda { params, body } => {
+            let mut inner = bound.clone();
+            for (n, _) in params {
+                inner.insert(n.clone());
+            }
+            collect_free_vars_stmts(body, &inner, out);
+        }
+        Expr::Call(c) | Expr::NullConditionalCall(c) => {
+            if c.target.is_none() && !bound.contains(&c.class_or_target) {
+                // A bare call may name a function-typed local.
+                push_unique(out, &c.class_or_target);
+            }
+            if let Some(t) = &c.target {
+                collect_free_vars_expr(t, bound, out);
+            }
+            for a in &c.args {
+                collect_free_vars_expr(a, bound, out);
+            }
+        }
+        Expr::Field(obj, _) | Expr::NullConditionalField(obj, _) => {
+            collect_free_vars_expr(obj, bound, out)
+        }
+        Expr::Binary(_, a, b) | Expr::NullCoalesce(a, b) | Expr::Range(a, b, _) => {
+            collect_free_vars_expr(a, bound, out);
+            collect_free_vars_expr(b, bound, out);
+        }
+        Expr::Unary(_, x)
+        | Expr::NonNullAssert(x)
+        | Expr::Cast(x, _)
+        | Expr::TryUnwrap(x)
+        | Expr::TupleIndex(x, _) => collect_free_vars_expr(x, bound, out),
+        Expr::Is(x, _, _) => collect_free_vars_expr(x, bound, out),
+        Expr::Ternary(c, a, b) => {
+            collect_free_vars_expr(c, bound, out);
+            collect_free_vars_expr(a, bound, out);
+            collect_free_vars_expr(b, bound, out);
+        }
+        Expr::New(_, _, args) | Expr::EnumVariant(_, _, args) | Expr::SuperCall(_, args) => {
+            for a in args {
+                collect_free_vars_expr(a, bound, out);
+            }
+        }
+        Expr::Tuple(xs) => {
+            for x in xs {
+                collect_free_vars_expr(x, bound, out);
+            }
+        }
+        Expr::Match(subject, arms) => {
+            collect_free_vars_expr(subject, bound, out);
+            for arm in arms {
+                let mut inner = bound.clone();
+                for p in &arm.patterns {
+                    collect_pattern_bindings(p, &mut inner);
+                }
+                if let Some(g) = &arm.guard {
+                    collect_free_vars_expr(g, &inner, out);
+                }
+                collect_free_vars_expr(&arm.body, &inner, out);
+            }
+        }
+        Expr::With(x, sets) => {
+            collect_free_vars_expr(x, bound, out);
+            for (_, v) in sets {
+                collect_free_vars_expr(v, bound, out);
+            }
+        }
+        Expr::Block(b) => collect_free_vars_stmts(b, bound, out),
+        Expr::InterpolatedString(parts) => {
+            for p in parts {
+                if let InterpPart::Expr(x) = p {
+                    collect_free_vars_expr(x, bound, out);
+                }
+            }
+        }
+        Expr::IntLit(..)
+        | Expr::FloatLit(..)
+        | Expr::Bool(_)
+        | Expr::Char(_)
+        | Expr::String(_)
+        | Expr::Null
+        | Expr::StaticField(..)
+        | Expr::SuperField(_)
+        | Expr::Hole => {}
+    }
+}
+
 fn map_type(ty: &Type, class_ids: &HashMap<String, ClassId>, enum_ids: &HashMap<String, EnumId>, generic_params: &[aura_bytecode::GenericParam]) -> TypeDesc {
     match ty {
         Type::Nullable(inner) => TypeDesc::Nullable(Box::new(map_type(inner, class_ids, enum_ids, generic_params))),
+        // Function signatures are erased: closures are opaque at runtime.
+        Type::Func(..) => TypeDesc::Function,
         // Newtypes are fully erased: at runtime a value of `Newtype` IS its
         // underlying primitive.
         Type::Newtype(_, inner) => map_type(inner, class_ids, enum_ids, generic_params),

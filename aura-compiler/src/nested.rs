@@ -140,6 +140,10 @@ impl Ctx<'_> {
             Type::Tuple(ts) => Type::Tuple(ts.iter().map(|a| self.ty(a)).collect()),
             Type::Nullable(inner) => Type::Nullable(Box::new(self.ty(inner))),
             Type::Newtype(n, inner) => Type::Newtype(n.clone(), Box::new(self.ty(inner))),
+            Type::Func(params, ret) => Type::Func(
+                params.iter().map(|t| self.ty(t)).collect(),
+                Box::new(self.ty(ret)),
+            ),
             other => other.clone(),
         }
     }
@@ -423,6 +427,13 @@ impl Ctx<'_> {
                     })
                     .collect(),
             ),
+            Expr::Lambda { params, body } => Expr::Lambda {
+                params: params
+                    .iter()
+                    .map(|(n, t)| (n.clone(), t.as_ref().map(|t| self.ty(t))))
+                    .collect(),
+                body: self.stmts(body),
+            },
             Expr::IntLit(..)
             | Expr::FloatLit(..)
             | Expr::Bool(_)

@@ -720,6 +720,42 @@ impl Vm {
                         FrameResult::Exception(e) => pending = Some(e),
                     }
                 }
+                Op::NewClosure(method, count) => {
+                    // Captures were pushed in capture order.
+                    let captured = self.pop_args(count as usize)?;
+                    let handle = self
+                        .heap
+                        .allocate(AuraObject::Closure { method, captured });
+                    self.push(Value::Object(handle));
+                }
+                Op::Invoke(argc) => {
+                    // Arguments were pushed in order, the closure on top.
+                    let closure = self.pop()?;
+                    let Value::Object(handle) = closure else {
+                        return Err(VmError::TypeMismatch {
+                            expected: "function",
+                            got: closure.type_name().into(),
+                        });
+                    };
+                    let (method, captured) = match self.heap.get(handle)? {
+                        AuraObject::Closure { method, captured } => {
+                            (*method, captured.clone())
+                        }
+                        _ => {
+                            return Err(VmError::TypeMismatch {
+                                expected: "function",
+                                got: "object".into(),
+                            });
+                        }
+                    };
+                    let args = self.pop_args(argc as usize)?;
+                    let mut argv = captured;
+                    argv.extend(args);
+                    match self.invoke_frame(method, argv)? {
+                        FrameResult::Normal(v) => self.push(v),
+                        FrameResult::Exception(e) => pending = Some(e),
+                    }
+                }
                 Op::CallVirt(name) => {
                     // The compiler pushes arguments first, then the instance.
                     // Pop the instance, resolve the method, then pop the arguments.

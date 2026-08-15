@@ -689,10 +689,55 @@
       constructor unification — every recently landed feature (variance,
       constraints, inference) makes that easier, not harder.
 
-- [ ] **Generic methods with multiple type parameters**
+- [x] **First-class function types and lambdas**
   ```aura
-  T2 transform<T1, T2>(T1 value, Func<T1, T2> converter) { }
+  Func<int, int> double = x => x * 2;      // last type arg = return type
+  var add = (int a, int b) => a + b;       // annotated lambdas self-infer
+  Action<string> log = s => { ... };       // void-returning
   ```
+  Lambdas (`x => expr`, parenthesized/typed parameter lists, block
+  bodies) capture enclosing locals and `this` **by value** — assigning
+  to a captured variable is a compile error with a pointed message.
+  Target-typed from `Func<...>`/`Action<...>` contexts (declarations,
+  assignments, returns, call arguments); fully annotated
+  expression-body lambdas self-infer, so `var` works. Compilation lifts
+  each lambda to a synthesized static method whose leading parameters
+  are its captures (`this` first), so lambda bodies tier up in the JIT
+  like any method; a closure is a GC-traced heap object pairing the
+  lifted method with its captured values (`Op::NewClosure`), and calls
+  go through `Op::Invoke` — implemented natively in the interpreter and
+  via the existing helper mechanism in JIT code, so **both tiers run
+  closures**. Nested lambdas (currying: `a => (int b) => a + b`)
+  capture outer-lambda parameters transitively. Function values are
+  first-class: reassignable, passable, returnable, storable. Not
+  included, documented: calling a call result directly
+  (`curry(1)(2)` — bind it to a local first), method references
+  (`Program.Max` as a value), lambdas as arguments binding *generic*
+  method type parameters (annotate the lambda instead), and capture by
+  reference. Verified under both tiers (aura-vm/tests/lambdas.rs,
+  examples/lambdas.aura).
+
+- [x] **Generic methods with multiple type parameters**
+  ```aura
+  static <T1, T2> T2 transform(T1 value, Func<T1, T2> converter) { ... }
+  Util.transform(21, x => x * 2);   // T1 = int from 21, T2 = int from the body
+  ```
+  Multiple type parameters already declared/inferred/explicitly-applied
+  fine; this item landed the piece the sketch actually needs —
+  **two-pass call-site inference over lambda arguments** (the exclusion
+  documented when lambdas shipped). Non-lambda arguments bind what they
+  can first; each lambda argument is then target-typed by the partially
+  substituted parameter: its parameter types must be resolved by that
+  point, while a return type still naming an open type parameter is
+  determined by the lambda's body and flows into the bindings
+  (`transform(7, n => "n={n}")` makes T2 = string). Annotated lambdas
+  and explicit type arguments work as before; a lambda nothing
+  constrains still asks for annotations, and conflicts with inferred
+  bindings are errors. Mirrored in the emitter (same unification pass)
+  so lifted signatures match. Open-return inference needs expression
+  bodies; block-bodied lambdas want a concrete target. Verified under
+  both tiers (aura-vm/tests/multi_param_generics.rs,
+  examples/multi_param_generics.aura).
 
 - [ ] **Generic constraints with multiple bounds**
   ```aura

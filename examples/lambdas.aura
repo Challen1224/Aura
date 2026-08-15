@@ -1,0 +1,46 @@
+// First-class function types and lambdas.
+//
+// `Func<int, string>` is a function taking an int and returning a string
+// (the last type argument is the return type); `Action<T>` returns void.
+// Lambdas write `x => expr`, `(int a, int b) => expr`, or a block body,
+// and capture enclosing locals and `this` **by value** — assigning to a
+// captured variable inside the lambda is a compile error. Under the hood
+// each lambda becomes an ordinary static method with its captures as
+// leading parameters, so lambda bodies JIT like any other code.
+
+class Greeter {
+    string name;
+    Greeter(string name) { this.name = name; }
+    Func<string, string> prefixer() {
+        return msg => "{this.name}: {msg}";
+    }
+}
+
+class Program {
+    static int apply(Func<int, int> f, int v) { return f(v); }
+
+    static void Main() {
+        Func<int, int> double = x => x * 2;
+        print("double(21) = "); print(double(21)); println();
+
+        var add = (int a, int b) => a + b;
+        print("add(3, 4) = "); print(add(3, 4)); println();
+
+        int offset = 100;
+        Func<int, int> shift = x => x + offset;
+        print("shift(5) = "); print(shift(5)); println();
+
+        print("apply = "); print(Program.apply(x => x * x, 9)); println();
+
+        Func<int, Func<int, int>> curry = a => (int b) => a + b;
+        var add30 = curry(30);
+        print("curried = "); print(add30(12)); println();
+
+        Greeter g = new Greeter("aura");
+        var says = g.prefixer();
+        print(says("hello lambdas")); println();
+
+        Action<string> shout = s => { print(s.ToUpper()); print("!"); println(); };
+        shout("first class");
+    }
+}

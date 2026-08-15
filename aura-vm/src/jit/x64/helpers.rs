@@ -132,6 +132,40 @@ fn exec(vm: &mut Vm, op: &Op, args: &[Value]) -> Result<Option<Value>, Result<Va
                 crate::FrameResult::Exception(e) => Err(Ok(e)),
             }
         }
+        Op::NewClosure(method, count) => {
+            let mut captured = args.to_vec();
+            captured.truncate(*count as usize);
+            let handle = vm
+                .heap
+                .allocate(aura_bytecode::AuraObject::Closure { method: *method, captured });
+            Ok(Some(Value::Object(handle)))
+        }
+        Op::Invoke(_) => {
+            let closure = args.first().cloned().ok_or(Err(VmError::StackUnderflow))?;
+            let Value::Object(handle) = closure else {
+                return Err(Err(VmError::TypeMismatch {
+                    expected: "function".into(),
+                    got: closure.type_name().into(),
+                }));
+            };
+            let (method, captured) = match try_vm!(vm.heap.get(handle)) {
+                aura_bytecode::AuraObject::Closure { method, captured } => {
+                    (*method, captured.clone())
+                }
+                _ => {
+                    return Err(Err(VmError::TypeMismatch {
+                        expected: "function".into(),
+                        got: "object".into(),
+                    }));
+                }
+            };
+            let mut argv = captured;
+            argv.extend_from_slice(&args[1..]);
+            match try_vm!(vm.invoke_frame(method, argv)) {
+                crate::FrameResult::Normal(v) => Ok(Some(v)),
+                crate::FrameResult::Exception(e) => Err(Ok(e)),
+            }
+        }
         Op::CallVirt(name) => {
             let instance = args.first().cloned().ok_or(Err(VmError::StackUnderflow))?;
             let Value::Object(handle) = instance else {

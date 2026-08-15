@@ -43,6 +43,12 @@ pub fn unify_generic_types(
             }
         }
         (Type::Nullable(p), Type::Nullable(a)) => unify_generic_types(p, a, vars, bindings, join),
+        (Type::Func(pp, pr), Type::Func(ap, ar)) if pp.len() == ap.len() => {
+            for (p, a) in pp.iter().zip(ap.iter()) {
+                unify_generic_types(p, a, vars, bindings, join);
+            }
+            unify_generic_types(pr, ar, vars, bindings, join);
+        }
         // `T?` accepts a non-null argument: bind against the inner type.
         (Type::Nullable(p), a) => unify_generic_types(p, a, vars, bindings, join),
         (Type::Tuple(ps), Type::Tuple(as_)) if ps.len() == as_.len() => {
@@ -260,6 +266,10 @@ pub fn substitute_type(ty: &Type, subst: &TypeSubst) -> Type {
             Type::Tuple(substituted_types)
         }
         Type::Nullable(inner) => Type::Nullable(Box::new(substitute_type(inner, subst))),
+        Type::Func(params, ret) => Type::Func(
+            params.iter().map(|t| substitute_type(t, subst)).collect(),
+            Box::new(substitute_type(ret, subst)),
+        ),
         _ => ty.clone(),
     }
 }
@@ -309,7 +319,109 @@ pub fn type_mentions(ty: &Type, name: &str) -> bool {
         Type::GenericParam(n) => n == name,
         Type::Nullable(t) | Type::Newtype(_, t) => type_mentions(t, name),
         Type::Tuple(ts) => ts.iter().any(|t| type_mentions(t, name)),
+        Type::Func(params, ret) => {
+            params.iter().any(|t| type_mentions(t, name)) || type_mentions(ret, name)
+        }
         _ => false,
+    }
+}
+
+/// Collect names declared anywhere inside these statements (variable
+/// declarations, loop variables, tuple destructuring, `using` bindings,
+/// catch bindings). Used by lambda capture checking; a flat set is a safe
+/// over-approximation.
+fn collect_declared_names(stmts: &[Stmt], out: &mut std::collections::HashSet<String>) {
+    for stmt in stmts {
+        match stmt {
+            Stmt::VarDecl(_, name, _) => {
+                out.insert(name.clone());
+            }
+            Stmt::TupleDecl(names, _) => out.extend(names.iter().cloned()),
+            Stmt::If(_, a, b) => {
+                collect_declared_names(a, out);
+                if let Some(b) = b {
+                    collect_declared_names(b, out);
+                }
+            }
+            Stmt::IfLet(_, _, a, b) => {
+                collect_declared_names(a, out);
+                if let Some(b) = b {
+                    collect_declared_names(b, out);
+                }
+            }
+            Stmt::While { body, .. } | Stmt::DoWhile { body, .. } | Stmt::Block(body) => {
+                collect_declared_names(body, out);
+            }
+            Stmt::For { init, update, body, .. } => {
+                collect_declared_names(std::slice::from_ref(init), out);
+                collect_declared_names(std::slice::from_ref(update), out);
+                collect_declared_names(body, out);
+            }
+            Stmt::ForIn { var_name, body, .. } => {
+                out.insert(var_name.clone());
+                collect_declared_names(body, out);
+            }
+            Stmt::Try { try_body, catches, finally_body } => {
+                collect_declared_names(try_body, out);
+                for c in catches {
+                    out.insert(c.name.clone());
+                    collect_declared_names(&c.body, out);
+                }
+                if let Some(f) = finally_body {
+                    collect_declared_names(f, out);
+                }
+            }
+            Stmt::Using { name, body, .. } => {
+                if let Some(n) = name {
+                    out.insert(n.clone());
+                }
+                collect_declared_names(body, out);
+            }
+            _ => {}
+        }
+    }
+}
+
+/// Collect local names assigned anywhere inside these statements.
+fn collect_assigned_locals(stmts: &[Stmt], out: &mut std::collections::HashSet<String>) {
+    for stmt in stmts {
+        match stmt {
+            Stmt::Assign(AssignTarget::Local(name), _) => {
+                out.insert(name.clone());
+            }
+            Stmt::If(_, a, b) => {
+                collect_assigned_locals(a, out);
+                if let Some(b) = b {
+                    collect_assigned_locals(b, out);
+                }
+            }
+            Stmt::IfLet(_, _, a, b) => {
+                collect_assigned_locals(a, out);
+                if let Some(b) = b {
+                    collect_assigned_locals(b, out);
+                }
+            }
+            Stmt::While { body, .. } | Stmt::DoWhile { body, .. } | Stmt::Block(body) => {
+                collect_assigned_locals(body, out);
+            }
+            Stmt::For { init, update, body, .. } => {
+                collect_assigned_locals(std::slice::from_ref(init), out);
+                collect_assigned_locals(std::slice::from_ref(update), out);
+                collect_assigned_locals(body, out);
+            }
+            Stmt::ForIn { body, .. } => collect_assigned_locals(body, out),
+            Stmt::Try { try_body, catches, finally_body } => {
+                collect_assigned_locals(try_body, out);
+                for c in catches {
+                    collect_assigned_locals(&c.body, out);
+                }
+                if let Some(f) = finally_body {
+                    collect_assigned_locals(f, out);
+                }
+            }
+            Stmt::Using { body, .. } => collect_assigned_locals(body, out),
+            _ => {}
+        }
     }
 }
 
@@ -1615,6 +1727,178 @@ impl TypeChecker {
         None
     }
 
+    /// Infer an expression's type with an optional expected type. Lambdas
+    /// are the only target-typed expressions: their parameter and return
+    /// types come from the expected `Func<...>` when not annotated.
+    #[allow(clippy::too_many_arguments)]
+    fn infer_expr_expecting(
+        &self,
+        e: &Expr,
+        expected: Option<&Type>,
+        class: &ClassInfo,
+        locals: &HashMap<String, Type>,
+        in_instance: bool,
+        return_ty: &Type,
+        generic_params: &[GenericParam],
+    ) -> Result<Type, TypeError> {
+        if let Expr::Lambda { params, body } = e {
+            return self.check_lambda(
+                params, body, expected, class, locals, in_instance, generic_params,
+            );
+        }
+        self.infer_expr(e, class, locals, in_instance, return_ty, generic_params)
+    }
+
+    /// Type-check a lambda. Parameter types come from annotations or the
+    /// expected `Func<...>`; the body is checked against the expected
+    /// return type. Without a target type the lambda must annotate every
+    /// parameter and have an expression body (its return type is then
+    /// inferred). Captured outer locals are read-only (by-value capture).
+    #[allow(clippy::too_many_arguments)]
+    #[allow(clippy::too_many_arguments)]
+    fn check_lambda(
+        &self,
+        params: &[(String, Option<Type>)],
+        body: &[Stmt],
+        expected: Option<&Type>,
+        class: &ClassInfo,
+        locals: &HashMap<String, Type>,
+        in_instance: bool,
+        generic_params: &[GenericParam],
+    ) -> Result<Type, TypeError> {
+        self.check_lambda_open(
+            params, body, expected, None, class, locals, in_instance, generic_params,
+        )
+    }
+
+    /// `check_lambda` with an optional set of still-unbound method type
+    /// parameters: an expected return type mentioning one is treated as
+    /// open, and the lambda's body determines it (expression bodies only) —
+    /// the C#-style flow where `transform(21, x => x * 2)` binds `T2` from
+    /// the lambda's result.
+    #[allow(clippy::too_many_arguments)]
+    fn check_lambda_open(
+        &self,
+        params: &[(String, Option<Type>)],
+        body: &[Stmt],
+        expected: Option<&Type>,
+        open_vars: Option<&HashSet<String>>,
+        class: &ClassInfo,
+        locals: &HashMap<String, Type>,
+        in_instance: bool,
+        generic_params: &[GenericParam],
+    ) -> Result<Type, TypeError> {
+        // Unwrap the expectation down to a Func shape when there is one.
+        let exp = match expected {
+            Some(Type::Func(p, r)) => Some((p.clone(), (**r).clone())),
+            Some(Type::Nullable(inner)) => match inner.as_ref() {
+                Type::Func(p, r) => Some((p.clone(), (**r).clone())),
+                _ => None,
+            },
+            _ => None,
+        };
+        if let Some((ep, _)) = &exp {
+            if ep.len() != params.len() {
+                return Err(TypeError(format!(
+                    "lambda has {} parameter(s) but {} takes {}",
+                    params.len(),
+                    expected.unwrap().name(),
+                    ep.len()
+                )));
+            }
+        }
+        let mut param_tys: Vec<Type> = Vec::with_capacity(params.len());
+        for (i, (pname, ann)) in params.iter().enumerate() {
+            let ty = match (ann, &exp) {
+                (Some(t), _) => t.clone(),
+                (None, Some((ep, _))) => ep[i].clone(),
+                (None, None) => {
+                    return Err(TypeError(format!(
+                        "cannot infer the type of lambda parameter `{}`: annotate it \
+                         (`(int {}) => ...`) or give the lambda a Func<...> target type",
+                        pname, pname
+                    )));
+                }
+            };
+            self.validate_type_with_generics(&ty, generic_params)?;
+            param_tys.push(ty);
+        }
+        // By-value capture: assigning to a captured outer local inside the
+        // body would silently not affect the original — reject it.
+        let mut declared: HashSet<String> = params.iter().map(|(n, _)| n.clone()).collect();
+        collect_declared_names(body, &mut declared);
+        let mut assigned: HashSet<String> = HashSet::new();
+        collect_assigned_locals(body, &mut assigned);
+        for name in &assigned {
+            if !declared.contains(name) && locals.contains_key(name) {
+                return Err(TypeError(format!(
+                    "lambda captures `{}` by value; assigning to it inside the lambda \
+                     would not affect the outer variable",
+                    name
+                )));
+            }
+        }
+        // Body scope: outer locals (captures) plus parameters.
+        let mut body_locals = locals.clone();
+        for ((n, _), t) in params.iter().zip(&param_tys) {
+            body_locals.insert(n.clone(), t.clone());
+        }
+        let ret_is_open = match (&exp, open_vars) {
+            (Some((_, r)), Some(vars)) => vars.iter().any(|v| type_mentions(r, v)),
+            _ => false,
+        };
+        let saved_narrow = self.narrowed.replace(HashMap::new());
+        let result = (|| -> Result<Type, TypeError> {
+            match &exp {
+                Some((_, exp_ret)) if !ret_is_open => {
+                    if *exp_ret == Type::Unit {
+                        // `Action` with an expression body: the expression
+                        // is a statement; any result is discarded.
+                        if let [Stmt::Return(Some(e))] = body {
+                            let _ = self.infer_expr(
+                                e, class, &body_locals, in_instance, exp_ret, generic_params,
+                            )?;
+                            return Ok(Type::Func(param_tys.clone(), Box::new(Type::Unit)));
+                        }
+                    }
+                    let mut body_locals = body_locals.clone();
+                    for stmt in body {
+                        self.check_stmt(
+                            stmt,
+                            class,
+                            &mut body_locals,
+                            exp_ret,
+                            in_instance,
+                            generic_params,
+                        )?;
+                    }
+                    Ok(Type::Func(param_tys.clone(), Box::new(exp_ret.clone())))
+                }
+                _ => {
+                    // Self-inference (annotated parameters, or an open
+                    // return the body determines): expression body only.
+                    if let [Stmt::Return(Some(e))] = body {
+                        let ret = self.infer_expr(
+                            e, class, &body_locals, in_instance, &Type::Unit, generic_params,
+                        )?;
+                        Ok(Type::Func(
+                            param_tys.clone(),
+                            Box::new(self.resolve_literal(&ret)),
+                        ))
+                    } else {
+                        Err(TypeError(
+                            "a block-bodied lambda needs a target type: assign it to a \
+                             Func<...>/Action<...> variable or pass it to a typed parameter"
+                                .to_string(),
+                        ))
+                    }
+                }
+            }
+        })();
+        self.narrowed.replace(saved_narrow);
+        result
+    }
+
     /// Infer a generic class's type arguments from a constructor call with
     /// none written (`new Box(42)` -> `Box<int>`): the first constructor of
     /// matching arity whose parameters unify against the argument types and
@@ -2552,7 +2836,7 @@ impl TypeChecker {
                     if matches!(init, Expr::Hole) {
                         return Err(self.hole_error(ty, locals));
                     }
-                    let init_ty = self.infer_expr(init, class, locals, in_instance, return_ty, generic_params)?;
+                    let init_ty = self.infer_expr_expecting(init, Some(ty), class, locals, in_instance, return_ty, generic_params)?;
                     if !self.is_assignable(ty, &init_ty) {
                         return Err(self.mismatch_error(
                             format!(
@@ -2600,7 +2884,7 @@ impl TypeChecker {
                         if matches!(value, Expr::Hole) {
                             return Err(self.hole_error(&declared, locals));
                         }
-                        let value_ty = self.infer_expr(value, class, locals, in_instance, return_ty, generic_params)?;
+                        let value_ty = self.infer_expr_expecting(value, Some(&declared), class, locals, in_instance, return_ty, generic_params)?;
                         if !self.is_assignable(&declared, &value_ty) {
                             return Err(self.mismatch_error(
                                 format!(
@@ -2622,7 +2906,7 @@ impl TypeChecker {
                 if matches!(value, Expr::Hole) {
                     return Err(self.hole_error(&target_ty, locals));
                 }
-                let value_ty = self.infer_expr(value, class, locals, in_instance, return_ty, generic_params)?;
+                let value_ty = self.infer_expr_expecting(value, Some(&target_ty), class, locals, in_instance, return_ty, generic_params)?;
                 if !self.is_assignable(&target_ty, &value_ty) {
                     return Err(TypeError(format!(
                         "cannot assign {} to {}",
@@ -2635,7 +2919,7 @@ impl TypeChecker {
                 if matches!(e, Expr::Hole) {
                     return Err(self.hole_error(return_ty, locals));
                 }
-                let ty = self.infer_expr(e, class, locals, in_instance, return_ty, generic_params)?;
+                let ty = self.infer_expr_expecting(e, Some(return_ty), class, locals, in_instance, return_ty, generic_params)?;
                 if !self.is_assignable(return_ty, &ty) {
                     return Err(self.mismatch_error(
                         format!(
@@ -3543,6 +3827,9 @@ impl TypeChecker {
                 }
             }
             Expr::Call(call) => self.check_call(call, class, locals, in_instance, return_ty, generic_params, false),
+            Expr::Lambda { params, body } => self.check_lambda(
+                params, body, None, class, locals, in_instance, generic_params,
+            ),
             Expr::New(class_name, type_args, args) => {
                 let Some(class_info) = self.classes.get(class_name) else {
                     if generic_params.iter().any(|gp| gp.name == *class_name) {
@@ -4510,6 +4797,53 @@ impl TypeChecker {
             // static call: ClassName.Method(args) or EnumName.Variant(args)
             let class_name = call.class_or_target.clone();
 
+            // Calling a function-typed local: `f(2)`. Locals shadow class
+            // and method names.
+            match locals.get(&class_name) {
+                Some(Type::Func(params, ret)) => {
+                    let (params, ret) = (params.clone(), (**ret).clone());
+                    if call.args.len() != params.len() {
+                        return Err(TypeError(format!(
+                            "`{}` takes {} argument(s), got {}",
+                            class_name,
+                            params.len(),
+                            call.args.len()
+                        )));
+                    }
+                    for (arg, pty) in call.args.iter().zip(&params) {
+                        if matches!(arg, Expr::Hole) {
+                            return Err(self.hole_error(pty, locals));
+                        }
+                        let at = self.infer_expr_expecting(
+                            arg, Some(pty), class, locals, in_instance, return_ty,
+                            generic_params,
+                        )?;
+                        if !self.is_assignable(pty, &at) {
+                            return Err(self.mismatch_error(
+                                format!(
+                                    "argument of type {} does not fit parameter of type {} \
+                                     in call to `{}`",
+                                    at.name(),
+                                    pty.name(),
+                                    class_name
+                                ),
+                                pty,
+                                &at,
+                            ));
+                        }
+                    }
+                    return Ok(ret);
+                }
+                Some(Type::Nullable(inner)) if matches!(inner.as_ref(), Type::Func(..)) => {
+                    return Err(TypeError(format!(
+                        "`{}` may be null (type {}): narrow it before calling",
+                        class_name,
+                        locals.get(&class_name).unwrap().name()
+                    )));
+                }
+                _ => {}
+            }
+
             if self.enums.contains_key(&class_name) {
                 return self.infer_enum_construction(
                     &class_name, &call.method, &call.args, class, locals, in_instance, return_ty, generic_params,
@@ -4620,11 +4954,75 @@ impl TypeChecker {
                 return Err(self.hole_error(&substitute_type(param, subst), locals));
             }
         }
-        let arg_tys: Vec<Type> = call
-            .args
+        // Two-pass argument typing: non-lambda arguments first, whose types
+        // partially bind the method's type parameters; lambda arguments are
+        // then target-typed by the partially substituted parameter — their
+        // own parameter types must be resolved, while an open return type is
+        // determined by the body (`transform(21, x => x * 2)` binds T1 from
+        // 21, then T2 from the body).
+        let method_vars: HashSet<String> = method_info
+            .generic_params
             .iter()
-            .map(|arg| self.infer_expr(arg, class, locals, in_instance, return_ty, generic_params))
-            .collect::<Result<_, _>>()?;
+            .map(|gp| gp.name.clone())
+            .collect();
+        let mut arg_slots: Vec<Option<Type>> = Vec::with_capacity(call.args.len());
+        for arg in &call.args {
+            if matches!(arg, Expr::Lambda { .. }) {
+                arg_slots.push(None);
+            } else {
+                arg_slots.push(Some(self.infer_expr(
+                    arg, class, locals, in_instance, return_ty, generic_params,
+                )?));
+            }
+        }
+        let mut pre = subst.clone();
+        if !method_vars.is_empty() && arg_slots.iter().any(|s| s.is_none()) {
+            let mut pre_bindings: HashMap<String, Type> = HashMap::new();
+            for (param, aty) in method_info.params.iter().zip(&arg_slots) {
+                if let Some(aty) = aty {
+                    let p = substitute_type(param, subst);
+                    unify_generic_types(
+                        &p,
+                        &self.resolve_literal(aty),
+                        &method_vars,
+                        &mut pre_bindings,
+                        &mut |_, prev, _| Some(prev),
+                    );
+                }
+            }
+            for (k, v) in pre_bindings {
+                pre.insert(k, v);
+            }
+        }
+        for (i, arg) in call.args.iter().enumerate() {
+            if arg_slots[i].is_some() {
+                continue;
+            }
+            let Expr::Lambda { params: lparams, body: lbody } = arg else {
+                unreachable!()
+            };
+            let pty = method_info.params.get(i).map(|p| substitute_type(p, &pre));
+            let params_resolved = matches!(&pty, Some(Type::Func(fp, _))
+                if !fp.iter().any(|t| method_vars.iter().any(|v| type_mentions(t, v))));
+            let ty = if params_resolved {
+                self.check_lambda_open(
+                    lparams,
+                    lbody,
+                    pty.as_ref(),
+                    Some(&method_vars),
+                    class,
+                    locals,
+                    in_instance,
+                    generic_params,
+                )?
+            } else {
+                self.infer_expr_expecting(
+                    arg, None, class, locals, in_instance, return_ty, generic_params,
+                )?
+            };
+            arg_slots[i] = Some(ty);
+        }
+        let arg_tys: Vec<Type> = arg_slots.into_iter().map(Option::unwrap).collect();
 
         // Method-level generics are inferred from the arguments by unifying
         // each declared parameter type (after the receiver's class-level
@@ -5087,6 +5485,21 @@ impl TypeChecker {
                 } else {
                     Err(TypeError(format!("unknown type parameter `{}`", name)))
                 }
+            }
+            Type::Func(params, ret) => {
+                for p in params {
+                    self.validate_type_with_generics(p, generic_params)?;
+                }
+                self.validate_type_with_generics(ret, generic_params)
+            }
+            Type::Nullable(inner) | Type::Newtype(_, inner) => {
+                self.validate_type_with_generics(inner, generic_params)
+            }
+            Type::Tuple(ts) => {
+                for t in ts {
+                    self.validate_type_with_generics(t, generic_params)?;
+                }
+                Ok(())
             }
             _ => Ok(()),
         }

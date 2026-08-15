@@ -173,6 +173,16 @@ pub enum AuraObject {
     Enum(EnumValue),
     /// Tuple value payload.
     Tuple(TupleValue),
+    /// Closure: a lifted lambda method plus its by-value captured
+    /// environment. Invocation spreads `captured` before the call
+    /// arguments (`Op::Invoke`).
+    Closure {
+        /// The lifted lambda method.
+        method: MethodId,
+        /// Captured outer locals, in capture order (`this` first if
+        /// captured).
+        captured: Vec<Value>,
+    },
 }
 
 impl AuraObject {
@@ -185,7 +195,8 @@ impl AuraObject {
             | AuraObject::Set { .. }
             | AuraObject::Instance { .. }
             | AuraObject::Enum(_)
-            | AuraObject::Tuple(_) => true,
+            | AuraObject::Tuple(_)
+            | AuraObject::Closure { .. } => true,
         }
     }
 
@@ -196,7 +207,8 @@ impl AuraObject {
             AuraObject::String(_) => {}
             AuraObject::Instance { fields, .. }
             | AuraObject::Array { elements: fields }
-            | AuraObject::Set { elements: fields, .. } => {
+            | AuraObject::Set { elements: fields, .. }
+            | AuraObject::Closure { captured: fields, .. } => {
                 for v in fields {
                     refs.extend(v.contained_refs());
                 }
@@ -413,6 +425,9 @@ pub enum TypeDesc {
     Nullable(Box<TypeDesc>),
     /// Null type (bottom of reference hierarchy).
     Null,
+    /// Function value (closure). Signatures are erased at runtime; the
+    /// checker enforces them.
+    Function,
 }
 
 impl TypeDesc {
@@ -455,6 +470,7 @@ impl fmt::Display for TypeDesc {
             TypeDesc::Char => write!(f, "char"),
             TypeDesc::String => write!(f, "string"),
             TypeDesc::Nullable(inner) => write!(f, "{}?", inner),
+            TypeDesc::Function => write!(f, "function"),
             TypeDesc::Class(ClassId(id), args) => {
                 if args.is_empty() {
                     write!(f, "class#{id}")
@@ -654,6 +670,14 @@ pub enum Op {
     /// is an object instance of the class (or an implementer of the
     /// interface, declared or structural). Null and non-objects test false.
     IsInst(ClassId),
+    /// Allocate a closure over the lifted lambda method: pops the given
+    /// number of captured values (pushed in capture order) and pushes a
+    /// closure object.
+    NewClosure(MethodId, u16),
+    /// Invoke a closure: pops the closure (top of stack), then the given
+    /// number of arguments (pushed in order below it); calls the lifted
+    /// method with `captured ++ args` and pushes its result.
+    Invoke(u16),
 }
 
 /// A shared immutable handle to a module (used by VM and compiler).
