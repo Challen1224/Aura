@@ -634,17 +634,23 @@ unsafe extern "C" fn dispatcher(nf: *mut NativeFrame, args: *const Value, argc: 
             // Safepoint: the result is rooted via nf.result and all other
             // live references sit in frame slots, so a deferred collection
             // is safe before returning to generated code.
-            vm.maybe_collect();
+            if let Err(e) = vm.maybe_collect() {
+                return error(vm, e);
+            }
             STATUS_OK
         }
         Ok(None) => {
-            vm.maybe_collect();
+            if let Err(e) = vm.maybe_collect() {
+                return error(vm, e);
+            }
             STATUS_OK
         }
         Err(Ok(exc)) => {
             nf.result = exc;
             crate::jit::value::canonicalize(&mut nf.result);
-            vm.maybe_collect();
+            if let Err(e) = vm.maybe_collect() {
+                return error(vm, e);
+            }
             STATUS_EXCEPTION
         }
         Err(Err(e)) => error(vm, e),

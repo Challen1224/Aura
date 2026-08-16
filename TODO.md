@@ -1053,11 +1053,30 @@
   (aura-vm/tests/gc_nursery.rs), and the entire existing GC-churn suite
   runs through the new collector.
 
-- [ ] **GC tuning**
-  - [ ] Configurable heap size
-  - [ ] GC pause time targets
-  - [ ] Throughput vs latency tradeoffs
-  - [ ] GC statistics and metrics
+- [x] **GC tuning**
+  - [x] Configurable heap size
+  - [x] GC pause time targets
+  - [x] Throughput vs latency tradeoffs
+  - [x] GC statistics and metrics
+
+  Every knob is real and CLI-exposed on `aura run`: `--gc-threshold`
+  (full-heap trigger, adaptive growth), `--gc-nursery` (explicit
+  nursery size), `--gc-max-heap` (hard limit — exceeding it after a
+  full collection is a runtime error, surfaced through both tiers),
+  `--gc-mode throughput|balanced|latency` (presets trading pause count
+  for pause size: throughput = 256KB nursery + 3x growth, latency =
+  16KB nursery; verified by strictly-ordered collection counts on the
+  same workload), and `--gc-pause-target-ms` — a best-effort soft
+  target for *minor* pauses via a feedback loop that halves the nursery
+  when minors run over target and doubles it when far under (clamped
+  8KB–1MB); majors remain stop-the-world and unbounded, stated plainly.
+  `--gc-stats` prints a summary to stderr; programmatically,
+  `vm.gc_stats()` snapshots counts (minor/major), live objects/bytes,
+  total allocations, bytes freed, thresholds, and pause totals/maxima
+  per generation. Verified: aura-vm/tests/gc_tuning.rs (5 tests:
+  nursery-size ordering, mode ordering, hard-limit error + generous
+  limit no-op, pause-target adaptation to the floor, stats
+  consistency), full battery green under both tiers.
 
 - [ ] **Weak references**
   ```aura

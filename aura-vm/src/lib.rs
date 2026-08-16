@@ -744,6 +744,33 @@ impl Vm {
         self.heap.minor_collections()
     }
 
+    /// Set an explicit nursery size in bytes (None restores the default).
+    pub fn set_gc_nursery_size(&mut self, bytes: Option<usize>) {
+        self.heap.set_nursery_size(bytes);
+    }
+
+    /// Set a hard heap limit: exceeding it after a full collection is a
+    /// runtime error.
+    pub fn set_gc_max_heap(&mut self, bytes: Option<usize>) {
+        self.heap.set_max_heap(bytes);
+    }
+
+    /// Best-effort soft target (milliseconds) for minor pause times.
+    pub fn set_gc_pause_target_ms(&mut self, ms: Option<u64>) {
+        self.heap
+            .set_pause_target(ms.map(std::time::Duration::from_millis));
+    }
+
+    /// Apply a collector disposition preset.
+    pub fn set_gc_mode(&mut self, mode: heap::GcMode) {
+        self.heap.set_mode(mode);
+    }
+
+    /// Snapshot the collector's counters and configuration.
+    pub fn gc_stats(&self) -> heap::GcStats {
+        self.heap.stats()
+    }
+
     /// Number of major (full-heap) collections run so far.
     pub fn gc_major_collections(&self) -> u64 {
         self.heap.major_collections()
@@ -760,9 +787,9 @@ impl Vm {
     /// whose tag qword is a reference tag and whose payload is a live handle
     /// is treated as a root. This can over-retain (a stale slot pins a dead
     /// object until the frame exits) but can never free a live one.
-    pub(crate) fn maybe_collect(&mut self) {
+    pub(crate) fn maybe_collect(&mut self) -> Result<(), VmError> {
         if !self.heap.needs_collect() {
-            return;
+            return Ok(());
         }
         let mut roots: Vec<GcRef> = Vec::new();
         for frame in &self.call_stack {
@@ -820,6 +847,12 @@ impl Vm {
             }
         }
         self.heap.collect(&roots);
+        if let Some((live, limit)) = self.heap.over_max_heap() {
+            return Err(VmError::Runtime(format!(
+                "heap limit exceeded: {live} bytes live after a full collection (limit {limit})"
+            )));
+        }
+        Ok(())
     }
 
     fn execute_frame(&mut self, method: MethodDef) -> Result<FrameResult, VmError> {
@@ -854,7 +887,7 @@ impl Vm {
             // Safepoint: `pending` is always None here, every live value sits
             // in frame locals/stacks (or JIT frame slots), so a deferred
             // collection is safe to run now.
-            self.maybe_collect();
+            self.maybe_collect()?;
 
             let op = {
                 let frame = self.current_frame();
