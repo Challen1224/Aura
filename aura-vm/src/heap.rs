@@ -278,7 +278,10 @@ impl Heap {
         );
 
         self.total_allocations += 1;
-        if self.allocated >= self.threshold || self.young_bytes >= self.minor_threshold() {
+        if self.allocated >= self.threshold
+            || self.young_bytes >= self.minor_threshold()
+            || self.max_heap.is_some_and(|limit| self.allocated > limit)
+        {
             // Don't collect here: the caller may hold unrooted handles in
             // Rust locals. Flag the need and let the VM collect at a
             // safepoint where every live reference is visible.
@@ -351,6 +354,12 @@ impl Heap {
         if let Some(limit) = self.max_heap {
             if self.allocated > limit {
                 self.collect_major(roots);
+                if self.allocated > limit && self.clear_soft_refs() {
+                    // Softly-held memory is the last thing to go before a
+                    // heap-limit error: clear every soft reference and
+                    // sweep again with their targets unreachable.
+                    self.collect_major(roots);
+                }
                 return;
             }
         }
@@ -362,6 +371,20 @@ impl Heap {
             // The nursery pass was not enough; fall through to a full pass.
         }
         self.collect_major(roots);
+    }
+
+    /// Clear every soft reference (pressure response). Returns whether
+    /// any reference was actually cleared. Direct map mutation is safe
+    /// here: clearing only removes an edge, so it can never create an
+    /// old-to-young pointer the remembered set would need to see.
+    fn clear_soft_refs(&mut self) -> bool {
+        let mut cleared = false;
+        for ho in self.objects.values_mut() {
+            if let AuraObject::SoftRef { target } = &mut ho.object {
+                cleared |= target.take().is_some();
+            }
+        }
+        cleared
     }
 
     /// Minor collection: trace only the nursery. Old objects are terminal
@@ -506,9 +529,10 @@ impl Heap {
             AuraObject::Tuple(t) => {
                 t.elements.len() * std::mem::size_of::<Value>() + std::mem::size_of::<AuraObject>()
             }
-            AuraObject::Task { .. } | AuraObject::WeakRef { .. } => {
-                std::mem::size_of::<AuraObject>()
-            }
+            AuraObject::Task { .. }
+            | AuraObject::WeakRef { .. }
+            | AuraObject::SoftRef { .. }
+            | AuraObject::PhantomRef { .. } => std::mem::size_of::<AuraObject>(),
         }
     }
 }

@@ -150,6 +150,32 @@ pub fn classes() -> Vec<IntrinsicClass> {
             properties: vec![],
         },
         IntrinsicClass {
+            name: "SoftRef",
+            generic_params: &["T"],
+            constructor: Some(SoftNew),
+            constructor_params: vec![gp("T")],
+            methods: vec![
+                m("isAlive", vec![], Type::Bool, SoftIsAlive),
+                m(
+                    "get",
+                    vec![],
+                    Type::Nullable(Box::new(gp("T"))),
+                    SoftGet,
+                ),
+            ],
+            static_methods: vec![],
+            properties: vec![],
+        },
+        IntrinsicClass {
+            name: "PhantomRef",
+            generic_params: &["T"],
+            constructor: Some(PhantomNew),
+            constructor_params: vec![gp("T")],
+            methods: vec![m("isReclaimed", vec![], Type::Bool, PhantomIsReclaimed)],
+            static_methods: vec![],
+            properties: vec![],
+        },
+        IntrinsicClass {
             name: "List",
             generic_params: &["T"],
             constructor: Some(ListNew),

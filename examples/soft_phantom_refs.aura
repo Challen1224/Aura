@@ -1,0 +1,66 @@
+// Soft and phantom references.
+//
+// SoftRef<T> keeps its target alive until the collector needs the memory:
+// under a hard heap limit (--gc-max-heap), a full collection that still
+// exceeds the limit clears every soft reference before giving up. With no
+// limit configured there is no pressure, so softs act like strong refs —
+// run this with `--gc-max-heap 8192` to watch the cache entry vanish.
+//
+// PhantomRef<T> never keeps its target alive and cannot return it: there
+// is no get(), only isReclaimed() — post-mortem detection, no resurrection.
+
+class Image {
+    string name;
+    List<string> pixels;
+    Image(string name) {
+        this.name = name;
+        this.pixels = new List<string>();
+        for (var i in 1..=60) { this.pixels.Add("pixel row {i} padding padding padding"); }
+    }
+}
+
+class Program {
+    static void churn() {
+        for (var i in 1..=5000) {
+            string junk = "throwaway allocation {i} padding padding";
+        }
+    }
+
+    static SoftRef<Image> cacheThumbnail() {
+        // A memory-sensitive cache entry: no strong root survives this
+        // frame, but the soft reference keeps it warm while memory lasts.
+        return new SoftRef(new Image("thumbnail.png"));
+    }
+
+    static PhantomRef<Image> trackTemporary() {
+        // The temporary dies with this frame; the phantom only lets us
+        // observe that the collector really reclaimed it.
+        return new PhantomRef(new Image("scratch.bmp"));
+    }
+
+    static void Main() {
+        var cached = Program.cacheThumbnail();
+        var tracker = Program.trackTemporary();
+
+        Program.churn();
+
+        // Strongly-retained working data. Under --gc-max-heap 8192 it
+        // fits on its own, but not alongside the soft cache entry — so
+        // the collector clears the cache instead of failing.
+        var working = new List<string>();
+        for (var i in 1..=140) {
+            working.Add("working set {i} padding padding padding");
+        }
+
+        print("cache entry alive = "); print(cached.isAlive()); println();
+        var img = cached.get();
+        if (img != null) {
+            print("cache served "); print(img.name); println();
+        } else {
+            print("cache entry was reclaimed under memory pressure"); println();
+        }
+
+        print("temporary reclaimed = "); print(tracker.isReclaimed()); println();
+        print("working set size = "); print(working.Count); println();
+    }
+}

@@ -3,7 +3,7 @@
 > **Status:** Core language and compiler: usable. VM with baseline x86-64
 > JIT: implemented; static, virtual, and super calls all tier up. GC:
 > generational (logical nursery, write barrier, minor/major split) with
-> tuning flags, stats, and `WeakRef<T>`, collecting under both tiers (JIT
+> tuning flags, stats, and weak/soft/phantom refs, collecting under both tiers (JIT
 > frames scanned conservatively — see §2.1). Stdlib: collections
 > (`List`/`Map`/`Set`), string methods, `Console.ReadLine`, and text `File`
 > I/O are implemented and verified under both interpreter and JIT, including
@@ -1104,7 +1104,27 @@
   reclaim, construction-site inference, WeakRefs inside collections,
   non-object target runtime error), both tiers, qemu x86-64 ×3.
 
-- [ ] **Soft/phantom references**
+- [x] **Soft/phantom references**
+  `SoftRef<T>` traces its target (keeps it alive, unlike weak) until
+  memory pressure clears it. Pressure means a hard heap limit: when a
+  full collection still leaves the heap over `--gc-max-heap`, every soft
+  reference is cleared and the collection re-runs before the heap-limit
+  error is considered — softly-held memory is the last to go before
+  out-of-memory. With no limit configured there is no pressure signal,
+  so softs behave like strong references (stated, not implied away).
+  `PhantomRef<T>` is untraced like weak but the target is unrecoverable
+  by construction: no `get()` exists (compile error, pinned by a test),
+  only `isReclaimed()` — poll-based post-mortem detection, since the
+  language has no finalizers or reference queues. The weak-ref JIT
+  promptness caveat applies to phantoms identically. Fixed along the
+  way: the `--gc-max-heap` limit was only checked when a collection
+  happened to trigger, so small programs could exceed it invisibly —
+  allocation now flags a safepoint collection whenever the limit is
+  crossed. Verified: aura-vm/tests/soft_phantom_refs.rs (6 tests:
+  soft-survives-churn-without-pressure ×3 trials, pressure clears soft
+  while strong data completes, strong-only overflow still errors,
+  phantom reclamation ×3 trials, no-get compile error, inference +
+  non-object target errors), both tiers, qemu x86-64 ×3.
 
 **P1 - High Priority**
 - [ ] **Concurrent GC**

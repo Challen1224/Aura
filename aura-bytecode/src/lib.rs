@@ -198,6 +198,23 @@ pub enum AuraObject {
         /// The referent's (possibly dead) handle.
         target: GcRef,
     },
+    /// A soft reference: traces its target (keeping it alive) until the
+    /// collector clears it under memory pressure — a full collection that
+    /// still leaves the heap over its hard limit clears every soft
+    /// reference and re-sweeps before reporting a heap-limit error. With
+    /// no limit configured there is no pressure signal, so softs behave
+    /// like strong references.
+    SoftRef {
+        /// The referent's handle; `None` once cleared under pressure.
+        target: Option<GcRef>,
+    },
+    /// A phantom reference: untraced like a weak reference, but the
+    /// target can never be retrieved — only its reclamation observed
+    /// (poll-based; the language has no finalizers or reference queues).
+    PhantomRef {
+        /// The referent's (possibly dead) handle.
+        target: GcRef,
+    },
 }
 
 impl AuraObject {
@@ -212,7 +229,10 @@ impl AuraObject {
             | AuraObject::Enum(_)
             | AuraObject::Tuple(_)
             | AuraObject::Closure { .. } => true,
-            AuraObject::Task { .. } | AuraObject::WeakRef { .. } => false,
+            AuraObject::Task { .. }
+            | AuraObject::WeakRef { .. }
+            | AuraObject::PhantomRef { .. } => false,
+            AuraObject::SoftRef { target } => target.is_some(),
         }
     }
 
@@ -222,7 +242,13 @@ impl AuraObject {
         match self {
             AuraObject::String(_)
             | AuraObject::Task { .. }
-            | AuraObject::WeakRef { .. } => {}
+            | AuraObject::WeakRef { .. }
+            | AuraObject::PhantomRef { .. } => {}
+            AuraObject::SoftRef { target } => {
+                if let Some(t) = target {
+                    refs.push(*t);
+                }
+            }
             AuraObject::Instance { fields, .. }
             | AuraObject::Array { elements: fields }
             | AuraObject::Set { elements: fields, .. }

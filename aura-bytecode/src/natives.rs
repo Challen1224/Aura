@@ -124,6 +124,11 @@ natives! {
     WeakNew = 130, "WeakRef.new", arity 1;
     WeakIsAlive = 131, "WeakRef.isAlive", arity 1;
     WeakGet = 132, "WeakRef.get", arity 1;
+    SoftNew = 133, "SoftRef.new", arity 1;
+    SoftIsAlive = 134, "SoftRef.isAlive", arity 1;
+    SoftGet = 135, "SoftRef.get", arity 1;
+    PhantomNew = 136, "PhantomRef.new", arity 1;
+    PhantomIsReclaimed = 137, "PhantomRef.isReclaimed", arity 1;
 }
 
 #[cfg(test)]

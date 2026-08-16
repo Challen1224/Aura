@@ -426,6 +426,52 @@ pub(crate) fn exec_native(vm: &mut Vm, id: NativeId, args: &[Value]) -> Result<V
             }
         }
 
+        // ---------------- SoftRef<T> / PhantomRef<T> ----------------
+        NativeId::SoftNew => {
+            let Value::Object(target) = args[0] else {
+                return Err(VmError::Runtime(format!(
+                    "{}: soft reference target must be an object, got {}",
+                    id.name(),
+                    args[0].type_name()
+                )));
+            };
+            let handle = vm.heap.allocate(AuraObject::SoftRef { target: Some(target) });
+            Ok(Value::Object(handle))
+        }
+        NativeId::SoftIsAlive => {
+            let target = soft_target(vm, id, &args[0])?;
+            Ok(Value::Bool(target.is_some()))
+        }
+        NativeId::SoftGet => {
+            let target = soft_target(vm, id, &args[0])?;
+            Ok(match target {
+                Some(t) => Value::Object(t),
+                None => Value::Null,
+            })
+        }
+        NativeId::PhantomNew => {
+            let Value::Object(target) = args[0] else {
+                return Err(VmError::Runtime(format!(
+                    "{}: phantom reference target must be an object, got {}",
+                    id.name(),
+                    args[0].type_name()
+                )));
+            };
+            let handle = vm.heap.allocate(AuraObject::PhantomRef { target });
+            Ok(Value::Object(handle))
+        }
+        NativeId::PhantomIsReclaimed => {
+            let Value::Object(h) = &args[0] else {
+                return Err(VmError::Runtime(format!("{}: not a phantom reference", id.name())));
+            };
+            match vm.heap.get(*h)? {
+                AuraObject::PhantomRef { target } => {
+                    Ok(Value::Bool(!vm.heap.contains(*target)))
+                }
+                _ => Err(VmError::Runtime(format!("{}: not a phantom reference", id.name()))),
+            }
+        }
+
         // ---------------- Console ----------------
         NativeId::ConsoleReadLine => {
             let mut line = String::new();
@@ -504,6 +550,20 @@ fn wrong_receiver(id: NativeId, got: &Value) -> VmError {
         id.name().split('.').next().unwrap_or("native"),
         got.type_name()
     ))
+}
+
+fn soft_target(
+    vm: &Vm,
+    id: NativeId,
+    v: &Value,
+) -> Result<Option<aura_bytecode::GcRef>, VmError> {
+    let Value::Object(h) = v else {
+        return Err(VmError::Runtime(format!("{}: not a soft reference", id.name())));
+    };
+    match vm.heap.get(*h)? {
+        AuraObject::SoftRef { target } => Ok(*target),
+        _ => Err(VmError::Runtime(format!("{}: not a soft reference", id.name()))),
+    }
 }
 
 fn weak_target(vm: &Vm, id: NativeId, v: &Value) -> Result<aura_bytecode::GcRef, VmError> {
