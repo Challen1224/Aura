@@ -58,6 +58,12 @@ struct MethodEmitter<'a> {
     /// Source line of the statement currently being emitted (from the
     /// parser's `Stmt::Mark` markers), for error locations.
     current_line: usize,
+    /// Debug line table under construction: `(first_op_index, line)`
+    /// recorded whenever the current statement line changes.
+    line_starts: Vec<(u32, u32)>,
+    /// Debug local-name table: slot index -> source name (last lexical
+    /// binding wins when scopes reuse a slot).
+    debug_names: Vec<String>,
     /// Enclosing `finally` blocks and loop boundaries, innermost last.
     finally_stack: Vec<FinallyCtx>,
     /// Scratch scope for typing lambda bodies from `&self` contexts: name
@@ -541,6 +547,8 @@ impl Emitter {
             handlers: me.handlers,
             max_stack: 8,
             locals: me.max_locals as u16,
+            line_starts: me.line_starts,
+            local_names: me.debug_names,
         };
 
         let constant_offset = module.constant_pool.len() as u32;
@@ -699,6 +707,7 @@ impl<'a> MethodEmitter<'a> {
             variant_lookup,
             field_layout,
             ops: Vec::new(),
+            debug_names: locals.clone(),
             locals,
             max_locals: init_locals,
             params,
@@ -714,6 +723,7 @@ impl<'a> MethodEmitter<'a> {
             continue_targets: Vec::new(),
             handlers: Vec::new(),
             current_line: 0,
+            line_starts: Vec::new(),
         }
     }
 
@@ -948,6 +958,14 @@ impl<'a> MethodEmitter<'a> {
             }
             Stmt::Mark(line) => {
                 self.current_line = *line;
+                let here = (self.ops.len() as u32, *line as u32);
+                match self.line_starts.last_mut() {
+                    // Several marks can land before any op is emitted
+                    // (nested blocks): keep the latest line for that pc.
+                    Some(last) if last.0 == here.0 => *last = here,
+                    Some(last) if last.1 == here.1 => {}
+                    _ => self.line_starts.push(here),
+                }
             }
             Stmt::Return(Some(e)) => {
                 let ret = self.method.return_ty.clone();
@@ -2280,6 +2298,11 @@ impl<'a> MethodEmitter<'a> {
     /// stays sized correctly even when scoped locals are popped later.
     /// Returns the index of the newly allocated local.
     fn push_local(&mut self, name: String) -> usize {
+        let slot = self.locals.len();
+        if self.debug_names.len() <= slot {
+            self.debug_names.resize(slot + 1, String::new());
+        }
+        self.debug_names[slot] = name.clone();
         self.locals.push(name);
         let len = self.locals.len();
         if len > self.max_locals {

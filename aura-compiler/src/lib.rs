@@ -124,6 +124,8 @@ pub fn synthetic_module(body: Vec<aura_bytecode::Op>) -> Module {
                     handlers: vec![],
                     max_stack: 8,
                     locals: 0,
+                    line_starts: Vec::new(),
+                    local_names: Vec::new(),
                 },
             );
             map

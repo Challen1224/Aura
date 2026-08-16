@@ -221,7 +221,12 @@ fn write_method<W: Write>(w: &mut W, m: &MethodDef) -> io::Result<()> {
     write_u16(w, m.locals)?;
     write_vec(w, &m.handlers, |w, h| write_handler(w, h))?;
     write_u8(w, if m.is_async { 1 } else { 0 })?;
-    write_vec(w, &m.body, |w, op| write_op(w, op))
+    write_vec(w, &m.body, |w, op| write_op(w, op))?;
+    write_vec(w, &m.line_starts, |w, (op, line)| {
+        write_u32(w, *op)?;
+        write_u32(w, *line)
+    })?;
+    write_vec(w, &m.local_names, |w, n| write_string(w, n))
 }
 
 fn read_method<R: Read>(r: &mut R) -> io::Result<MethodDef> {
@@ -234,6 +239,8 @@ fn read_method<R: Read>(r: &mut R) -> io::Result<MethodDef> {
     let handlers = read_vec(r, |r| read_handler(r))?;
     let is_async = read_u8(r)? != 0;
     let body = read_vec(r, |r| read_op(r))?;
+    let line_starts = read_vec(r, |r| Ok((read_u32(r)?, read_u32(r)?)))?;
+    let local_names = read_vec(r, |r| read_string(r))?;
     Ok(MethodDef {
         name,
         return_ty,
@@ -245,6 +252,8 @@ fn read_method<R: Read>(r: &mut R) -> io::Result<MethodDef> {
         handlers,
         max_stack,
         locals,
+        line_starts,
+        local_names,
     })
 }
 

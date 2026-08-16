@@ -6,6 +6,7 @@
 
 #![warn(missing_docs)]
 
+pub mod debug;
 pub mod heap;
 pub mod jit;
 mod native;
@@ -203,6 +204,7 @@ pub enum VmError {
 }
 
 /// The outcome of executing a frame (re-exported from the JIT module).
+pub use debug::{DebugCommand, DebugResume, DebugStop, Debugger};
 pub use jit::FrameResult;
 
 /// A single call frame.
@@ -219,6 +221,9 @@ pub struct Frame {
     /// (re-raised by `EndFinally`). Kept on the frame rather than in a Rust
     /// local so the GC can root it.
     after_finally: Option<Value>,
+    /// Last source line the debugger observed for this frame (0 = none);
+    /// stops trigger only on line changes.
+    debug_line: u32,
 }
 
 /// Execution state of one cooperative task.
@@ -270,6 +275,7 @@ impl Frame {
             locals,
             stack: Vec::new(),
             is_jit: false,
+            debug_line: 0,
             after_finally: None,
         }
     }
@@ -285,6 +291,7 @@ impl Frame {
             stack: Vec::new(),
             is_jit: true,
             after_finally: None,
+            debug_line: 0,
         }
     }
 
@@ -335,6 +342,13 @@ pub struct Vm {
     /// their slot memory conservatively for roots.
     #[cfg(target_arch = "x86_64")]
     pub(crate) jit_frames: Vec<*const jit::helpers::NativeFrame>,
+    /// Installed debug controller (its presence suppresses JIT tier-up:
+    /// compiled frames cannot stop at line boundaries).
+    debugger: Option<Box<dyn debug::Debugger>>,
+    /// Source-line breakpoints.
+    breakpoints: std::collections::HashSet<u32>,
+    /// Stepping state.
+    step_mode: debug::StepMode,
 }
 
 impl Vm {
@@ -376,6 +390,9 @@ impl Vm {
             jit_threshold: jit::JIT_THRESHOLD,
             #[cfg(target_arch = "x86_64")]
             jit_frames: Vec::new(),
+            debugger: None,
+            breakpoints: std::collections::HashSet::new(),
+            step_mode: debug::StepMode::Running,
         }
     }
 
@@ -438,7 +455,7 @@ impl Vm {
     /// When the JIT is enabled, already-compiled methods run natively and hot
     /// (threshold-crossing) methods are compiled before being executed.
     pub(crate) fn invoke_frame(&mut self, method_id: MethodId, args: Vec<Value>) -> Result<FrameResult, VmError> {
-        if self.jit_enabled {
+        if self.jit_enabled && self.debugger.is_none() {
             if let Some(compiled) = self.jit.as_ref().and_then(|j| j.get(method_id, self.overflow_checks)) {
                 return compiled.run(self, &args);
             }
@@ -909,6 +926,10 @@ impl Vm {
             // in frame locals/stacks (or JIT frame slots), so a deferred
             // collection is safe to run now.
             self.maybe_collect()?;
+
+            if self.debugger.is_some() {
+                self.debug_check(&method)?;
+            }
 
             let op = {
                 let frame = self.current_frame();
@@ -1912,6 +1933,117 @@ impl Vm {
             .iter()
             .find(|(_, c)| c.name == "Exception")
             .map(|(id, _)| *id)
+    }
+
+    /// Install a debug controller. Execution stops at source-line
+    /// boundaries (breakpoints, steps); the controller inspects a
+    /// snapshot and chooses how to resume. Starts in single-step mode so
+    /// the first line of the program stops. Suppresses JIT tier-up for
+    /// the whole run — the debugger drives the interpreter tier only.
+    pub fn set_debugger(&mut self, debugger: Box<dyn debug::Debugger>) {
+        self.debugger = Some(debugger);
+        self.step_mode = debug::StepMode::Step;
+    }
+
+    /// Add a source-line breakpoint.
+    pub fn add_breakpoint(&mut self, line: u32) {
+        self.breakpoints.insert(line);
+    }
+
+    /// Line-enriched stack trace of the current call stack (innermost
+    /// frame last) for error reporting: `Class.Method (line N)`, with
+    /// `(compiled)` for JIT frames whose pc has no line mapping. Distinct
+    /// from the program-visible `Exception.stackTrace` format, which is
+    /// unchanged.
+    pub fn stack_trace(&self) -> Vec<String> {
+        self.call_stack
+            .iter()
+            .map(|frame| {
+                let label = self.frame_label(frame.method_id);
+                if frame.is_jit {
+                    return format!("at {label} (compiled)");
+                }
+                let line = self
+                    .resolve_method(frame.method_id)
+                    .ok()
+                    .and_then(|m| debug::line_for_pc(m, frame.pc.saturating_sub(1)));
+                match line {
+                    Some(l) => format!("at {label} (line {l})"),
+                    None => format!("at {label}"),
+                }
+            })
+            .collect()
+    }
+
+    /// One debugger check at an op boundary: on a source-line change,
+    /// decide whether to stop (breakpoint or step state), snapshot the
+    /// frame for the controller, and apply its command.
+    fn debug_check(&mut self, method: &MethodDef) -> Result<(), VmError> {
+        let pc = self.current_frame().pc;
+        let Some(line) = debug::line_for_pc(method, pc) else {
+            return Ok(());
+        };
+        if line == self.current_frame().debug_line {
+            return Ok(());
+        }
+        self.current_frame().debug_line = line;
+        let depth = self.call_stack.len();
+        let step_hit = match self.step_mode {
+            debug::StepMode::Step => true,
+            debug::StepMode::Next(d) => depth <= d,
+            debug::StepMode::Running => false,
+        };
+        if !step_hit && !self.breakpoints.contains(&line) {
+            return Ok(());
+        }
+        let stop = self.build_debug_stop(method, line, depth);
+        let mut controller = self.debugger.take().expect("debugger present");
+        let cmd = controller.on_stop(&stop);
+        self.debugger = Some(controller);
+        for b in &cmd.add_breakpoints {
+            self.breakpoints.insert(*b);
+        }
+        for b in &cmd.remove_breakpoints {
+            self.breakpoints.remove(b);
+        }
+        self.step_mode = match cmd.resume.unwrap_or(debug::DebugResume::Continue) {
+            debug::DebugResume::Continue => debug::StepMode::Running,
+            debug::DebugResume::Step => debug::StepMode::Step,
+            debug::DebugResume::Next => debug::StepMode::Next(depth),
+            debug::DebugResume::Quit => {
+                return Err(VmError::Runtime("debugger: quit".to_string()));
+            }
+        };
+        Ok(())
+    }
+
+    /// Snapshot the stopped frame for the controller: named locals
+    /// (compiler temporaries filtered), rendered values, backtrace.
+    fn build_debug_stop(&self, method: &MethodDef, line: u32, depth: usize) -> debug::DebugStop {
+        let frame = self.call_stack.last().expect("stopped frame");
+        let mut locals = Vec::new();
+        for (slot, name) in method.local_names.iter().enumerate() {
+            if name.is_empty() || name.starts_with("__") {
+                continue;
+            }
+            if let Some(v) = frame.locals.get(slot) {
+                locals.push((name.clone(), describe_value(self, v)));
+            }
+        }
+        let mut backtrace = self.stack_trace();
+        if let Some(last) = backtrace.last_mut() {
+            // The innermost trace entry derives its line from the last
+            // *executed* op (right for fault traces); at a stop, the
+            // current line is the one about to execute.
+            *last = format!("at {} (line {})", self.frame_label(frame.method_id), line);
+        }
+        debug::DebugStop {
+            method: self.frame_label(frame.method_id),
+            line,
+            depth,
+            locals,
+            backtrace,
+        }
     }
 
     /// Multi-line stack trace of the current call stack, innermost frame last.

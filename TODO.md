@@ -5,7 +5,9 @@
 > generational (logical nursery, write barrier, minor/major split) with
 > tuning flags, stats, weak/soft/phantom refs, and an opt-in concurrent
 > collector (background marking, chunked sweeps), collecting under both tiers (JIT
-> frames scanned conservatively — see §2.1). Stdlib: collections
+> frames scanned conservatively — see §2.1). Debugging: source-level
+> debugger (`aura debug`: breakpoints, stepping, locals) on the
+> interpreter tier; line-mapped error traces. Stdlib: collections
 > (`List`/`Map`/`Set`), string methods, `Console.ReadLine`, and text `File`
 > I/O are implemented and verified under both interpreter and JIT, including
 > mid-run tier transitions; still missing: networking, async, reflection,
@@ -1266,11 +1268,38 @@
 #### ⏳ Planned
 
 **P0 - Critical**
-- [ ] **Source-level debugging**
-  - [ ] Debug information (DWARF or custom format)
-  - [ ] Line number mapping
-  - [ ] Variable inspection
+- [x] **Source-level debugging**
+  - [x] Debug information (custom format, not DWARF — DWARF targets
+    native codegen; a bytecode VM carries its own tables, as JVM/CPython
+    do): each `MethodDef` now holds a sorted `(first_op_index, line)`
+    table built from the parser's line marks and a slot-indexed
+    local-name table (params first, `this` included, compiler temps
+    `__`-prefixed; on slot reuse across scopes the last binding's name
+    wins — documented tradeoff). Both tables round-trip through the
+    binary module format.
+  - [x] Line number mapping — powers three things: debugger stops,
+    `aura debug` breakpoints by source line, and line-enriched stack
+    traces on runtime errors (`aura run` now prints `at Class.Method
+    (line N)` frames on VmError; the program-visible
+    `Exception.stackTrace` format is deliberately unchanged to preserve
+    tier output parity, since JIT frames have no line mapping).
+  - [x] Variable inspection — a real interactive debugger: `aura debug
+    <file> [--break N]` with breakpoints (`b`/`d`), `c`/`s`/`n`
+    (continue / step into / step over), `locals`, `p <name>`, `bt`, `q`;
+    embedders get the same via the `Debugger` trait +
+    `Vm::set_debugger`. Debugger runs the interpreter tier only —
+    installing one suppresses JIT tier-up (compiled frames cannot stop);
+    stated, not implied away. Breakpoints are line-only (no per-file
+    disambiguation in multi-file programs yet).
   - [x] Stack traces
+  Verified: aura-vm/tests/debugger.rs (6 tests: emitted tables sorted +
+  named, breakpoint stop with correct locals, step-into/step-over path
+  with depths and backtraces, quit sentinel, exact three-frame error
+  trace lines, debugger-suppresses-JIT with jit_compiled_count == 0),
+  interactive CLI smoke via piped stdin on host and under qemu, full
+  battery green (warnings baseline moved 115 -> 114: `is_jit` was dead
+  code on non-x86 hosts until `stack_trace()` began reading it), qemu
+  x86-64 ×3.
 
 - [ ] **REPL / Interactive mode**
   ```bash

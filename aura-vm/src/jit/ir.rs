@@ -1816,6 +1816,8 @@ mod tests {
                 handlers: Vec::new(),
                 max_stack,
                 locals,
+                line_starts: Vec::new(),
+                local_names: Vec::new(),
             },
         );
         let mut classes = HashMap::new();
@@ -1864,6 +1866,8 @@ mod tests {
                 handlers: Vec::new(),
                 max_stack,
                 locals,
+                line_starts: Vec::new(),
+                local_names: Vec::new(),
             },
         );
         let mut classes = HashMap::new();

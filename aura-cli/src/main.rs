@@ -60,6 +60,16 @@ enum Command {
         #[arg(long)]
         gc_stats: bool,
     },
+    /// Run source files under the interactive source-level debugger
+    /// (interpreter tier; breakpoints, stepping, variable inspection).
+    Debug {
+        /// Source file paths (see `compile` for multi-file semantics).
+        #[arg(required = true)]
+        paths: Vec<PathBuf>,
+        /// Breakpoint lines to set before the program starts.
+        #[arg(long = "break", value_name = "LINE")]
+        breakpoints: Vec<u32>,
+    },
 }
 
 fn main() -> Result<()> {
@@ -145,8 +155,122 @@ threshold {} bytes, nursery {} bytes",
                     );
                 }
             }
+            if result.is_err() {
+                for line in vm.stack_trace() {
+                    eprintln!("  {line}");
+                }
+            }
             result.context("runtime error")?;
             Ok(())
+        }
+        Command::Debug { paths, breakpoints } => {
+            let (files, name) = load(&paths)?;
+            let module = Arc::new(compile_files(&files, &name)?);
+            let mut vm = Vm::new(module);
+            for line in breakpoints {
+                vm.add_breakpoint(line);
+            }
+            vm.set_debugger(Box::new(CliDebugger::default()));
+            match vm.run() {
+                Ok(_) => {
+                    println!("program finished");
+                    Ok(())
+                }
+                Err(e) if format!("{e}").contains("debugger: quit") => Ok(()),
+                Err(e) => {
+                    for line in vm.stack_trace() {
+                        eprintln!("  {line}");
+                    }
+                    Err(e).context("runtime error")
+                }
+            }
+        }
+    }
+}
+
+/// Interactive command-line debug controller: a small REPL served at
+/// every stop. `help` lists commands.
+#[derive(Default)]
+struct CliDebugger;
+
+impl aura_vm::Debugger for CliDebugger {
+    fn on_stop(&mut self, stop: &aura_vm::DebugStop) -> aura_vm::DebugCommand {
+        use std::io::{BufRead, Write};
+        println!("stopped at line {} in {}", stop.line, stop.method);
+        let mut cmd = aura_vm::DebugCommand::default();
+        let stdin = std::io::stdin();
+        loop {
+            print!("(aura-db) ");
+            let _ = std::io::stdout().flush();
+            let mut input = String::new();
+            match stdin.lock().read_line(&mut input) {
+                Ok(0) | Err(_) => {
+                    // EOF: quit cleanly.
+                    cmd.resume = Some(aura_vm::DebugResume::Quit);
+                    return cmd;
+                }
+                Ok(_) => {}
+            }
+            let mut parts = input.split_whitespace();
+            match (parts.next(), parts.next()) {
+                (Some("c") | Some("continue"), _) => {
+                    cmd.resume = Some(aura_vm::DebugResume::Continue);
+                    return cmd;
+                }
+                (Some("s") | Some("step"), _) => {
+                    cmd.resume = Some(aura_vm::DebugResume::Step);
+                    return cmd;
+                }
+                (Some("n") | Some("next"), _) => {
+                    cmd.resume = Some(aura_vm::DebugResume::Next);
+                    return cmd;
+                }
+                (Some("q") | Some("quit"), _) => {
+                    cmd.resume = Some(aura_vm::DebugResume::Quit);
+                    return cmd;
+                }
+                (Some("b") | Some("break"), Some(arg)) => match arg.parse::<u32>() {
+                    Ok(line) => {
+                        cmd.add_breakpoints.push(line);
+                        println!("breakpoint at line {line}");
+                    }
+                    Err(_) => println!("usage: b <line>"),
+                },
+                (Some("d") | Some("delete"), Some(arg)) => match arg.parse::<u32>() {
+                    Ok(line) => {
+                        cmd.remove_breakpoints.push(line);
+                        println!("breakpoint at line {line} removed");
+                    }
+                    Err(_) => println!("usage: d <line>"),
+                },
+                (Some("locals"), _) => {
+                    if stop.locals.is_empty() {
+                        println!("no named locals");
+                    }
+                    for (name, value) in &stop.locals {
+                        println!("{name} = {value}");
+                    }
+                }
+                (Some("p") | Some("print"), Some(name)) => {
+                    match stop.locals.iter().find(|(n, _)| n == name) {
+                        Some((_, value)) => println!("{name} = {value}"),
+                        None => println!("no local named `{name}`"),
+                    }
+                }
+                (Some("bt") | Some("backtrace"), _) => {
+                    for line in &stop.backtrace {
+                        println!("  {line}");
+                    }
+                }
+                (Some("h") | Some("help"), _) => {
+                    println!(
+                        "commands: c(ontinue), s(tep into), n(ext / step over), \
+b <line>, d <line>, locals, p <name>, bt, q(uit)"
+                    );
+                }
+                (None, _) => {}
+                (Some(other), _) => println!("unknown command `{other}` (h for help)"),
+            }
         }
     }
 }

@@ -348,6 +348,15 @@ pub struct MethodDef {
     pub max_stack: u16,
     /// Number of local variables (parameters + locals).
     pub locals: u16,
+    /// Debug info (custom format; DWARF targets native code): source-line
+    /// table as `(first_op_index, line)` pairs sorted by op index — the
+    /// line for a pc is the last entry at or before it. Empty for
+    /// synthesized/intrinsic methods.
+    pub line_starts: Vec<(u32, u32)>,
+    /// Debug info: local slot names, indexed by slot (parameters first).
+    /// When lexical scopes reuse a slot, the last binding's name wins.
+    /// Compiler temporaries carry a `__` prefix. Empty when unavailable.
+    pub local_names: Vec<String>,
 }
 
 /// A protected region of a method's bytecode.
