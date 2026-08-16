@@ -119,6 +119,11 @@ natives! {
     TaskWaitStub = 121, "Task.wait", arity 1;
     TasksAll = 122, "Tasks.all", arity 1;
     TasksRace = 123, "Tasks.race", arity 1;
+
+    // Weak references
+    WeakNew = 130, "WeakRef.new", arity 1;
+    WeakIsAlive = 131, "WeakRef.isAlive", arity 1;
+    WeakGet = 132, "WeakRef.get", arity 1;
 }
 
 #[cfg(test)]

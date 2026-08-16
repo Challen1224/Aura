@@ -1,15 +1,15 @@
 # Aura Language TODO
 
 > **Status:** Core language and compiler: usable. VM with baseline x86-64
-> JIT: implemented; static, virtual, and super calls all tier up. GC now
-> actually runs: threshold-triggered, safepoint-based mark-and-sweep,
-> collecting under both tiers (JIT frames scanned conservatively — see
-> §2.1; generational/weak-ref work unstarted). Stdlib: collections
+> JIT: implemented; static, virtual, and super calls all tier up. GC:
+> generational (logical nursery, write barrier, minor/major split) with
+> tuning flags, stats, and `WeakRef<T>`, collecting under both tiers (JIT
+> frames scanned conservatively — see §2.1). Stdlib: collections
 > (`List`/`Map`/`Set`), string methods, `Console.ReadLine`, and text `File`
 > I/O are implemented and verified under both interpreter and JIT, including
 > mid-run tier transitions; still missing: networking, async, reflection,
 > binary I/O, string builder/formatting (see §4). Tooling: early.  
-> **Last Updated:** 2026-08-13  
+> **Last Updated:** 2026-08-16  
 > **Current Version:** 0.27.0
 
 ---
@@ -1078,13 +1078,31 @@
   limit no-op, pause-target adaptation to the floor, stats
   consistency), full battery green under both tiers.
 
-- [ ] **Weak references**
+- [x] **Weak references**
   ```aura
   WeakRef<Object> weak = new WeakRef(obj);
   if (weak.isAlive()) {
       let obj = weak.get();
   }
   ```
+  `WeakRef<T>` is an intrinsic class: `new WeakRef(obj)` infers `T` from
+  the argument (the first intrinsic constructor to take one — the
+  constructor path now type-checks and emits arguments), `isAlive() ->
+  bool`, `get() -> T?`. The target handle is stored untraced; because
+  GcRef handles are allocated monotonically and never reused, liveness is
+  exactly heap membership — no sweep-phase clearing in either generation,
+  and a dead target can never be confused with a recycled handle.
+  Promptness caveat (documented, tested around): the JIT roots frames by
+  conservative slot scan, so a target can outlive its last strong
+  reference while a compiled frame that ever handled it is still on the
+  stack; the shared guarantee is that a weak ref alone never keeps its
+  target alive once such frames exit. Fixed along the way: the emitter's
+  `__new_temp` constructor temp pinned the last-constructed object until
+  frame exit (invisible before weak refs existed) — now cleared after
+  use. Verified: aura-vm/tests/weak_refs.rs (5 tests: weak-vs-strong
+  liveness ×3 trials, promotion across generations then major-collection
+  reclaim, construction-site inference, WeakRefs inside collections,
+  non-object target runtime error), both tiers, qemu x86-64 ×3.
 
 - [ ] **Soft/phantom references**
 

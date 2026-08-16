@@ -1888,9 +1888,13 @@ impl<'a> MethodEmitter<'a> {
                 }
             }
             Expr::New(class_name, type_args, args) => {
-                // Intrinsic constructors (`new List<int>()`) lower to a native
-                // call; the typer guarantees they take no arguments.
+                // Intrinsic constructors (`new List<int>()`, `new
+                // WeakRef(obj)`) lower to a native call; arguments (if the
+                // intrinsic declares any) are pushed in order first.
                 if let Some(ctor) = crate::intrinsics::constructor_native(class_name) {
+                    for arg in args {
+                        self.emit_expr(arg)?;
+                    }
                     self.ops.push(Op::NativeCall(ctor as u16));
                     return Ok(());
                 }
@@ -1937,6 +1941,10 @@ impl<'a> MethodEmitter<'a> {
                     self.ops.push(Op::CallSuper(ctor_id));
                     self.ops.push(Op::Pop);
                     self.ops.push(Op::Ldloc(obj_local));
+                    // Clear the temp so it doesn't pin the object until the
+                    // frame exits (observable through weak references).
+                    self.ops.push(Op::LdNull);
+                    self.ops.push(Op::Stloc(obj_local));
                 }
             }
             Expr::Tuple(elements) => {

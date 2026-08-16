@@ -401,6 +401,31 @@ pub(crate) fn exec_native(vm: &mut Vm, id: NativeId, args: &[Value]) -> Result<V
             "Task.wait must compile to the TaskWait op; this native is a guard".to_string(),
         )),
 
+        // ---------------- WeakRef<T> ----------------
+        NativeId::WeakNew => {
+            let Value::Object(target) = args[0] else {
+                return Err(VmError::Runtime(format!(
+                    "{}: weak reference target must be an object, got {}",
+                    id.name(),
+                    args[0].type_name()
+                )));
+            };
+            let handle = vm.heap.allocate(AuraObject::WeakRef { target });
+            Ok(Value::Object(handle))
+        }
+        NativeId::WeakIsAlive => {
+            let target = weak_target(vm, id, &args[0])?;
+            Ok(Value::Bool(vm.heap.contains(target)))
+        }
+        NativeId::WeakGet => {
+            let target = weak_target(vm, id, &args[0])?;
+            if vm.heap.contains(target) {
+                Ok(Value::Object(target))
+            } else {
+                Ok(Value::Null)
+            }
+        }
+
         // ---------------- Console ----------------
         NativeId::ConsoleReadLine => {
             let mut line = String::new();
@@ -479,6 +504,16 @@ fn wrong_receiver(id: NativeId, got: &Value) -> VmError {
         id.name().split('.').next().unwrap_or("native"),
         got.type_name()
     ))
+}
+
+fn weak_target(vm: &Vm, id: NativeId, v: &Value) -> Result<aura_bytecode::GcRef, VmError> {
+    let Value::Object(h) = v else {
+        return Err(VmError::Runtime(format!("{}: not a weak reference", id.name())));
+    };
+    match vm.heap.get(*h)? {
+        AuraObject::WeakRef { target } => Ok(*target),
+        _ => Err(VmError::Runtime(format!("{}: not a weak reference", id.name()))),
+    }
 }
 
 fn oob(id: NativeId, idx: usize, len: usize) -> VmError {

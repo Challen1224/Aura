@@ -769,7 +769,7 @@ impl TypeChecker {
                     .map(|m| (m.name.to_string(), to_method_info(m, false)))
                     .collect(),
                 constructors: if ic.constructor.is_some() {
-                    vec![ConstructorInfo { params: Vec::new() }]
+                    vec![ConstructorInfo { params: ic.constructor_params.clone() }]
                 } else {
                     Vec::new()
                 },

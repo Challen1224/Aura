@@ -190,6 +190,14 @@ pub enum AuraObject {
         /// Key into the VM task table.
         id: u64,
     },
+    /// A weak reference: holds its target's handle without tracing it, so
+    /// the target can be collected. Handles are never reused (monotonic
+    /// allocation), so liveness is exactly "is the handle still in the
+    /// heap" — no sweep-phase clearing needed.
+    WeakRef {
+        /// The referent's (possibly dead) handle.
+        target: GcRef,
+    },
 }
 
 impl AuraObject {
@@ -204,7 +212,7 @@ impl AuraObject {
             | AuraObject::Enum(_)
             | AuraObject::Tuple(_)
             | AuraObject::Closure { .. } => true,
-            AuraObject::Task { .. } => false,
+            AuraObject::Task { .. } | AuraObject::WeakRef { .. } => false,
         }
     }
 
@@ -212,7 +220,9 @@ impl AuraObject {
     pub fn references(&self) -> Vec<GcRef> {
         let mut refs = Vec::new();
         match self {
-            AuraObject::String(_) | AuraObject::Task { .. } => {}
+            AuraObject::String(_)
+            | AuraObject::Task { .. }
+            | AuraObject::WeakRef { .. } => {}
             AuraObject::Instance { fields, .. }
             | AuraObject::Array { elements: fields }
             | AuraObject::Set { elements: fields, .. }

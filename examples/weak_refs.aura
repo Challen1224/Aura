@@ -1,0 +1,48 @@
+// Weak references: WeakRef<T> observes an object without keeping it
+// alive. isAlive() reports whether the target is still reachable;
+// get() returns the target, or null once the collector has reclaimed it.
+
+class Session {
+    string user;
+    Session(string user) { this.user = user; }
+}
+
+class Program {
+    static void churn() {
+        for (var i in 1..=5000) {
+            string junk = "throwaway allocation {i} padding padding";
+        }
+    }
+
+    static WeakRef<Session> orphan() {
+        // The Session created here has no root once this frame returns —
+        // only the weak reference observes it.
+        return new WeakRef(new Session("guest"));
+    }
+
+    static void Main() {
+        Session admin = new Session("admin");
+        var adminRef = new WeakRef(admin);
+        var guestRef = Program.orphan();
+
+        print("before GC: admin alive = "); print(adminRef.isAlive()); println();
+        print("before GC: guest alive = "); print(guestRef.isAlive()); println();
+
+        // Allocation pressure drives collections; the strongly-held
+        // session survives, the orphan does not.
+        Program.churn();
+
+        print("after GC: admin alive = "); print(adminRef.isAlive()); println();
+        print("after GC: guest alive = "); print(guestRef.isAlive()); println();
+
+        var live = adminRef.get();
+        if (live != null) {
+            print("resolved admin session for "); print(live.user); println();
+        }
+        var gone = guestRef.get();
+        if (gone == null) {
+            print("guest session was collected"); println();
+        }
+        print(admin.user); print(" still strongly held"); println();
+    }
+}

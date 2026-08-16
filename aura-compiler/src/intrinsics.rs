@@ -45,9 +45,11 @@ pub struct IntrinsicClass {
     pub name: &'static str,
     /// Generic parameter names (e.g. `["K", "V"]`).
     pub generic_params: &'static [&'static str],
-    /// Native id of the zero-argument constructor, or `None` for static
-    /// classes (which the typer marks abstract so `new` is rejected).
+    /// Native id of the constructor, or `None` for static classes (which
+    /// the typer marks abstract so `new` is rejected).
     pub constructor: Option<NativeId>,
+    /// Constructor parameter types (empty for the collection classes).
+    pub constructor_params: Vec<Type>,
     /// Instance methods.
     pub methods: Vec<IntrinsicMethod>,
     /// Static methods.
@@ -87,6 +89,7 @@ pub fn classes() -> Vec<IntrinsicClass> {
             name: "Task",
             generic_params: &["T"],
             constructor: None,
+            constructor_params: vec![],
             methods: vec![
                 // `wait` compiles to the dedicated TaskWait op (the emitter
                 // special-cases it before native dispatch); the native id
@@ -100,6 +103,7 @@ pub fn classes() -> Vec<IntrinsicClass> {
             name: "Tasks",
             generic_params: &[],
             constructor: None,
+            constructor_params: vec![],
             methods: vec![],
             static_methods: vec![
                 m(
@@ -129,9 +133,27 @@ pub fn classes() -> Vec<IntrinsicClass> {
             properties: vec![],
         },
         IntrinsicClass {
+            name: "WeakRef",
+            generic_params: &["T"],
+            constructor: Some(WeakNew),
+            constructor_params: vec![gp("T")],
+            methods: vec![
+                m("isAlive", vec![], Type::Bool, WeakIsAlive),
+                m(
+                    "get",
+                    vec![],
+                    Type::Nullable(Box::new(gp("T"))),
+                    WeakGet,
+                ),
+            ],
+            static_methods: vec![],
+            properties: vec![],
+        },
+        IntrinsicClass {
             name: "List",
             generic_params: &["T"],
             constructor: Some(ListNew),
+            constructor_params: vec![],
             methods: vec![
                 m("Add", vec![gp("T")], Type::Unit, ListAdd),
                 m("Get", vec![Type::Int32], gp("T"), ListGet),
@@ -149,6 +171,7 @@ pub fn classes() -> Vec<IntrinsicClass> {
             name: "Map",
             generic_params: &["K", "V"],
             constructor: Some(MapNew),
+            constructor_params: vec![],
             methods: vec![
                 m("Put", vec![gp("K"), gp("V")], Type::Unit, MapPut),
                 m("Get", vec![gp("K")], gp("V"), MapGet),
@@ -165,6 +188,7 @@ pub fn classes() -> Vec<IntrinsicClass> {
             name: "Set",
             generic_params: &["T"],
             constructor: Some(SetNew),
+            constructor_params: vec![],
             methods: vec![
                 m("Add", vec![gp("T")], Type::Bool, SetAdd),
                 m("Contains", vec![gp("T")], Type::Bool, SetContains),
@@ -179,6 +203,7 @@ pub fn classes() -> Vec<IntrinsicClass> {
             name: "Console",
             generic_params: &[],
             constructor: None,
+            constructor_params: vec![],
             methods: vec![],
             static_methods: vec![m(
                 "ReadLine",
@@ -192,6 +217,7 @@ pub fn classes() -> Vec<IntrinsicClass> {
             name: "File",
             generic_params: &[],
             constructor: None,
+            constructor_params: vec![],
             methods: vec![],
             static_methods: vec![
                 m("ReadAllText", vec![Type::String], Type::String, FileReadAllText),
