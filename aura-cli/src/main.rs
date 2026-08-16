@@ -50,6 +50,12 @@ enum Command {
         /// Best-effort soft target for minor pause times, in milliseconds.
         #[arg(long, value_name = "MS")]
         gc_pause_target_ms: Option<u64>,
+        /// Concurrent GC: majors become background marking cycles with a
+        /// brief snapshot pause and chunked sweeps (reclamation timing
+        /// becomes marker-dependent; default is deterministic
+        /// stop-the-world).
+        #[arg(long)]
+        gc_concurrent: bool,
         /// Print collector statistics to stderr after the program exits.
         #[arg(long)]
         gc_stats: bool,
@@ -73,6 +79,7 @@ fn main() -> Result<()> {
             gc_max_heap,
             gc_mode,
             gc_pause_target_ms,
+            gc_concurrent,
             gc_stats,
         } => {
             let (files, name) = load(&paths)?;
@@ -104,6 +111,9 @@ fn main() -> Result<()> {
             if gc_pause_target_ms.is_some() {
                 vm.set_gc_pause_target_ms(gc_pause_target_ms);
             }
+            if gc_concurrent {
+                vm.set_gc_concurrent(true);
+            }
             let result = vm.run();
             if gc_stats {
                 let s = vm.gc_stats();
@@ -128,6 +138,12 @@ threshold {} bytes, nursery {} bytes",
                     s.threshold,
                     s.nursery_size
                 );
+                if s.concurrent_cycles > 0 {
+                    eprintln!(
+                        "gc: {} concurrent cycles, {:?} background mark time (off-thread)",
+                        s.concurrent_cycles, s.concurrent_mark_total
+                    );
+                }
             }
             result.context("runtime error")?;
             Ok(())

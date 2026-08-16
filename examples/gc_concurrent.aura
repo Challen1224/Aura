@@ -1,0 +1,48 @@
+// Concurrent GC (opt-in: run with --gc-concurrent, add --gc-stats to see
+// cycle counts and pause numbers).
+//
+// In concurrent mode a major collection's stop-the-world cost shrinks to
+// a brief heap snapshot; the entire mark runs on a background thread and
+// the dead set is swept in small bounded chunks. Reclamation still
+// happens — just on the marker's schedule — so this program waits for it
+// with an allocating spin loop instead of assuming it is instant. The
+// output is identical under the default stop-the-world collector, the
+// concurrent collector, and both execution tiers.
+
+class Payload {
+    string name;
+    Payload(string name) { this.name = name; }
+}
+
+class Program {
+    static WeakRef<Payload> allocateTransient() {
+        // No strong root survives this frame; only the weak reference
+        // watches the payload die.
+        return new WeakRef(new Payload("transient buffer"));
+    }
+
+    static int Main() {
+        var watch = Program.allocateTransient();
+
+        // Keep allocating until the collector — stop-the-world or
+        // concurrent — has actually reclaimed the transient payload.
+        int spins = 0;
+        while (watch.isAlive() && spins < 200000) {
+            string junk = "allocation pressure {spins} padding padding";
+            spins = spins + 1;
+        }
+
+        if (watch.isAlive()) {
+            print("transient payload was never reclaimed"); println();
+            return 1;
+        }
+        print("transient payload reclaimed"); println();
+        print("weak get() is null = "); print(watch.get() == null); println();
+
+        // Retained data survives collection in every mode.
+        var keep = new List<string>();
+        for (var i in 1..=100) { keep.Add("retained row {i}"); }
+        print("retained rows = "); print(keep.Count); println();
+        return 0;
+    }
+}

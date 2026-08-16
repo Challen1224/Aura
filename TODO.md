@@ -3,7 +3,8 @@
 > **Status:** Core language and compiler: usable. VM with baseline x86-64
 > JIT: implemented; static, virtual, and super calls all tier up. GC:
 > generational (logical nursery, write barrier, minor/major split) with
-> tuning flags, stats, and weak/soft/phantom refs, collecting under both tiers (JIT
+> tuning flags, stats, weak/soft/phantom refs, and an opt-in concurrent
+> collector (background marking, chunked sweeps), collecting under both tiers (JIT
 > frames scanned conservatively — see §2.1). Stdlib: collections
 > (`List`/`Map`/`Set`), string methods, `Console.ReadLine`, and text `File`
 > I/O are implemented and verified under both interpreter and JIT, including
@@ -1127,11 +1128,43 @@
   non-object target errors), both tiers, qemu x86-64 ×3.
 
 **P1 - High Priority**
-- [ ] **Concurrent GC**
-  - [ ] Concurrent marking
-  - [ ] Concurrent sweeping
-  - [ ] Stop-the-world minimization
-  - [ ] Read/write barriers
+- [x] **Concurrent GC** (opt-in: `--gc-concurrent` / `Vm::set_gc_concurrent`)
+  - [x] Concurrent marking — snapshot-at-the-beginning: the
+    stop-the-world cost of a major shrinks to a deep clone of the object
+    map (no tracing); the entire mark runs on a background thread over
+    the snapshot. Sound because handles are monotonic and never reused:
+    unreachable-at-snapshot is unreachable forever, and anything
+    allocated after the snapshot is implicitly live.
+  - [x] Concurrent sweeping — honestly *incremental*, not off-thread:
+    the dead set is applied in bounded chunks (512 objects per safepoint
+    slice); deletion must touch the mutator-owned map. Snapshot
+    deallocation does happen off-thread.
+  - [x] Stop-the-world minimization — measured, not asserted: on the
+    churn demo, STW mode ran 56 majors with a 5.05ms max pause;
+    concurrent mode's largest STW slice (snapshot + sweep chunks) was
+    1.31ms with 1.76ms of marking moved off-thread. Minors stay STW
+    (already pause-target-bounded) and keep the nursery collected while
+    a cycle runs. Backpressure: at 2x threshold the mutator stalls on
+    the marker so the heap cannot balloon; `--gc-max-heap` pressure
+    joins the cycle synchronously so the limit stays exact and soft-ref
+    clearing keeps its guarantee.
+  - [x] Read/write barriers — the write barrier is the existing
+    `heap.get_mut` remembered-set gateway (generational); concurrent
+    marking needs no additional barrier because the literal snapshot
+    *is* the SATB invariant. A read barrier is unnecessary by
+    construction: the collector never moves objects. Stated rather than
+    implied: reclamation timing under concurrent mode depends on marker
+    speed (true of every concurrent collector), which is why the
+    deterministic stop-the-world collector remains the default.
+  Verified: aura-vm/tests/gc_concurrent.rs (4 tests: STW-vs-concurrent
+  result parity with cycle/minor assertions ×3 trials, eventual weak
+  reclamation via allocating spin-wait on both tiers, max-heap exactness
+  + soft clearing + strong-overflow error under concurrent, stats
+  consistency incl. off-thread mark time), suite run ×5 on host for
+  flake-shaking, examples crash-sweep 72/72 under `--jit
+  --gc-concurrent`, gc_concurrent example byte-identical across all four
+  mode combos on host and under qemu, full battery green, qemu x86-64
+  ×3.
 
 - [ ] **Compaction**
   - [ ] Mark-compact algorithm

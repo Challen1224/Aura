@@ -766,6 +766,21 @@ impl Vm {
         self.heap.set_mode(mode);
     }
 
+    /// Enable or disable the concurrent collector (opt-in): majors become
+    /// snapshot-at-the-beginning cycles marked on a background thread,
+    /// swept in bounded chunks at safepoints. Reclamation timing becomes
+    /// dependent on marker speed (as in any concurrent collector), so the
+    /// deterministic default remains stop-the-world.
+    pub fn set_gc_concurrent(&mut self, enabled: bool) {
+        self.heap.set_concurrent(enabled);
+    }
+
+    /// Join any in-flight concurrent cycle and apply its dead set now
+    /// (settles reclamation; used by tests and shutdown paths).
+    pub fn gc_settle(&mut self) {
+        self.heap.finish_cycle_blocking();
+    }
+
     /// Snapshot the collector's counters and configuration.
     pub fn gc_stats(&self) -> heap::GcStats {
         self.heap.stats()
@@ -789,6 +804,12 @@ impl Vm {
     /// object until the frame exits) but can never free a live one.
     pub(crate) fn maybe_collect(&mut self) -> Result<(), VmError> {
         if !self.heap.needs_collect() {
+            return Ok(());
+        }
+        // Concurrent mode: skip the root scan entirely when this
+        // safepoint has nothing to do (marker still running, no results,
+        // no nursery or limit pressure).
+        if !self.heap.should_pause() {
             return Ok(());
         }
         let mut roots: Vec<GcRef> = Vec::new();
