@@ -1452,7 +1452,14 @@ impl Vm {
     /// given exception value. Catch handlers take precedence over the `finally`
     /// handler of the same protected region.
     fn find_handler(&self, handlers: &[ExceptionHandler], pc: u32, exc: &Value) -> Option<ExceptionHandler> {
-        let mut best: Option<(u32, usize, bool)> = None;
+        // Innermost matching handler wins: largest start, then smallest
+        // range end. The end comparison both prefers a try's own catch over
+        // its finally (the catch range stops at the try body; the finally
+        // range extends over the catches) and prefers an inner try's
+        // finally over an outer try's catch when the two tries start at
+        // the same pc (a try whose first statement is another try). Full
+        // ties (multiple catch clauses of one try) keep source order.
+        let mut best: Option<(u32, u32, usize)> = None;
         for (i, h) in handlers.iter().enumerate() {
             if h.start <= pc && pc < h.end {
                 let matches = match &h.catch_type {
@@ -1462,19 +1469,18 @@ impl Vm {
                 if !matches {
                     continue;
                 }
-                let is_catch = h.catch_type.is_some();
                 let better = match best {
                     None => true,
-                    Some((b_start, _, b_is_catch)) => {
-                        h.start > b_start || (h.start == b_start && is_catch && !b_is_catch)
+                    Some((b_start, b_end, _)) => {
+                        h.start > b_start || (h.start == b_start && h.end < b_end)
                     }
                 };
                 if better {
-                    best = Some((h.start, i, is_catch));
+                    best = Some((h.start, h.end, i));
                 }
             }
         }
-        best.map(|(_, i, _)| handlers[i].clone())
+        best.map(|(_, _, i)| handlers[i].clone())
     }
 
     /// True if the runtime type of `exc` is assignable to `ty`.

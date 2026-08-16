@@ -19,6 +19,21 @@ pub struct Emitter {
 type FieldLayout = HashMap<String, Vec<(String, Type)>>;
 
 /// Local builder for a method body.
+/// An entry in the emitter's enclosing-finally stack, used to run
+/// `finally` bodies before abrupt jumps (`return`, `break`, `continue`)
+/// leave their protected regions.
+#[derive(Clone)]
+enum FinallyCtx {
+    /// A `finally` block's statements (re-emitted inline at each exit).
+    Finally(Vec<Stmt>),
+    /// A fixed op sequence (the `using` Dispose call, whose resource slot
+    /// is already allocated).
+    Ops(Vec<Op>),
+    /// A loop boundary (with its label): `break`/`continue` drain
+    /// finallys only down to their target loop.
+    LoopBoundary(Option<String>),
+}
+
 struct MethodEmitter<'a> {
     class_id: ClassId,
     class_name: &'a str,
@@ -43,6 +58,8 @@ struct MethodEmitter<'a> {
     /// Source line of the statement currently being emitted (from the
     /// parser's `Stmt::Mark` markers), for error locations.
     current_line: usize,
+    /// Enclosing `finally` blocks and loop boundaries, innermost last.
+    finally_stack: Vec<FinallyCtx>,
     /// Scratch scope for typing lambda bodies from `&self` contexts: name
     /// -> type pairs consulted (last wins) before `local_types`.
     type_overlay: std::cell::RefCell<Vec<(String, Type)>>,
@@ -689,6 +706,7 @@ impl<'a> MethodEmitter<'a> {
             constants: Vec::new(),
             method_ids,
             constructor_ids,
+            finally_stack: Vec::new(),
             type_overlay: std::cell::RefCell::new(Vec::new()),
             lambda_counter,
             lifted: Vec::new(),
@@ -751,6 +769,56 @@ impl<'a> MethodEmitter<'a> {
             self.ops.push(Op::Ret);
         }
         Ok(())
+    }
+
+    /// Emit the enclosing `finally` bodies an abrupt jump exits, innermost
+    /// first. `stop_at_loop`: `None` drains everything (a `return`);
+    /// `Some(label)` drains down to the matching loop boundary (`break`/
+    /// `continue`; unlabeled stops at the innermost boundary). Each body is
+    /// emitted with the stack truncated below it, so its own abrupt
+    /// statements re-run only the finallys outside it.
+    fn emit_pending_finallys(
+        &mut self,
+        stop_at_loop: Option<&Option<String>>,
+    ) -> Result<(), String> {
+        let snapshot = self.finally_stack.clone();
+        let mut i = snapshot.len();
+        while i > 0 {
+            i -= 1;
+            match &snapshot[i] {
+                FinallyCtx::LoopBoundary(loop_label) => match stop_at_loop {
+                    Some(target) => {
+                        let matches = match target {
+                            None => true,
+                            Some(l) => loop_label.as_ref() == Some(l),
+                        };
+                        if matches {
+                            break;
+                        }
+                    }
+                    None => {}
+                },
+                FinallyCtx::Finally(body) => {
+                    self.finally_stack = snapshot[..i].to_vec();
+                    let body = body.clone();
+                    for st in &body {
+                        self.emit_stmt(st)?;
+                    }
+                }
+                FinallyCtx::Ops(ops) => {
+                    self.ops.extend(ops.iter().cloned());
+                }
+            }
+        }
+        self.finally_stack = snapshot;
+        Ok(())
+    }
+
+    /// True when any enclosing finally would run before a `return`.
+    fn has_pending_finally(&self) -> bool {
+        self.finally_stack
+            .iter()
+            .any(|f| matches!(f, FinallyCtx::Finally(_) | FinallyCtx::Ops(_)))
     }
 
     fn emit_stmt(&mut self, stmt: &Stmt) -> Result<(), String> {
@@ -884,9 +952,20 @@ impl<'a> MethodEmitter<'a> {
             Stmt::Return(Some(e)) => {
                 let ret = self.method.return_ty.clone();
                 self.emit_expr_with_target(e, Some(&ret))?;
+                if self.has_pending_finally() {
+                    // The return value is computed before the finally
+                    // bodies run (C# order); stash it across them.
+                    let tmp = self.push_local("__ret_temp".to_string()) as u16;
+                    self.ops.push(Op::Stloc(tmp));
+                    self.emit_pending_finallys(None)?;
+                    self.ops.push(Op::Ldloc(tmp));
+                }
                 self.ops.push(Op::Ret);
             }
             Stmt::Return(None) => {
+                if self.has_pending_finally() {
+                    self.emit_pending_finallys(None)?;
+                }
                 self.ops.push(Op::LdNull);
                 self.ops.push(Op::Ret);
             }
@@ -960,6 +1039,8 @@ impl<'a> MethodEmitter<'a> {
                 let loop_start = self.ops.len() as u32;
                 self.continue_targets.push((label.clone(), Vec::new()));
                 self.break_targets.push((label.clone(), Vec::new()));
+        self.finally_stack.push(FinallyCtx::LoopBoundary(label.clone()));
+                self.finally_stack.push(FinallyCtx::LoopBoundary(label.clone()));
                 
                 self.emit_expr(condition)?;
                 let exit_jump = self.ops.len();
@@ -973,6 +1054,7 @@ impl<'a> MethodEmitter<'a> {
                 
                 // Patch break jumps
                 let (_, breaks) = self.break_targets.pop().unwrap();
+                self.finally_stack.pop();
                 for jump in breaks {
                     self.ops[jump] = Op::Br(end);
                 }
@@ -988,6 +1070,8 @@ impl<'a> MethodEmitter<'a> {
                 
                 let loop_start = self.ops.len() as u32;
                 self.break_targets.push((label.clone(), Vec::new()));
+        self.finally_stack.push(FinallyCtx::LoopBoundary(label.clone()));
+                self.finally_stack.push(FinallyCtx::LoopBoundary(label.clone()));
                 self.continue_targets.push((label.clone(), Vec::new()));
                 
                 // Emit condition
@@ -1012,6 +1096,7 @@ impl<'a> MethodEmitter<'a> {
                 
                 // Patch break jumps
                 let (_, breaks) = self.break_targets.pop().unwrap();
+                self.finally_stack.pop();
                 for jump in breaks {
                     self.ops[jump] = Op::Br(end);
                 }
@@ -1055,6 +1140,8 @@ impl<'a> MethodEmitter<'a> {
                 
                 let loop_start = self.ops.len() as u32;
                 self.break_targets.push((label.clone(), Vec::new()));
+        self.finally_stack.push(FinallyCtx::LoopBoundary(label.clone()));
+                self.finally_stack.push(FinallyCtx::LoopBoundary(label.clone()));
                 self.continue_targets.push((label.clone(), Vec::new()));
                 
                 // Emit: var_name < end (or <= for inclusive)
@@ -1089,6 +1176,7 @@ impl<'a> MethodEmitter<'a> {
                 
                 // Patch break jumps
                 let (_, breaks) = self.break_targets.pop().unwrap();
+                self.finally_stack.pop();
                 for jump in breaks {
                     self.ops[jump] = Op::Br(end_pos);
                 }
@@ -1101,6 +1189,8 @@ impl<'a> MethodEmitter<'a> {
             Stmt::DoWhile { label, body, condition } => {
                 let loop_start = self.ops.len() as u32;
                 self.break_targets.push((label.clone(), Vec::new()));
+        self.finally_stack.push(FinallyCtx::LoopBoundary(label.clone()));
+                self.finally_stack.push(FinallyCtx::LoopBoundary(label.clone()));
                 self.continue_targets.push((label.clone(), Vec::new()));
                 
                 for s in body {
@@ -1116,6 +1206,7 @@ impl<'a> MethodEmitter<'a> {
                 
                 // Patch break jumps
                 let (_, breaks) = self.break_targets.pop().unwrap();
+                self.finally_stack.pop();
                 for jump in breaks {
                     self.ops[jump] = Op::Br(end);
                 }
@@ -1129,6 +1220,7 @@ impl<'a> MethodEmitter<'a> {
                 if self.break_targets.is_empty() {
                     return Err("break outside of loop".to_string());
                 }
+                self.emit_pending_finallys(Some(label))?;
                 let jump = self.ops.len();
                 self.ops.push(Op::Br(0)); // placeholder
                 
@@ -1154,6 +1246,7 @@ impl<'a> MethodEmitter<'a> {
                 if self.continue_targets.is_empty() {
                     return Err("continue outside of loop".to_string());
                 }
+                self.emit_pending_finallys(Some(label))?;
                 let jump = self.ops.len();
                 self.ops.push(Op::Br(0)); // placeholder
                 
@@ -1189,6 +1282,11 @@ impl<'a> MethodEmitter<'a> {
                 catches,
                 finally_body,
             } => {
+                // Abrupt jumps out of the try/catch bodies must run this
+                // finally first (drained by return/break/continue).
+                if let Some(fb) = finally_body {
+                    self.finally_stack.push(FinallyCtx::Finally(fb.clone()));
+                }
                 let try_start = self.ops.len() as u32;
                 for s in try_body {
                     self.emit_stmt(s)?;
@@ -1226,6 +1324,9 @@ impl<'a> MethodEmitter<'a> {
                 }
 
                 let after_catches = self.ops.len() as u32;
+                if finally_body.is_some() {
+                    self.finally_stack.pop();
+                }
                 let finally_entry = if let Some(finally_body) = finally_body {
                     handler_entries.push(ExceptionHandler {
                         start: try_start,
@@ -1261,6 +1362,11 @@ impl<'a> MethodEmitter<'a> {
                 let resource_local = (self.locals.len() - 1) as u16;
                 self.ops.push(Op::Stloc(resource_local));
 
+                self.finally_stack.push(FinallyCtx::Ops(vec![
+                    Op::Ldloc(resource_local),
+                    Op::CallVirt("Dispose".to_string()),
+                    Op::Pop,
+                ]));
                 let try_start = self.ops.len() as u32;
                 for s in body {
                     self.emit_stmt(s)?;
@@ -1268,6 +1374,7 @@ impl<'a> MethodEmitter<'a> {
                 let try_end = self.ops.len() as u32;
                 let normal_jump = self.ops.len();
                 self.ops.push(Op::Br(0));
+                self.finally_stack.pop();
 
                 let finally_entry = self.ops.len() as u32;
                 self.ops.push(Op::Ldloc(resource_local));
@@ -2385,6 +2492,7 @@ impl<'a> MethodEmitter<'a> {
 
         let loop_start = self.ops.len() as u32;
         self.break_targets.push((label.clone(), Vec::new()));
+        self.finally_stack.push(FinallyCtx::LoopBoundary(label.clone()));
         self.continue_targets.push((label.clone(), Vec::new()));
 
         // while (__i < __n)
@@ -2427,6 +2535,7 @@ impl<'a> MethodEmitter<'a> {
         let end_pos = self.ops.len() as u32;
         self.ops[exit_jump] = Op::BrFalse(end_pos);
         let (_, breaks) = self.break_targets.pop().unwrap();
+                self.finally_stack.pop();
         for jump in breaks {
             self.ops[jump] = Op::Br(end_pos);
         }
