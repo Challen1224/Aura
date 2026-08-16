@@ -739,6 +739,16 @@ impl Vm {
         self.heap.collections()
     }
 
+    /// Number of minor (nursery-only) collections run so far.
+    pub fn gc_minor_collections(&self) -> u64 {
+        self.heap.minor_collections()
+    }
+
+    /// Number of major (full-heap) collections run so far.
+    pub fn gc_major_collections(&self) -> u64 {
+        self.heap.major_collections()
+    }
+
     /// Run a deferred garbage collection if the heap requested one.
     ///
     /// Must only be called at safepoints: moments when every live reference

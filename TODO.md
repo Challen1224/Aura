@@ -1022,12 +1022,36 @@
 #### ⏳ Planned
 
 **P0 - Critical**
-- [ ] **Generational GC**
-  - [ ] Young generation (nursery)
-  - [ ] Old generation (tenured)
-  - [ ] Minor GC (young gen only)
-  - [ ] Major GC (full heap)
-  - [ ] Write barriers
+- [x] **Generational GC**
+  - [x] Young generation (nursery)
+  - [x] Old generation (tenured)
+  - [x] Minor GC (young gen only)
+  - [x] Major GC (full heap)
+  - [x] Write barriers
+
+  A *logical* nursery over the handle-stable heap: objects never move,
+  so a generation is set membership, not a memory region. New objects
+  are young; `heap.get_mut` — provably the single mutation gateway —
+  doubles as an object-granularity write barrier logging mutated old
+  objects into the remembered set (the only old objects that can point
+  into the nursery, since unmutated survivors' children were all
+  promoted with them). Minor collections trace only the nursery, seeded
+  by the roots plus the remembered set's children, with old objects
+  terminal; survivors promote in place and the nursery empties. Full
+  pressure escalates to the existing major mark-and-sweep. The nursery
+  trigger is capped (≤64KB) independently of the adaptive full-heap
+  threshold, so a large stable old generation keeps minors frequent and
+  cheap while majors stay rare — the pinned-pressure benchmark
+  (aura-vm/tests/gc_bench.rs, `--ignored`) went from 18 full-heap scans
+  to 350 minors + 1 major on an 8000-object retained heap with 150k
+  transient allocations, ~6% faster overall and with far smaller
+  per-pause work. `gc_minor_collections()`/`gc_major_collections()`
+  exposed alongside the combined counter. Verified: the write barrier
+  keeps young objects alive when reachable only through mutated old
+  ones (641-link old→young chain under churn); statics, closures, and
+  suspended task frames stay rooted through generational passes
+  (aura-vm/tests/gc_nursery.rs), and the entire existing GC-churn suite
+  runs through the new collector.
 
 - [ ] **GC tuning**
   - [ ] Configurable heap size
