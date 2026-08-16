@@ -1166,10 +1166,21 @@
   mode combos on host and under qemu, full battery green, qemu x86-64
   ×3.
 
-- [ ] **Compaction**
-  - [ ] Mark-compact algorithm
-  - [ ] Reduce fragmentation
-  - [ ] Improve cache locality
+- [x] **Compaction** (research) — study written:
+      docs/research/compaction.md. Conclusion: park indefinitely. The
+      heap has no VM-owned memory region to compact — objects live in a
+      handle-keyed map and every payload (string/list/map storage) is a
+      separate system allocation, so fragmentation and cache placement
+      belong to the allocator, not the collector. Never-moving,
+      never-reused handles are now the load-bearing invariant under
+      weak/soft/phantom liveness, SATB concurrent-marking soundness, and
+      the JIT's conservative frame scan; a header-only mark-compact
+      behind a handle table would preserve them but buy nearly nothing,
+      and true payload compaction is a production-VM memory-subsystem
+      rewrite. The real adjacent win, if footprint ever matters, is a
+      post-major `shrink_to_fit` pass ("footprint trimming", not
+      mark-compact) — documented in the note, deliberately not built
+      now.
 
 - [ ] **Finalizers**
   ```aura
