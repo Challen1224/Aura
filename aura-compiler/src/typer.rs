@@ -288,7 +288,23 @@ pub fn build_subst(generic_params: &[GenericParam], type_args: &[Type]) -> TypeS
 /// identifiers that merely start with "operator".
 pub fn operator_symbol_of(name: &str) -> Option<&str> {
     let sym = name.strip_prefix("operator")?;
-    matches!(sym, "+" | "-" | "*" | "/" | "%" | "==" | "<" | "<=" | ">" | ">=").then_some(sym)
+    (matches!(sym, "+" | "-" | "*" | "/" | "%" | "==" | "<" | "<=" | ">" | ">=")
+        || is_custom_operator_symbol(sym))
+    .then_some(sym)
+}
+
+/// Whether `s` is a valid custom operator symbol: two or more characters,
+/// starting with `|`, `&`, or `^` (the characters no built-in expression
+/// operator begins with — `<`/`>` belong to generics), drawn from the
+/// operator charset, and not the reserved `&&`/`||`.
+pub fn is_custom_operator_symbol(s: &str) -> bool {
+    s.len() >= 2
+        && s != "&&"
+        && s != "||"
+        && s.starts_with(['|', '&', '^'])
+        && s.chars().all(|c| {
+            matches!(c, '|' | '&' | '^' | '+' | '-' | '*' | '/' | '%' | '<' | '>' | '=' | '!' | '~' | '?')
+        })
 }
 
 /// The operator-overload method name a binary operator resolves through, if
@@ -2254,7 +2270,12 @@ impl TypeChecker {
     /// method. Returns the (parameter, return) types with the receiver's
     /// type arguments substituted.
     fn user_operator(&self, op: BinOp, lt: &Type) -> Option<(Type, Type)> {
-        let mname = operator_method_name(op)?;
+        self.user_operator_named(operator_method_name(op)?, lt)
+    }
+
+    /// [`Self::user_operator`] by explicit method name (custom operators:
+    /// `operator|>` etc.).
+    fn user_operator_named(&self, mname: &str, lt: &Type) -> Option<(Type, Type)> {
         let Type::Class(name, type_args) = lt else { return None };
         if name == "null" {
             return None;
@@ -3911,6 +3932,31 @@ impl TypeChecker {
                     return Err(TypeError("logical operators require booleans".to_string()));
                 }
                 Ok(Type::Bool)
+            }
+            Expr::CustomOp(sym, left, right) => {
+                let lt = self.infer_expr(left, class, locals, in_instance, return_ty, generic_params)?;
+                let rt = self.infer_expr(right, class, locals, in_instance, return_ty, generic_params)?;
+                let mname = format!("operator{}", sym);
+                let Some((param, ret)) = self.user_operator_named(&mname, &lt) else {
+                    return Err(TypeError(format!(
+                        "no `operator{}` declared on `{}`: a custom operator resolves to an \
+`operator{}` overload on the left operand's class",
+                        sym,
+                        lt.name(),
+                        sym
+                    )));
+                };
+                if !self.is_assignable(&param, &rt) {
+                    return Err(TypeError(format!(
+                        "cannot apply `{}`: right operand has type `{}` but `operator{}` \
+expects `{}`",
+                        sym,
+                        rt.name(),
+                        sym,
+                        param.name()
+                    )));
+                }
+                Ok(ret)
             }
             Expr::Binary(op, left, right) => {
                 let lt = self.infer_expr(left, class, locals, in_instance, return_ty, generic_params)?;

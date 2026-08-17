@@ -9,6 +9,9 @@
 > debugger (`aura debug`: breakpoints incl. bytecode-level, step
 > into/over/out, locals, watches) plus a DAP adapter (`aura dap`) for VS
 > Code/nvim-dap, on the interpreter tier; line-mapped error traces.
+> Language: custom operator symbols (`|>`-style, one precedence tier)
+> atop the existing overload set; multi-error compiles with did-you-mean
+> suggestions and source-context rendering.
 > Stdlib: collections
 > (`List`/`Map`/`Set`), string methods, `Console.ReadLine`, and text `File`
 > I/O are implemented and verified under both interpreter and JIT, including
@@ -1438,9 +1441,37 @@
   (206 aura-vm / 216 workspace), examples 72/72, warnings 114 =
   baseline, qemu x86-64 ×3.
 
-- [ ] **Operator precedence parsing**
-  - [ ] Precedence climbing or Pratt parser
-  - [ ] Custom operator definitions
+- [x] **Operator precedence parsing**
+  - [x] Precedence climbing or Pratt parser — the eight-layer
+    recursive-descent chain (`??` → `||` → `&&` → equality → relational
+    → ranges → additive → multiplicative) is now one precedence-climbing
+    loop over a table (`parse_binary(min_bp)`), preserving every
+    grouping exactly (pinned by a hand-computed precedence-matrix test
+    on both tiers plus the full battery: the rewrite touches every
+    expression in every program). One behavior improvement: `1..2..3`
+    now errors with "range expressions cannot be chained" instead of a
+    confusing downstream parse error.
+  - [x] Custom operator definitions — new operator symbols starting
+    with `|`, `&`, or `^` (the characters no built-in expression
+    operator begins with — `<`/`>` belong to generics, so nested-generic
+    `>>` is untouched), continuing over the operator charset: `|>`,
+    `^^`, `&+`, `|||`, ... Declared exactly like the built-in overloads
+    (`float operator|>(Vec2 o)`) and resolved through the same
+    machinery (instance method on the left operand's class, same
+    public/instance/no-generics rules). All custom operators share one
+    documented precedence tier — looser than arithmetic, tighter than
+    ranges and comparisons — and are left-associative, so `a + b |> c`
+    is `(a + b) |> c` and pipelines chain. Undeclared symbols are a
+    clean type error naming the missing `operator<sym>` overload.
+    `&&`/`||` stay reserved; single `|` (literal unions) is untouched
+    (pinned by a no-whitespace lexing test).
+  Verified: aura-vm/tests/custom_operators.rs (4 tests: precedence
+  matrix parity, end-to-end custom ops incl. chaining + precedence
+  interaction with `+` and `==`, four diagnostics incl. the range-chain
+  error and static-operator rejection, lexer compatibility), example
+  examples/custom_operators.aura byte-identical both tiers, full battery
+  green (210 aura-vm / 220 workspace, examples 73/73, warnings 114 =
+  baseline), qemu x86-64 213/0 ×3.
 
 **P1 - High Priority**
 - [ ] **Incremental parsing**

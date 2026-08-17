@@ -375,6 +375,11 @@ impl Ctx<'_> {
             Expr::Binary(op, l, r) => {
                 Expr::Binary(*op, Box::new(self.expr(l)), Box::new(self.expr(r)))
             }
+            Expr::CustomOp(sym, l, r) => Expr::CustomOp(
+                sym.clone(),
+                Box::new(self.expr(l)),
+                Box::new(self.expr(r)),
+            ),
             Expr::Unary(op, x) => Expr::Unary(*op, Box::new(self.expr(x))),
             Expr::Ternary(c, t, f) => Expr::Ternary(
                 Box::new(self.expr(c)),

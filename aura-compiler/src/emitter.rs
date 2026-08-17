@@ -1641,6 +1641,18 @@ impl<'a> MethodEmitter<'a> {
                 }
                 self.ops[end_jump] = Op::Br(end_target);
             }
+            Expr::CustomOp(sym, left, right) => {
+                // Custom operators always lower to a method call on the left
+                // operand (the typer guaranteed the overload exists); same
+                // temp dance as overloaded built-ins for evaluation order.
+                let mname = format!("operator{}", sym);
+                let tmp = self.push_local("__op_lhs".to_string()) as u16;
+                self.emit_expr(left)?;
+                self.ops.push(Op::Stloc(tmp));
+                self.emit_expr(right)?;
+                self.ops.push(Op::Ldloc(tmp));
+                self.ops.push(Op::CallVirt(mname));
+            }
             Expr::Binary(op, left, right) => {
                 // User-defined operator: `a + b` is a method call on `a`.
                 // `CallVirt` wants arguments below the receiver, so the left
@@ -3154,7 +3166,11 @@ impl<'a> MethodEmitter<'a> {
     /// type arguments substituted. The typer has already validated the
     /// operand types; this only decides the lowering.
     fn user_operator(&self, op: BinOp, left: &Expr) -> Option<(String, Type)> {
-        let mname = crate::typer::operator_method_name(op)?;
+        self.user_operator_named(crate::typer::operator_method_name(op)?, left)
+    }
+
+    /// [`Self::user_operator`] by explicit method name (custom operators).
+    fn user_operator_named(&self, mname: &str, left: &Expr) -> Option<(String, Type)> {
         let Ok(Type::Class(name, type_args)) = self.expr_ty(left) else {
             return None;
         };
@@ -3306,6 +3322,14 @@ impl<'a> MethodEmitter<'a> {
                     .map(|e| self.expr_ty(e))
                     .collect::<Result<Vec<_>, _>>()?;
                 Type::Tuple(tys)
+            }
+            Expr::CustomOp(sym, left, _) => {
+                // Needed so chained custom operators (`a |> f |> g`) can
+                // resolve the outer overload from the inner result type.
+                match self.user_operator_named(&format!("operator{}", sym), left) {
+                    Some((_, ret)) => ret,
+                    None => return Err(format!("no `operator{}` on left operand", sym)),
+                }
             }
             Expr::Binary(op, left, right) => {
                 match op {
@@ -3973,7 +3997,10 @@ fn collect_free_vars_expr(
         Expr::Field(obj, _) | Expr::NullConditionalField(obj, _) => {
             collect_free_vars_expr(obj, bound, out)
         }
-        Expr::Binary(_, a, b) | Expr::NullCoalesce(a, b) | Expr::Range(a, b, _) => {
+        Expr::Binary(_, a, b)
+        | Expr::CustomOp(_, a, b)
+        | Expr::NullCoalesce(a, b)
+        | Expr::Range(a, b, _) => {
             collect_free_vars_expr(a, bound, out);
             collect_free_vars_expr(b, bound, out);
         }

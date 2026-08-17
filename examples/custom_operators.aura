@@ -1,0 +1,40 @@
+// Custom operator definitions: new symbols starting with `|`, `&`, or
+// `^`, declared exactly like the built-in overloads. All custom
+// operators share one precedence tier — looser than arithmetic, tighter
+// than ranges and comparisons — and are left-associative, so pipelines
+// chain naturally and `a + b |> c` means `(a + b) |> c`.
+
+class Vec2 {
+    float x;
+    float y;
+    Vec2(float x, float y) { this.x = x; this.y = y; }
+    Vec2 operator+(Vec2 o) { return new Vec2(this.x + o.x, this.y + o.y); }
+    // `|>` as dot product
+    float operator|>(Vec2 o) { return this.x * o.x + this.y * o.y; }
+    // `^^` as scaling
+    Vec2 operator^^(float s) { return new Vec2(this.x * s, this.y * s); }
+}
+
+class Pipeline {
+    string log;
+    Pipeline(string log) { this.log = log; }
+    Pipeline operator|>(string stage) { return new Pipeline("{this.log} -> {stage}"); }
+}
+
+class Program {
+    static void Main() {
+        Vec2 a = new Vec2(1.0, 2.0);
+        Vec2 b = new Vec2(3.0, 4.0);
+
+        // (a + b) |> (b ^^ 2.0): `+` binds tighter than any custom op.
+        float dot = a + b |> (b ^^ 2.0);
+        print("dot = "); print(dot); println();
+
+        // Left-associative chaining reads like a pipeline.
+        Pipeline p = new Pipeline("load") |> "parse" |> "check" |> "emit";
+        print(p.log); println();
+
+        // Custom ops bind tighter than comparisons: (a |> b) == 11.0.
+        print(a |> b == 11.0); println();
+    }
+}

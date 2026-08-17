@@ -641,6 +641,11 @@ pub enum Expr {
     Var(String),
     /// Binary operation.
     Binary(BinOp, Box<Expr>, Box<Expr>),
+    /// Custom binary operator (`a |> b`): resolves to an
+    /// `operator<sym>` overload on the left operand's type. All custom
+    /// operators share one precedence tier (looser than arithmetic,
+    /// tighter than ranges) and are left-associative.
+    CustomOp(String, Box<Expr>, Box<Expr>),
     /// Unary operation.
     Unary(UnaryOp, Box<Expr>),
     /// Ternary conditional: cond ? then_expr : else_expr

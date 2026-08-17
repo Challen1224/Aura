@@ -72,6 +72,10 @@ pub enum Token {
     Or,
     /// `|`
     Pipe,
+    /// A custom operator symbol (starts with `|`, `&`, or `^`; two or
+    /// more characters; `&&`/`||` stay reserved). Resolved to an
+    /// `operator<sym>` overload by the typer.
+    CustomOp(String),
     /// `..`
     DotDot,
     /// `..=`
@@ -214,6 +218,7 @@ impl fmt::Display for Token {
             Token::And => "`&&`",
             Token::Or => "`||`",
             Token::Pipe => "`|`",
+            Token::CustomOp(s) => return write!(f, "`{}`", s),
             Token::DotDot => "`..`",
             Token::DotDotEq => "`..=`",
             Token::Class => "`class`",
@@ -450,20 +455,29 @@ impl<'a> Lexer<'a> {
                     Ok(Token::Gt)
                 }
             }
-            Some('&') => {
+            // `|`, `&`, `^` begin custom operators: munch the maximal run
+            // of operator characters. `&&`/`||` stay themselves; a run of
+            // one keeps the historical single-char behavior. Runs cannot
+            // start with `<`/`>` (generics own those), so nested-generic
+            // `>>` and comparisons are untouched.
+            Some(c @ ('&' | '|' | '^')) => {
                 self.advance();
-                if self.match_char('&') {
-                    Ok(Token::And)
-                } else {
-                    Err(self.error("unexpected character `&`"))
+                let mut sym = String::from(c);
+                while let Some(n) = self.peek() {
+                    if matches!(n, '|' | '&' | '^' | '+' | '-' | '*' | '/' | '%' | '<' | '>' | '=' | '!' | '~' | '?') {
+                        sym.push(n);
+                        self.advance();
+                    } else {
+                        break;
+                    }
                 }
-            }
-            Some('|') => {
-                self.advance();
-                if self.match_char('|') {
-                    Ok(Token::Or)
-                } else {
-                    Ok(Token::Pipe)
+                match sym.as_str() {
+                    "&&" => Ok(Token::And),
+                    "||" => Ok(Token::Or),
+                    "|" => Ok(Token::Pipe),
+                    "&" => Err(self.error("unexpected character `&`")),
+                    "^" => Err(self.error("unexpected character `^`")),
+                    _ => Ok(Token::CustomOp(sym)),
                 }
             }
             Some(c) => Err(self.error(&format!("unexpected character `{}`", c))),

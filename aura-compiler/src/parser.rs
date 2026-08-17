@@ -542,6 +542,10 @@ fn expand_expr(expr: &mut Expr, aliases: &HashMap<String, TypeAliasDecl>) -> Res
             expand_expr(b, aliases)?;
             let _ = op;
         }
+        Expr::CustomOp(_, a, b) => {
+            expand_expr(a, aliases)?;
+            expand_expr(b, aliases)?;
+        }
         Expr::Unary(_, a) => expand_expr(a, aliases)?,
         Expr::Ternary(c, a, b) => {
             expand_expr(c, aliases)?;
@@ -1511,26 +1515,31 @@ impl<'a> Parser<'a> {
         // `a + b` lowers to a call on the left operand. (`operator` alone
         // remains a valid member name.)
         if name == "operator" {
-            let sym = if self.match_token(Token::Plus) {
-                Some("+")
+            let sym: Option<String> = if self.match_token(Token::Plus) {
+                Some("+".to_string())
             } else if self.match_token(Token::Minus) {
-                Some("-")
+                Some("-".to_string())
             } else if self.match_token(Token::Star) {
-                Some("*")
+                Some("*".to_string())
             } else if self.match_token(Token::Slash) {
-                Some("/")
+                Some("/".to_string())
             } else if self.match_token(Token::Percent) {
-                Some("%")
+                Some("%".to_string())
             } else if self.match_token(Token::Eq) {
-                Some("==")
+                Some("==".to_string())
             } else if self.match_token(Token::Lt) {
-                Some("<")
+                Some("<".to_string())
             } else if self.match_token(Token::Le) {
-                Some("<=")
+                Some("<=".to_string())
             } else if self.match_token(Token::Gt) {
-                Some(">")
+                Some(">".to_string())
             } else if self.match_token(Token::Ge) {
-                Some(">=")
+                Some(">=".to_string())
+            } else if let Some(Token::CustomOp(sym)) = self.peek() {
+                // Custom operator overload: `Vector operator|>(Vector other)`.
+                let sym = sym.clone();
+                self.advance();
+                Some(sym)
             } else if self.check(Token::Ne) {
                 return Err(
                     "`operator!=` cannot be declared: declare `operator==` and `!=` is \
@@ -2243,7 +2252,7 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_expr(&mut self) -> Result<Expr, String> {
-        let mut expr = self.parse_null_coalesce()?;
+        let mut expr = self.parse_binary(0)?;
         // Record copy-with: `p with { x = 5, y = 6 }`.
         while self.match_token(Token::With) {
             self.consume(Token::LBrace, "expected `{` after `with`")?;
@@ -2272,123 +2281,99 @@ impl<'a> Parser<'a> {
         }
     }
 
-    fn parse_null_coalesce(&mut self) -> Result<Expr, String> {
-        let mut left = self.parse_or()?;
-        while self.match_token(Token::NullCoalesce) {
-            let right = self.parse_or()?;
-            left = Expr::NullCoalesce(Box::new(left), Box::new(right));
-        }
-        Ok(left)
-    }
+    /// Binary-expression parsing by precedence climbing over one table
+    /// (replaces the old eight-layer recursive-descent chain). Tiers,
+    /// loosest first: `??`, `||`, `&&`, equality, relational/`is`,
+    /// ranges, custom operators (one shared tier), additive,
+    /// multiplicative. All binary operators are left-associative; ranges
+    /// do not chain (explicit error instead of a confusing downstream
+    /// one).
+    fn parse_binary(&mut self, min_bp: u8) -> Result<Expr, String> {
+        const BP_COALESCE: u8 = 1;
+        const BP_OR: u8 = 2;
+        const BP_AND: u8 = 3;
+        const BP_EQUALITY: u8 = 4;
+        const BP_RELATIONAL: u8 = 5;
+        const BP_RANGE: u8 = 6;
+        const BP_CUSTOM: u8 = 7;
+        const BP_ADDITIVE: u8 = 8;
+        const BP_MULTIPLICATIVE: u8 = 9;
 
-    fn parse_or(&mut self) -> Result<Expr, String> {
-        let mut left = self.parse_and()?;
-        while self.match_token(Token::Or) {
-            let right = self.parse_and()?;
-            left = Expr::Binary(BinOp::Or, Box::new(left), Box::new(right));
-        }
-        Ok(left)
-    }
-
-    fn parse_and(&mut self) -> Result<Expr, String> {
-        let mut left = self.parse_equality()?;
-        while self.match_token(Token::And) {
-            let right = self.parse_equality()?;
-            left = Expr::Binary(BinOp::And, Box::new(left), Box::new(right));
-        }
-        Ok(left)
-    }
-
-    fn parse_equality(&mut self) -> Result<Expr, String> {
-        let mut left = self.parse_relational()?;
-        loop {
-            if self.match_token(Token::Eq) {
-                let right = self.parse_relational()?;
-                left = Expr::Binary(BinOp::Eq, Box::new(left), Box::new(right));
-            } else if self.match_token(Token::Ne) {
-                let right = self.parse_relational()?;
-                left = Expr::Binary(BinOp::Ne, Box::new(left), Box::new(right));
-            } else {
-                break;
-            }
-        }
-        Ok(left)
-    }
-
-    fn parse_relational(&mut self) -> Result<Expr, String> {
-        let mut left = self.parse_range()?;
-        loop {
-            if self.match_token(Token::Lt) {
-                let right = self.parse_range()?;
-                left = Expr::Binary(BinOp::Lt, Box::new(left), Box::new(right));
-            } else if self.match_token(Token::Le) {
-                let right = self.parse_range()?;
-                left = Expr::Binary(BinOp::Le, Box::new(left), Box::new(right));
-            } else if self.match_token(Token::Gt) {
-                let right = self.parse_range()?;
-                left = Expr::Binary(BinOp::Gt, Box::new(left), Box::new(right));
-            } else if self.match_token(Token::Ge) {
-                let right = self.parse_range()?;
-                left = Expr::Binary(BinOp::Ge, Box::new(left), Box::new(right));
-            } else if self.match_token(Token::Is) {
-                // `expr is Type` / `expr is Type name` (type test + binding).
-                let ty = self.parse_type()?;
-                let binding = if let Some(Token::Ident(_)) = self.peek() {
-                    Some(self.consume_ident("expected binding name")?)
-                } else {
-                    None
-                };
-                left = Expr::Is(Box::new(left), ty, binding);
-            } else {
-                break;
-            }
-        }
-        Ok(left)
-    }
-
-    fn parse_range(&mut self) -> Result<Expr, String> {
-        let start = self.parse_additive()?;
-        if self.match_token(Token::DotDot) {
-            let end = self.parse_additive()?;
-            Ok(Expr::Range(Box::new(start), Box::new(end), false))
-        } else if self.match_token(Token::DotDotEq) {
-            let end = self.parse_additive()?;
-            Ok(Expr::Range(Box::new(start), Box::new(end), true))
-        } else {
-            Ok(start)
-        }
-    }
-
-    fn parse_additive(&mut self) -> Result<Expr, String> {
-        let mut left = self.parse_multiplicative()?;
-        loop {
-            if self.match_token(Token::Plus) {
-                let right = self.parse_multiplicative()?;
-                left = Expr::Binary(BinOp::Add, Box::new(left), Box::new(right));
-            } else if self.match_token(Token::Minus) {
-                let right = self.parse_multiplicative()?;
-                left = Expr::Binary(BinOp::Sub, Box::new(left), Box::new(right));
-            } else {
-                break;
-            }
-        }
-        Ok(left)
-    }
-
-    fn parse_multiplicative(&mut self) -> Result<Expr, String> {
         let mut left = self.parse_unary()?;
         loop {
-            if self.match_token(Token::Star) {
-                let right = self.parse_unary()?;
-                left = Expr::Binary(BinOp::Mul, Box::new(left), Box::new(right));
-            } else if self.match_token(Token::Slash) {
-                let right = self.parse_unary()?;
-                left = Expr::Binary(BinOp::Div, Box::new(left), Box::new(right));
-            } else if self.match_token(Token::Percent) {
-                let right = self.parse_unary()?;
-                left = Expr::Binary(BinOp::Rem, Box::new(left), Box::new(right));
-            } else {
+            enum Op {
+                Simple(BinOp, u8),
+                Coalesce,
+                Is,
+                Range(bool),
+                Custom(String),
+            }
+            let op = match self.peek() {
+                Some(Token::NullCoalesce) => Op::Coalesce,
+                Some(Token::Or) => Op::Simple(BinOp::Or, BP_OR),
+                Some(Token::And) => Op::Simple(BinOp::And, BP_AND),
+                Some(Token::Eq) => Op::Simple(BinOp::Eq, BP_EQUALITY),
+                Some(Token::Ne) => Op::Simple(BinOp::Ne, BP_EQUALITY),
+                Some(Token::Lt) => Op::Simple(BinOp::Lt, BP_RELATIONAL),
+                Some(Token::Le) => Op::Simple(BinOp::Le, BP_RELATIONAL),
+                Some(Token::Gt) => Op::Simple(BinOp::Gt, BP_RELATIONAL),
+                Some(Token::Ge) => Op::Simple(BinOp::Ge, BP_RELATIONAL),
+                Some(Token::Is) => Op::Is,
+                Some(Token::DotDot) => Op::Range(false),
+                Some(Token::DotDotEq) => Op::Range(true),
+                Some(Token::Plus) => Op::Simple(BinOp::Add, BP_ADDITIVE),
+                Some(Token::Minus) => Op::Simple(BinOp::Sub, BP_ADDITIVE),
+                Some(Token::Star) => Op::Simple(BinOp::Mul, BP_MULTIPLICATIVE),
+                Some(Token::Slash) => Op::Simple(BinOp::Div, BP_MULTIPLICATIVE),
+                Some(Token::Percent) => Op::Simple(BinOp::Rem, BP_MULTIPLICATIVE),
+                Some(Token::CustomOp(sym)) => Op::Custom(sym.clone()),
+                _ => break,
+            };
+            let bp = match &op {
+                Op::Coalesce => BP_COALESCE,
+                Op::Simple(_, bp) => *bp,
+                Op::Is => BP_RELATIONAL,
+                Op::Range(_) => BP_RANGE,
+                Op::Custom(_) => BP_CUSTOM,
+            };
+            if bp < min_bp {
                 break;
+            }
+            self.advance();
+            match op {
+                Op::Simple(binop, bp) => {
+                    let right = self.parse_binary(bp + 1)?;
+                    left = Expr::Binary(binop, Box::new(left), Box::new(right));
+                }
+                Op::Coalesce => {
+                    let right = self.parse_binary(BP_COALESCE + 1)?;
+                    left = Expr::NullCoalesce(Box::new(left), Box::new(right));
+                }
+                Op::Is => {
+                    // `expr is Type` / `expr is Type name` (type test +
+                    // binding); no right-hand expression.
+                    let ty = self.parse_type()?;
+                    let binding = if let Some(Token::Ident(_)) = self.peek() {
+                        Some(self.consume_ident("expected binding name")?)
+                    } else {
+                        None
+                    };
+                    left = Expr::Is(Box::new(left), ty, binding);
+                }
+                Op::Range(inclusive) => {
+                    if matches!(left, Expr::Range(..)) {
+                        return Err(format!(
+                            "line {}: range expressions cannot be chained",
+                            self.cur_line()
+                        ));
+                    }
+                    let right = self.parse_binary(BP_RANGE + 1)?;
+                    left = Expr::Range(Box::new(left), Box::new(right), inclusive);
+                }
+                Op::Custom(sym) => {
+                    let right = self.parse_binary(BP_CUSTOM + 1)?;
+                    left = Expr::CustomOp(sym, Box::new(left), Box::new(right));
+                }
             }
         }
         Ok(left)
