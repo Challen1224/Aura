@@ -335,14 +335,15 @@ fn exec(vm: &mut Vm, op: &Op, args: &[Value]) -> Result<Option<Value>, Result<Va
         }
         Op::Print => {
             let v = args.first().cloned().ok_or(Err(VmError::StackUnderflow))?;
-            match &v {
-                Value::String(handle) => print!("{}", vm.heap.get_string(*handle).unwrap_or("")),
-                _ => print!("{}", describe_value(vm, &v)),
-            }
+            let text = match &v {
+                Value::String(handle) => vm.heap.get_string(*handle).unwrap_or("").to_string(),
+                _ => describe_value(vm, &v),
+            };
+            vm.write_out(&text);
             Ok(None)
         }
         Op::PrintLn => {
-            println!();
+            vm.write_out("\n");
             Ok(None)
         }
         Op::StringConcat(count) => {

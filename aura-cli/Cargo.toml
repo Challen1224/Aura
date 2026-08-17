@@ -15,3 +15,7 @@ aura-compiler.workspace = true
 aura-vm.workspace = true
 anyhow.workspace = true
 clap.workspace = true
+serde_json = "1"
+
+[dev-dependencies]
+serde_json = "1"

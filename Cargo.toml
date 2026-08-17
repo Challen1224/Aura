@@ -20,3 +20,19 @@ aura-compiler = { path = "aura-compiler" }
 thiserror = "2"
 anyhow = "1"
 clap = { version = "4", features = ["derive"] }
+
+# Opt-in profile for VM triage under GDB (tools/gdb/aura_gdb.py):
+# release optimization plus DWARF for the crates the extension navigates
+# by type. Kept out of the default release profile because debuginfo
+# across the whole test-binary set does not fit constrained disks; build
+# the triage binary on demand:
+#   cargo build --profile gdb -p aura-cli   ->  target/gdb/aura
+# split-debuginfo keeps DWARF in per-crate .dwo files rather than copied
+# into every linked binary.
+[profile.gdb]
+inherits = "release"
+split-debuginfo = "unpacked"
+[profile.gdb.package.aura-vm]
+debug = true
+[profile.gdb.package.aura-bytecode]
+debug = true

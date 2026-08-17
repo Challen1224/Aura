@@ -43,7 +43,7 @@ struct Script {
 }
 
 impl Debugger for Script {
-    fn on_stop(&mut self, stop: &DebugStop) -> DebugCommand {
+    fn on_stop(&mut self, _view: &aura_vm::debug::DebugView<'_>, stop: &DebugStop) -> DebugCommand {
         self.log.borrow_mut().push(stop.clone());
         self.commands.pop_front().unwrap_or(DebugCommand {
             resume: Some(DebugResume::Continue),
@@ -263,4 +263,141 @@ class Program {
         0,
         "debugger must keep execution on the interpreter tier"
     );
+}
+
+
+/// Closure-driven controller for tests needing live `DebugView` access.
+struct FnScript {
+    handlers: VecDeque<Box<dyn FnMut(&aura_vm::debug::DebugView<'_>, &DebugStop) -> DebugCommand>>,
+}
+
+impl Debugger for FnScript {
+    fn on_stop(
+        &mut self,
+        view: &aura_vm::debug::DebugView<'_>,
+        stop: &DebugStop,
+    ) -> DebugCommand {
+        match self.handlers.pop_front() {
+            Some(mut h) => h(view, stop),
+            None => resume(DebugResume::Continue),
+        }
+    }
+}
+
+/// Step-out runs the current frame to completion and stops back in the
+/// caller, skipping the callee's remaining lines.
+#[test]
+fn step_out() {
+    let src = r#"
+class Program {
+    static int inner(int x) {
+        int a = x + 1;
+        int b = a + 1;
+        int c = b + 1;
+        return c;
+    }
+    static int Main() {
+        int r = Program.inner(10);
+        return r;
+    }
+}
+"#;
+    let commands = vec![
+        resume(DebugResume::Step), // entry (line 10) -> into inner (line 4)
+        resume(DebugResume::Out),  // run inner to completion -> back in Main
+        resume(DebugResume::Continue),
+    ];
+    let (result, stops) = run_scripted(src, commands);
+    assert_eq!(result, 13);
+    assert_eq!(stops[1].method, "Program.inner");
+    assert_eq!((stops[1].line, stops[1].depth), (4, 2));
+    assert_eq!(stops[2].method, "Program.Main", "out returns to the caller");
+    assert_eq!(stops[2].depth, 1);
+    assert_eq!(stops[2].line, 11, "caller resumes at the next line");
+    assert_eq!(stops.len(), 3);
+}
+
+/// A bytecode-level breakpoint stops at an exact op index — mid-line,
+/// no line boundary required — and reports the pc.
+#[test]
+fn bytecode_breakpoint_stops_at_exact_pc() {
+    let module = Arc::new(compile(SRC, "test").expect("compile"));
+    let mut vm = Vm::new(module);
+    assert!(vm.add_bytecode_breakpoint("Program.Main", 5));
+    assert!(!vm.add_bytecode_breakpoint("No.Such", 0), "unknown label");
+    let log = Rc::new(RefCell::new(Vec::new()));
+    vm.set_debugger(Box::new(Script {
+        commands: VecDeque::new(),
+        log: Rc::clone(&log),
+    }));
+    match vm.run().expect("run") {
+        Value::Int(i) => assert_eq!(i, 67),
+        other => panic!("expected int, got {other:?}"),
+    }
+    let stops = log.borrow();
+    // Stop 0 is the entry step; the bytecode breakpoint stop follows.
+    let bc_stop = stops
+        .iter()
+        .find(|s| s.pc == 5)
+        .expect("bytecode breakpoint should stop at pc 5");
+    assert_eq!(bc_stop.method, "Program.Main");
+}
+
+/// Watches evaluate at every stop; `eval_path` resolves locals, fields,
+/// and list indexes, and reports precise errors for bad paths.
+#[test]
+fn watches_and_path_evaluation() {
+    let src = r#"
+class Point {
+    int x;
+    int y;
+    Point(int x, int y) { this.x = x; this.y = y; }
+}
+class Program {
+    static int Main() {
+        Point p = new Point(3, 4);
+        var xs = new List<int>();
+        xs.Add(7);
+        xs.Add(9);
+        int done = 1;
+        return done + p.x + xs.Get(1);
+    }
+}
+"#;
+    let module = Arc::new(compile(src, "test").expect("compile"));
+    let mut vm = Vm::new(module);
+    vm.add_watch("p.x");
+    vm.add_breakpoint(14);
+    let seen = Rc::new(RefCell::new(Vec::new()));
+    let seen2 = Rc::clone(&seen);
+    let handlers: VecDeque<
+        Box<dyn FnMut(&aura_vm::debug::DebugView<'_>, &DebugStop) -> DebugCommand>,
+    > = VecDeque::from([Box::new(
+        move |_v: &aura_vm::debug::DebugView<'_>, _s: &DebugStop| resume(DebugResume::Continue),
+    )
+        as Box<dyn FnMut(&aura_vm::debug::DebugView<'_>, &DebugStop) -> DebugCommand>,
+    Box::new(move |view: &aura_vm::debug::DebugView<'_>, stop: &DebugStop| {
+        seen2.borrow_mut().push((stop.watches.clone(), (
+            view.eval_path(0, "p.y"),
+            view.eval_path(0, "xs[0]"),
+            view.eval_path(0, "xs[5]"),
+            view.eval_path(0, "nope"),
+            view.eval_path(0, "p.z"),
+        )));
+        resume(DebugResume::Continue)
+    })]);
+    vm.set_debugger(Box::new(FnScript { handlers }));
+    match vm.run().expect("run") {
+        Value::Int(i) => assert_eq!(i, 13),
+        other => panic!("expected int, got {other:?}"),
+    }
+    let seen = seen.borrow();
+    assert_eq!(seen.len(), 1, "breakpoint handler ran once");
+    let (watches, (py, xs0, xs5, nope, pz)) = &seen[0];
+    assert_eq!(watches, &vec![("p.x".to_string(), "3".to_string())]);
+    assert_eq!(py.as_deref(), Ok("4"));
+    assert_eq!(xs0.as_deref(), Ok("7"));
+    assert!(xs5.as_ref().unwrap_err().contains("out of range"));
+    assert!(nope.as_ref().unwrap_err().contains("no local `nope`"));
+    assert!(pz.as_ref().unwrap_err().contains("no field `z` on Point"));
 }

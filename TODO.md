@@ -6,8 +6,10 @@
 > tuning flags, stats, weak/soft/phantom refs, and an opt-in concurrent
 > collector (background marking, chunked sweeps), collecting under both tiers (JIT
 > frames scanned conservatively — see §2.1). Debugging: source-level
-> debugger (`aura debug`: breakpoints, stepping, locals) on the
-> interpreter tier; line-mapped error traces. Stdlib: collections
+> debugger (`aura debug`: breakpoints incl. bytecode-level, step
+> into/over/out, locals, watches) plus a DAP adapter (`aura dap`) for VS
+> Code/nvim-dap, on the interpreter tier; line-mapped error traces.
+> Stdlib: collections
 > (`List`/`Map`/`Set`), string methods, `Console.ReadLine`, and text `File`
 > I/O are implemented and verified under both interpreter and JIT, including
 > mid-run tier transitions; still missing: networking, async, reflection,
@@ -1311,12 +1313,59 @@
   ```
 
 **P1 - High Priority**
-- [ ] **Debugger integration**
-  - [ ] GDB/LLDB support
-  - [ ] VS Code debugger adapter
-  - [ ] Breakpoints (source and bytecode)
-  - [ ] Step execution (step into, over, out)
-  - [ ] Watch expressions
+- [x] **Debugger integration** (see docs/debugging.md)
+  - [x] GDB/LLDB support — GDB is Aura-aware via the CPython
+    `libpython.py` model: tools/gdb/aura_gdb.py adds `aura-bt`,
+    `aura-locals`, `aura-line`, reading the VM's own data structures to
+    reconstruct the Aura-level stack, source lines, and named locals at
+    any stop — the triage tool for when the VM itself crashes or hangs
+    (DAP covers healthy-VM debugging). VM cooperation: no-mangle
+    `AURA_CURRENT_VM` registered per run + `Vm.gdb_index`, a flat
+    HashMap-free method index; debuginfo comes from the opt-in `gdb`
+    cargo profile (`cargo build --profile gdb -p aura-cli`, split
+    `.dwo`) — keeping it in default release overflowed this
+    environment's disk across the test-binary set, and full-workspace
+    debuginfo OOMs the compiler crate. Verified live on host gdb
+    and against the x86-64 build via `qemu -g` + gdb-multiarch. Parked
+    with rationale in docs/debugging.md: LLDB (different Python API,
+    port when needed) and DWARF-for-JIT via the GDB JIT interface
+    (large, covers only JIT frames — interpreter frames are heap data no
+    unwinder can walk).
+  - [x] VS Code debugger adapter — `aura dap` serves the Debug Adapter
+    Protocol on stdio (works with VS Code, nvim-dap, any DAP client):
+    launch, line breakpoints (before start and while stopped), stops
+    with reasons, stackTrace with real lines, scopes/variables, evaluate
+    (inspection paths, watch panel/hovers), program output as `output`
+    events (protocol owns stdout, so `print` is redirected via
+    `Vm::set_output`), exited/terminated. Architecture: protocol loop on
+    the main thread, VM on a worker thread, channel-backed `Debugger`
+    serving queries from the paused VM. Limits stated in the module doc:
+    single thread, line-only breakpoints shared across files, no
+    `pause` while running (no async interrupt), running-state breakpoint
+    edits apply at the next stop.
+  - [x] Breakpoints (source and bytecode) — source lines plus exact
+    (method, op-index) bytecode breakpoints that stop mid-line
+    (`bb Class.Method <op>` in the CLI, `Vm::add_bytecode_breakpoint`),
+    with a `dis` disassembly view marking the current pc.
+  - [x] Step execution (step into, over, out) — `Out` added to the
+    resume set: run the frame to completion, stop at the caller's next
+    line (CLI `o`/`finish`, DAP stepOut).
+  - [x] Watch expressions — honest scope: local-rooted inspection paths
+    (`p.x`, `xs[0]`, `a.b[2].c`) evaluated live against the paused VM
+    via `DebugView::eval_path` — persistent watches re-reported at every
+    stop (CLI `w`/`unw`, `Vm::add_watch`) and one-shot evaluation (CLI
+    `p`, DAP evaluate). Not an expression evaluator — no calls, no
+    arithmetic; stated, not implied. The `Debugger` trait now receives a
+    `DebugView` (live read-only window: frames, per-frame locals, path
+    evaluation, disassembly) alongside the snapshot.
+  Verified: aura-vm/tests/debugger.rs grew to 9 tests (step-out path,
+  bytecode breakpoint at exact pc incl. unknown-label rejection, watches
+  + path evaluation incl. three error shapes); aura-cli/tests/dap.rs
+  drives a complete DAP session against the real binary over stdio
+  (breakpoint stop, stack/scopes/variables, evaluate, step, output
+  events, clean exit); CLI and DAP sessions also driven by hand on host
+  and under qemu x86-64; full battery green (warnings 114 = baseline),
+  qemu ×3.
 
 - [ ] **Profiler**
   - [ ] CPU profiling (sampling and instrumentation)

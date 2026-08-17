@@ -347,6 +347,19 @@ pub struct Vm {
     debugger: Option<Box<dyn debug::Debugger>>,
     /// Source-line breakpoints.
     breakpoints: std::collections::HashSet<u32>,
+    /// Bytecode-level breakpoints: exact (method, op index) pairs.
+    bytecode_breakpoints: std::collections::HashSet<(MethodId, usize)>,
+    /// Watch expressions evaluated at every stop.
+    watches: Vec<String>,
+    /// Program output redirection (`Op::Print`/`PrintLn`); None writes to
+    /// process stdout. Used by the DAP adapter, whose own stdout carries
+    /// the protocol.
+    out: Option<Box<dyn std::io::Write + Send>>,
+    /// Flat method index for out-of-process debuggers (the GDB
+    /// extension): plain `Vec`s only, no `HashMap` internals to walk.
+    /// Never read by the VM itself.
+    #[allow(dead_code)]
+    gdb_index: Vec<debug::GdbMethodInfo>,
     /// Stepping state.
     step_mode: debug::StepMode,
 }
@@ -373,6 +386,23 @@ impl Vm {
                 .collect();
             static_fields.insert(*id, values);
         }
+        let mut gdb_index: Vec<debug::GdbMethodInfo> = module
+            .classes
+            .values()
+            .flat_map(|class| {
+                class
+                    .methods
+                    .iter()
+                    .chain(class.static_methods.iter())
+                    .map(|(id, m)| debug::GdbMethodInfo {
+                        method_id: id.0,
+                        label: format!("{}.{}", class.name, m.name),
+                        line_starts: m.line_starts.clone(),
+                        local_names: m.local_names.clone(),
+                    })
+            })
+            .collect();
+        gdb_index.sort_by_key(|e| e.method_id);
         Self {
             module,
             heap,
@@ -392,6 +422,10 @@ impl Vm {
             jit_frames: Vec::new(),
             debugger: None,
             breakpoints: std::collections::HashSet::new(),
+            bytecode_breakpoints: std::collections::HashSet::new(),
+            watches: Vec::new(),
+            out: None,
+            gdb_index,
             step_mode: debug::StepMode::Running,
         }
     }
@@ -437,6 +471,7 @@ impl Vm {
 
     /// Invoke a method by id with the supplied arguments.
     pub fn invoke(&mut self, method_id: MethodId, args: Vec<Value>) -> Result<Value, VmError> {
+        let _gdb = debug::CurrentVmGuard::register(self);
         match self.invoke_frame(method_id, args)? {
             FrameResult::Normal(v) => Ok(v),
             FrameResult::Exception(e) => Err(VmError::Runtime(format!(
@@ -1389,12 +1424,15 @@ impl Vm {
 
                 Op::Print => {
                     let v = self.pop()?;
-                    match &v {
-                        Value::String(handle) => print!("{}", self.heap.get_string(*handle).unwrap_or("")),
-                        _ => print!("{}", describe_value(self, &v)),
-                    }
+                    let text = match &v {
+                        Value::String(handle) => {
+                            self.heap.get_string(*handle).unwrap_or("").to_string()
+                        }
+                        _ => describe_value(self, &v),
+                    };
+                    self.write_out(&text);
                 }
-                Op::PrintLn => println!(),
+                Op::PrintLn => self.write_out("\n"),
                 Op::StringConcat(count) => {
                     let mut parts = Vec::with_capacity(count as usize);
                     for _ in 0..count {
@@ -1935,6 +1973,140 @@ impl Vm {
             .map(|(id, _)| *id)
     }
 
+    /// The loaded module.
+    pub fn module(&self) -> &Arc<Module> {
+        &self.module
+    }
+
+    /// Redirect program output (`print`/`println`) away from process
+    /// stdout — e.g. into DAP output events, whose transport owns stdout.
+    pub fn set_output(&mut self, w: Box<dyn std::io::Write + Send>) {
+        self.out = Some(w);
+    }
+
+    pub(crate) fn write_out(&mut self, text: &str) {
+        match &mut self.out {
+            Some(w) => {
+                let _ = w.write_all(text.as_bytes());
+                let _ = w.flush();
+            }
+            None => {
+                use std::io::Write;
+                print!("{text}");
+                let _ = std::io::stdout().flush();
+            }
+        }
+    }
+
+    /// Structured frames for debugger clients: (`Class.Method` label,
+    /// line) from outermost to innermost; line 0 when unmapped. Only
+    /// called while stopped, so the innermost frame maps its current pc
+    /// (the op about to execute); outer frames map their call site
+    /// (pc - 1).
+    pub(crate) fn debug_frames(&self) -> Vec<(String, u32)> {
+        let last = self.call_stack.len().saturating_sub(1);
+        self.call_stack
+            .iter()
+            .enumerate()
+            .map(|(i, frame)| {
+                let label = self.frame_label(frame.method_id);
+                let pc = if i == last {
+                    frame.pc
+                } else {
+                    frame.pc.saturating_sub(1)
+                };
+                let line = if frame.is_jit {
+                    None
+                } else {
+                    self.resolve_method(frame.method_id)
+                        .ok()
+                        .and_then(|m| debug::line_for_pc(m, pc))
+                };
+                (label, line.unwrap_or(0))
+            })
+            .collect()
+    }
+
+    /// Call-stack depth (frames, innermost last).
+    pub(crate) fn call_stack_len(&self) -> usize {
+        self.call_stack.len()
+    }
+
+    /// Resolve a `Class.Method` label to a method id.
+    pub(crate) fn resolve_method_label(&self, label: &str) -> Option<MethodId> {
+        for (_, class) in &self.module.classes {
+            for (id, m) in class.methods.iter().chain(class.static_methods.iter()) {
+                if format!("{}.{}", class.name, m.name) == label {
+                    return Some(*id);
+                }
+            }
+        }
+        None
+    }
+
+    /// Named, rendered locals of the frame at `index` (0 = outermost).
+    pub(crate) fn debug_frame_locals(&self, index: usize) -> Vec<(String, String)> {
+        let Some(frame) = self.call_stack.get(index) else {
+            return Vec::new();
+        };
+        let Ok(method) = self.resolve_method(frame.method_id) else {
+            return Vec::new();
+        };
+        let mut out = Vec::new();
+        for (slot, name) in method.local_names.iter().enumerate() {
+            if name.is_empty() || name.starts_with("__") {
+                continue;
+            }
+            if let Some(v) = frame.locals.get(slot) {
+                out.push((name.clone(), describe_value(self, v)));
+            }
+        }
+        out
+    }
+
+    /// Evaluate a local-rooted inspection path against the frame at
+    /// `index` (see `DebugView::eval_path`).
+    pub(crate) fn debug_eval_path(&self, index: usize, path: &str) -> Result<String, String> {
+        let (root, steps) = debug::parse_path(path)?;
+        let frame = self
+            .call_stack
+            .get(index)
+            .ok_or_else(|| format!("no frame {index}"))?;
+        let method = self
+            .resolve_method(frame.method_id)
+            .map_err(|e| format!("{e}"))?;
+        let slot = method
+            .local_names
+            .iter()
+            .position(|n| *n == root)
+            .ok_or_else(|| format!("no local `{root}` in this frame"))?;
+        let mut value = frame
+            .locals
+            .get(slot)
+            .cloned()
+            .ok_or_else(|| format!("no local `{root}` in this frame"))?;
+        for step in &steps {
+            value = debug::walk_step(self, &value, step, path)?;
+        }
+        Ok(describe_value(self, &value))
+    }
+
+    /// Disassembly window around the innermost frame's pc.
+    pub(crate) fn debug_disassemble(&self, window: usize) -> Vec<(usize, String, bool)> {
+        let Some(frame) = self.call_stack.last() else {
+            return Vec::new();
+        };
+        let Ok(method) = self.resolve_method(frame.method_id) else {
+            return Vec::new();
+        };
+        let pc = frame.pc;
+        let start = pc.saturating_sub(window);
+        let end = (pc + window + 1).min(method.body.len());
+        (start..end)
+            .map(|i| (i, format!("{:?}", method.body[i]), i == pc))
+            .collect()
+    }
+
     /// Install a debug controller. Execution stops at source-line
     /// boundaries (breakpoints, steps); the controller inspects a
     /// snapshot and chooses how to resume. Starts in single-step mode so
@@ -1948,6 +2120,26 @@ impl Vm {
     /// Add a source-line breakpoint.
     pub fn add_breakpoint(&mut self, line: u32) {
         self.breakpoints.insert(line);
+    }
+
+    /// Add a bytecode-level breakpoint at an exact op index of the method
+    /// named by a `Class.Method` label. Returns false if no such method.
+    pub fn add_bytecode_breakpoint(&mut self, label: &str, op_index: usize) -> bool {
+        match self.resolve_method_label(label) {
+            Some(id) => {
+                self.bytecode_breakpoints.insert((id, op_index));
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Add a watch expression (local-rooted path), evaluated and reported
+    /// at every stop.
+    pub fn add_watch(&mut self, path: &str) {
+        if !self.watches.iter().any(|w| w == path) {
+            self.watches.push(path.to_string());
+        }
     }
 
     /// Line-enriched stack trace of the current call stack (innermost
@@ -1975,30 +2167,38 @@ impl Vm {
             .collect()
     }
 
-    /// One debugger check at an op boundary: on a source-line change,
-    /// decide whether to stop (breakpoint or step state), snapshot the
-    /// frame for the controller, and apply its command.
+    /// One debugger check at an op boundary: stop on an exact bytecode
+    /// breakpoint, or on a source-line change that hits a line breakpoint
+    /// or the current step state; snapshot the frame for the controller
+    /// and apply its command.
     fn debug_check(&mut self, method: &MethodDef) -> Result<(), VmError> {
         let pc = self.current_frame().pc;
-        let Some(line) = debug::line_for_pc(method, pc) else {
-            return Ok(());
+        let method_id = self.current_frame().method_id;
+        let bytecode_hit = self.bytecode_breakpoints.contains(&(method_id, pc));
+        let line = debug::line_for_pc(method, pc);
+        let line_boundary = match line {
+            Some(l) if l != self.current_frame().debug_line => {
+                self.current_frame().debug_line = l;
+                true
+            }
+            _ => false,
         };
-        if line == self.current_frame().debug_line {
-            return Ok(());
-        }
-        self.current_frame().debug_line = line;
         let depth = self.call_stack.len();
-        let step_hit = match self.step_mode {
-            debug::StepMode::Step => true,
-            debug::StepMode::Next(d) => depth <= d,
-            debug::StepMode::Running => false,
-        };
-        if !step_hit && !self.breakpoints.contains(&line) {
+        let step_hit = line_boundary
+            && match self.step_mode {
+                debug::StepMode::Step => true,
+                debug::StepMode::Next(d) => depth <= d,
+                debug::StepMode::Out(d) => depth < d,
+                debug::StepMode::Running => false,
+            };
+        let line_hit =
+            line_boundary && line.is_some_and(|l| self.breakpoints.contains(&l));
+        if !bytecode_hit && !step_hit && !line_hit {
             return Ok(());
         }
-        let stop = self.build_debug_stop(method, line, depth);
+        let stop = self.build_debug_stop(method, line.unwrap_or(0), depth);
         let mut controller = self.debugger.take().expect("debugger present");
-        let cmd = controller.on_stop(&stop);
+        let cmd = controller.on_stop(&debug::DebugView { vm: self }, &stop);
         self.debugger = Some(controller);
         for b in &cmd.add_breakpoints {
             self.breakpoints.insert(*b);
@@ -2006,10 +2206,27 @@ impl Vm {
         for b in &cmd.remove_breakpoints {
             self.breakpoints.remove(b);
         }
+        for (label, op) in &cmd.add_bytecode_breakpoints {
+            if let Some(id) = self.resolve_method_label(label) {
+                self.bytecode_breakpoints.insert((id, *op as usize));
+            }
+        }
+        for (label, op) in &cmd.remove_bytecode_breakpoints {
+            if let Some(id) = self.resolve_method_label(label) {
+                self.bytecode_breakpoints.remove(&(id, *op as usize));
+            }
+        }
+        for w in &cmd.add_watches {
+            if !self.watches.contains(w) {
+                self.watches.push(w.clone());
+            }
+        }
+        self.watches.retain(|w| !cmd.remove_watches.contains(w));
         self.step_mode = match cmd.resume.unwrap_or(debug::DebugResume::Continue) {
             debug::DebugResume::Continue => debug::StepMode::Running,
             debug::DebugResume::Step => debug::StepMode::Step,
             debug::DebugResume::Next => debug::StepMode::Next(depth),
+            debug::DebugResume::Out => debug::StepMode::Out(depth),
             debug::DebugResume::Quit => {
                 return Err(VmError::Runtime("debugger: quit".to_string()));
             }
@@ -2037,12 +2254,24 @@ impl Vm {
             // current line is the one about to execute.
             *last = format!("at {} (line {})", self.frame_label(frame.method_id), line);
         }
+        let watches = self
+            .watches
+            .iter()
+            .map(|w| {
+                let rendered = self
+                    .debug_eval_path(self.call_stack.len() - 1, w)
+                    .unwrap_or_else(|e| format!("<{e}>"));
+                (w.clone(), rendered)
+            })
+            .collect();
         debug::DebugStop {
             method: self.frame_label(frame.method_id),
             line,
             depth,
             locals,
             backtrace,
+            pc: frame.pc,
+            watches,
         }
     }
 

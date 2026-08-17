@@ -1,6 +1,8 @@
 //! Aura CLI — compile and run .aura programs.
 
 use anyhow::{Context, Result};
+
+mod dap;
 use aura_compiler::compile_files;
 use aura_vm::Vm;
 use clap::{Parser as ClapParser, Subcommand};
@@ -70,6 +72,9 @@ enum Command {
         #[arg(long = "break", value_name = "LINE")]
         breakpoints: Vec<u32>,
     },
+    /// Serve the Debug Adapter Protocol on stdio (for VS Code, nvim-dap,
+    /// or any DAP client). The client supplies the program via `launch`.
+    Dap,
 }
 
 fn main() -> Result<()> {
@@ -163,6 +168,7 @@ threshold {} bytes, nursery {} bytes",
             result.context("runtime error")?;
             Ok(())
         }
+        Command::Dap => dap::serve(),
         Command::Debug { paths, breakpoints } => {
             let (files, name) = load(&paths)?;
             let module = Arc::new(compile_files(&files, &name)?);
@@ -194,9 +200,16 @@ threshold {} bytes, nursery {} bytes",
 struct CliDebugger;
 
 impl aura_vm::Debugger for CliDebugger {
-    fn on_stop(&mut self, stop: &aura_vm::DebugStop) -> aura_vm::DebugCommand {
+    fn on_stop(
+        &mut self,
+        view: &aura_vm::debug::DebugView<'_>,
+        stop: &aura_vm::DebugStop,
+    ) -> aura_vm::DebugCommand {
         use std::io::{BufRead, Write};
-        println!("stopped at line {} in {}", stop.line, stop.method);
+        println!("stopped at line {} in {} (pc {})", stop.line, stop.method, stop.pc);
+        for (path, value) in &stop.watches {
+            println!("watch {path} = {value}");
+        }
         let mut cmd = aura_vm::DebugCommand::default();
         let stdin = std::io::stdin();
         loop {
@@ -225,6 +238,10 @@ impl aura_vm::Debugger for CliDebugger {
                     cmd.resume = Some(aura_vm::DebugResume::Next);
                     return cmd;
                 }
+                (Some("o") | Some("out") | Some("finish"), _) => {
+                    cmd.resume = Some(aura_vm::DebugResume::Out);
+                    return cmd;
+                }
                 (Some("q") | Some("quit"), _) => {
                     cmd.resume = Some(aura_vm::DebugResume::Quit);
                     return cmd;
@@ -243,6 +260,35 @@ impl aura_vm::Debugger for CliDebugger {
                     }
                     Err(_) => println!("usage: d <line>"),
                 },
+                (Some("bb"), Some(label)) => {
+                    match parts.next().and_then(|a| a.parse::<u32>().ok()) {
+                        Some(op) if view.resolve_method_label(label) => {
+                            cmd.add_bytecode_breakpoints.push((label.to_string(), op));
+                            println!("bytecode breakpoint at {label} op {op}");
+                        }
+                        Some(_) => println!("no method `{label}`"),
+                        None => println!("usage: bb <Class.Method> <op-index>"),
+                    }
+                }
+                (Some("w") | Some("watch"), Some(path)) => {
+                    match view.eval_path(stop.depth - 1, path) {
+                        Ok(v) => {
+                            println!("watch {path} = {v}");
+                            cmd.add_watches.push(path.to_string());
+                        }
+                        Err(e) => println!("{e}"),
+                    }
+                }
+                (Some("unw") | Some("unwatch"), Some(path)) => {
+                    cmd.remove_watches.push(path.to_string());
+                    println!("unwatched {path}");
+                }
+                (Some("dis"), _) => {
+                    for (i, op, current) in view.disassemble(6) {
+                        let marker = if current { "->" } else { "  " };
+                        println!("{marker} {i:4}  {op}");
+                    }
+                }
                 (Some("locals"), _) => {
                     if stop.locals.is_empty() {
                         println!("no named locals");
@@ -251,10 +297,10 @@ impl aura_vm::Debugger for CliDebugger {
                         println!("{name} = {value}");
                     }
                 }
-                (Some("p") | Some("print"), Some(name)) => {
-                    match stop.locals.iter().find(|(n, _)| n == name) {
-                        Some((_, value)) => println!("{name} = {value}"),
-                        None => println!("no local named `{name}`"),
+                (Some("p") | Some("print"), Some(path)) => {
+                    match view.eval_path(stop.depth - 1, path) {
+                        Ok(value) => println!("{path} = {value}"),
+                        Err(e) => println!("{e}"),
                     }
                 }
                 (Some("bt") | Some("backtrace"), _) => {
@@ -265,7 +311,8 @@ impl aura_vm::Debugger for CliDebugger {
                 (Some("h") | Some("help"), _) => {
                     println!(
                         "commands: c(ontinue), s(tep into), n(ext / step over), \
-b <line>, d <line>, locals, p <name>, bt, q(uit)"
+o(ut / finish), b <line>, d <line>, bb <Class.Method> <op>, \
+w <path>, unw <path>, locals, p <path>, dis, bt, q(uit)"
                     );
                 }
                 (None, _) => {}
