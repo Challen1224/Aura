@@ -616,6 +616,9 @@ pub struct TypeChecker {
     /// Source line of the statement currently being checked (from the
     /// parser's `Stmt::Mark` markers); 0 when outside statement context.
     current_line: std::cell::Cell<usize>,
+    /// Errors collected across method bodies (multiple-error reporting):
+    /// each entry is already located ("line N, in `C.m`: ...").
+    errors: std::cell::RefCell<Vec<String>>,
     /// `Class.Method` currently being checked, for error prefixes.
     current_context: std::cell::RefCell<String>,
     /// Extension methods: target key -> method name -> extension class.
@@ -639,6 +642,7 @@ impl TypeChecker {
             newtypes: HashMap::new(),
             narrowed: std::cell::RefCell::new(HashMap::new()),
             current_line: std::cell::Cell::new(0),
+            errors: std::cell::RefCell::new(Vec::new()),
             current_context: std::cell::RefCell::new(String::new()),
             extensions: HashMap::new(),
             current_throws: std::cell::RefCell::new(Vec::new()),
@@ -647,7 +651,81 @@ impl TypeChecker {
         }
     }
 
-    /// Type-check a program and return a typed view.
+    /// Record a located error and keep checking (multiple-error
+    /// reporting). Capped so a badly broken file stays readable.
+    fn record_error(&self, msg: String) {
+        let mut errors = self.errors.borrow_mut();
+        if errors.len() >= 20 {
+            return;
+        }
+        errors.push(Self::locate(
+            self.current_line.get(),
+            &self.current_context.borrow(),
+            msg,
+        ));
+    }
+
+    fn locate(line: usize, ctx: &str, msg: String) -> String {
+        if line > 0 && !ctx.is_empty() {
+            format!("line {}, in `{}`: {}", line, ctx, msg)
+        } else if !ctx.is_empty() {
+            format!("in `{}`: {}", ctx, msg)
+        } else {
+            msg
+        }
+    }
+
+    /// ` — did you mean \`x\`?` when a candidate is a close misspelling
+    /// of `target`, else empty. Distance cap scales with length so short
+    /// names don't match everything.
+    pub(crate) fn suggest<'n>(
+        candidates: impl Iterator<Item = &'n str>,
+        target: &str,
+    ) -> String {
+        let cap = 1 + target.len() / 4;
+        let mut best: Option<(usize, &str)> = None;
+        for c in candidates {
+            if c == target {
+                continue;
+            }
+            let d = Self::edit_distance(c, target, cap);
+            if d <= cap && best.map_or(true, |(bd, _)| d < bd) {
+                best = Some((d, c));
+            }
+        }
+        match best {
+            Some((_, name)) => format!(" — did you mean `{}`?", name),
+            None => String::new(),
+        }
+    }
+
+    /// Levenshtein distance, early-exiting once it must exceed `cap`.
+    fn edit_distance(a: &str, b: &str, cap: usize) -> usize {
+        let a: Vec<char> = a.chars().collect();
+        let b: Vec<char> = b.chars().collect();
+        if a.len().abs_diff(b.len()) > cap {
+            return cap + 1;
+        }
+        let mut prev: Vec<usize> = (0..=b.len()).collect();
+        for (i, ca) in a.iter().enumerate() {
+            let mut row = vec![i + 1];
+            let mut row_min = i + 1;
+            for (j, cb) in b.iter().enumerate() {
+                let cost = if ca == cb { 0 } else { 1 };
+                let v = (prev[j] + cost).min(prev[j + 1] + 1).min(row[j] + 1);
+                row_min = row_min.min(v);
+                row.push(v);
+            }
+            if row_min > cap {
+                return cap + 1;
+            }
+            prev = row;
+        }
+        prev[b.len()]
+    }
+
+    /// Type-check a program and return a typed view. Reports every
+    /// collected diagnostic (newline-separated) when any method failed.
     pub fn check(self, program: &Program) -> Result<TypedProgram, TypeError> {
         let line = std::cell::Cell::new(0usize);
         let ctx = std::cell::RefCell::new(String::new());
@@ -659,19 +737,17 @@ impl TypeChecker {
             let r = me.check_inner(program);
             line.set(me.current_line.get());
             *ctx.borrow_mut() = me.current_context.borrow().clone();
-            r
+            (r, me.errors.take())
         };
-        result.map_err(|TypeError(msg)| {
-            let l = line.get();
-            let c = ctx.borrow();
-            if l > 0 && !c.is_empty() {
-                TypeError(format!("line {}, in `{}`: {}", l, c, msg))
-            } else if !c.is_empty() {
-                TypeError(format!("in `{}`: {}", c, msg))
-            } else {
-                TypeError(msg)
+        let (result, mut collected) = result;
+        match result {
+            Err(TypeError(msg)) => {
+                collected.push(Self::locate(line.get(), &ctx.borrow(), msg));
+                Err(TypeError(collected.join("\n")))
             }
-        })
+            Ok(_) if !collected.is_empty() => Err(TypeError(collected.join("\n"))),
+            Ok(v) => Ok(v),
+        }
     }
 
     fn check_inner(&mut self, program: &Program) -> Result<TypedProgram, TypeError> {
@@ -679,7 +755,13 @@ impl TypeChecker {
         self.gather_decls(program)?;
         for decl in &program.decls {
             match decl {
-                Decl::Class(c) => self.check_class(c)?,
+                // Record-and-continue: an error in one class does not hide
+                // errors in the next (multiple-error reporting).
+                Decl::Class(c) => {
+                    if let Err(TypeError(msg)) = self.check_class(c) {
+                        self.record_error(msg);
+                    }
+                }
                 Decl::Enum(_) => {}
                 Decl::TypeAlias(_) => {}
                 Decl::Newtype(_) => {}
@@ -2214,6 +2296,33 @@ impl TypeChecker {
     }
 
     /// Look up a static method starting at `class_name`, walking the super chain.
+    /// Field names visible on `class_name` (own + inherited), for
+    /// did-you-mean suggestions.
+    fn field_candidates(&self, class_name: &str) -> Vec<String> {
+        let mut out = Vec::new();
+        let mut cur = Some(class_name.to_string());
+        while let Some(c) = cur {
+            let Some(info) = self.classes.get(&c) else { break };
+            out.extend(info.instance_fields.iter().map(|(n, _)| n.clone()));
+            cur = info.super_class.clone();
+        }
+        out
+    }
+
+    /// Method names visible on `class_name` (own + inherited), for
+    /// did-you-mean suggestions.
+    fn method_candidates(&self, class_name: &str, is_static: bool) -> Vec<String> {
+        let mut out = Vec::new();
+        let mut cur = Some(class_name.to_string());
+        while let Some(c) = cur {
+            let Some(info) = self.classes.get(&c) else { break };
+            let map = if is_static { &info.static_methods } else { &info.methods };
+            out.extend(map.keys().cloned());
+            cur = info.super_class.clone();
+        }
+        out
+    }
+
     fn find_static_method(&self, class_name: &str, method: &str) -> Option<(String, MethodInfo)> {
         let mut cur = Some(class_name);
         while let Some(c) = cur {
@@ -2590,7 +2699,21 @@ impl TypeChecker {
                     _ => m.return_ty.clone(),
                 };
                 for stmt in &m.body {
-                    self.check_stmt(stmt, &info, &mut locals, &body_ret, !m.is_static, &all_generic_params)?;
+                    // Multiple-error reporting: a failed statement is
+                    // recorded, the rest of this method is skipped (its
+                    // statements would cascade), and the next method is
+                    // checked normally.
+                    if let Err(TypeError(msg)) = self.check_stmt(
+                        stmt,
+                        &info,
+                        &mut locals,
+                        &body_ret,
+                        !m.is_static,
+                        &all_generic_params,
+                    ) {
+                        self.record_error(msg);
+                        break;
+                    }
                 }
                 self.current_is_async.set(false);
             } else if let Member::Field(f) = member {
@@ -3587,7 +3710,7 @@ impl TypeChecker {
                         }
                         Ok(ty)
                     } else {
-                        Err(TypeError(format!("unknown variable `{}`", name)))
+                        Err(TypeError(format!("unknown variable `{}`{}", name, Self::suggest(locals.keys().map(String::as_str), name))))
                     }
                 } else if let Some((declared_in, ty, visibility)) = self.find_static_field(&class.name, name) {
                     if !self.can_access(&class.name, &declared_in, visibility) {
@@ -3598,7 +3721,7 @@ impl TypeChecker {
                     }
                     Ok(ty)
                 } else {
-                    Err(TypeError(format!("unknown variable `{}`", name)))
+                    Err(TypeError(format!("unknown variable `{}`{}", name, Self::suggest(locals.keys().map(String::as_str), name))))
                 }
             }
             Expr::Field(obj, name) => {
@@ -3665,7 +3788,7 @@ impl TypeChecker {
                 }
                 let (declared_in, field_type, visibility) =
                     self.find_instance_field(&class_name, name).ok_or_else(|| {
-                        TypeError(format!("unknown field `{}` on `{}`", name, class_name))
+                        TypeError(format!("unknown field `{}` on `{}`{}", name, class_name, Self::suggest(self.field_candidates(&class_name).iter().map(String::as_str), name)))
                     })?;
                 if !self.can_access(&class.name, &declared_in, visibility) {
                     return Err(TypeError(format!(
@@ -4206,7 +4329,7 @@ impl TypeChecker {
                 }
                 let (declared_in, ty, visibility) =
                     self.find_instance_field(&class_name, field_name).ok_or_else(|| {
-                        TypeError(format!("unknown field `{}` on `{}`", field_name, class_name))
+                        TypeError(format!("unknown field `{}` on `{}`{}", field_name, class_name, Self::suggest(self.field_candidates(&class_name).iter().map(String::as_str), field_name)))
                     })?;
                 if !self.can_access(&class.name, &declared_in, visibility) {
                     return Err(TypeError(format!(
@@ -4530,10 +4653,13 @@ impl TypeChecker {
         generic_params: &[GenericParam],
     ) -> Result<Type, TypeError> {
         match target {
-            AssignTarget::Local(name) => locals
-                .get(name)
-                .cloned()
-                .ok_or_else(|| TypeError(format!("unknown variable `{}`", name))),
+            AssignTarget::Local(name) => locals.get(name).cloned().ok_or_else(|| {
+                TypeError(format!(
+                    "unknown variable `{}`{}",
+                    name,
+                    Self::suggest(locals.keys().map(String::as_str), name)
+                ))
+            }),
             AssignTarget::Field(obj, name) => {
                 let obj_ty = self.infer_expr(obj, class, locals, in_instance, return_ty, generic_params)?;
                 let (class_name, type_args) = if let Type::Class(cname, args) = &obj_ty {
@@ -4569,7 +4695,7 @@ impl TypeChecker {
                 }
                 let (declared_in, ty, visibility) =
                     self.find_instance_field(&class_name, name).ok_or_else(|| {
-                        TypeError(format!("unknown field `{}` on `{}`", name, class_name))
+                        TypeError(format!("unknown field `{}` on `{}`{}", name, class_name, Self::suggest(self.field_candidates(&class_name).iter().map(String::as_str), name)))
                     })?;
                 if !self.can_access(&class.name, &declared_in, visibility) {
                     return Err(TypeError(format!(
@@ -4833,8 +4959,15 @@ impl TypeChecker {
                                 cur = self.classes.get(&k).and_then(|i| i.super_class.clone());
                             }
                             return Err(TypeError(format!(
-                                "unknown method `{}` on `{}`",
-                                call.method, class.name
+                                "unknown method `{}` on `{}`{}",
+                                call.method,
+                                class.name,
+                                Self::suggest(
+                                    self.method_candidates(&class.name, false)
+                                        .iter()
+                                        .map(String::as_str),
+                                    &call.method
+                                )
                             )));
                         }
                     };
@@ -4855,8 +4988,15 @@ impl TypeChecker {
                         .find_static_method(class_name, &call.method)
                         .ok_or_else(|| {
                             TypeError(format!(
-                                "unknown static method `{}` on `{}`",
-                                call.method, class_name
+                                "unknown static method `{}` on `{}`{}",
+                                call.method,
+                                class_name,
+                                Self::suggest(
+                                    self.method_candidates(class_name, true)
+                                        .iter()
+                                        .map(String::as_str),
+                                    &call.method
+                                )
                             ))
                         })?;
                     if !self.can_access(&class.name, &declared_in, method_info.visibility) {
@@ -4986,8 +5126,15 @@ impl TypeChecker {
                         cur = self.classes.get(&k).and_then(|i| i.super_class.clone());
                     }
                     return Err(TypeError(format!(
-                        "unknown method `{}` on `{}`",
-                        call.method, name
+                        "unknown method `{}` on `{}`{}",
+                        call.method,
+                        name,
+                        Self::suggest(
+                            self.method_candidates(&name, false)
+                                .iter()
+                                .map(String::as_str),
+                            &call.method
+                        )
                     )));
                 }
             };
@@ -5603,10 +5750,23 @@ impl TypeChecker {
     fn validate_type(&self, ty: &Type) -> Result<(), TypeError> {
         match ty {
             Type::Class(name, _) if !self.classes.contains_key(name) => {
-                Err(TypeError(format!("unknown type `{}`", name)))
+                Err(TypeError(format!(
+                    "unknown type `{}`{}",
+                    name,
+                    Self::suggest(self.type_candidates(), name)
+                )))
             }
             _ => Ok(()),
         }
+    }
+
+    /// Every nameable type, for did-you-mean suggestions.
+    fn type_candidates(&self) -> impl Iterator<Item = &str> {
+        self.classes
+            .keys()
+            .map(String::as_str)
+            .chain(self.enums.keys().map(String::as_str))
+            .chain(self.newtypes.keys().map(String::as_str))
     }
 
     /// Check a generic class reference's type arguments: exact arity (raw
@@ -5682,7 +5842,11 @@ impl TypeChecker {
                     return Ok(());
                 }
                 if !self.classes.contains_key(name) && !self.enums.contains_key(name) {
-                    return Err(TypeError(format!("unknown type `{}`", name)));
+                    return Err(TypeError(format!(
+                        "unknown type `{}`{}",
+                        name,
+                        Self::suggest(self.type_candidates(), name)
+                    )));
                 }
                 if self.classes.get(name).map(|i| i.is_static).unwrap_or(false) {
                     return Err(TypeError(format!(

@@ -36,6 +36,78 @@ pub enum CompileError {
     Emit(String),
 }
 
+impl CompileError {
+    /// Render this error (possibly several newline-separated diagnostics)
+    /// with source context: each diagnostic that names a line gets that
+    /// source line printed beneath it, rustc-style. `files` are the
+    /// `(name, source)` pairs given to `compile_files`; a line is only
+    /// shown when it can be attributed unambiguously (parse/lex errors
+    /// carry their file name; type errors are attributed only for
+    /// single-file programs).
+    pub fn render(&self, files: &[(String, String)]) -> String {
+        let (kind, body) = match self {
+            CompileError::Lex(m) => ("lex error", m),
+            CompileError::Parse(m) => ("parse error", m),
+            CompileError::Type(m) => ("type error", m),
+            CompileError::Emit(m) => ("emit error", m),
+        };
+        let mut out = String::new();
+        let count = body.lines().count();
+        for (i, diag) in body.lines().enumerate() {
+            if i > 0 {
+                out.push('\n');
+            }
+            out.push_str(&format!("{kind}: {diag}"));
+            if let Some(snippet) = source_snippet(self, diag, files) {
+                out.push('\n');
+                out.push_str(&snippet);
+            }
+        }
+        if count > 1 {
+            out.push_str(&format!("\n{count} errors reported"));
+        }
+        out
+    }
+}
+
+/// The `  N | <source line>` context block for one diagnostic, when its
+/// line can be found and attributed.
+fn source_snippet(err: &CompileError, diag: &str, files: &[(String, String)]) -> Option<String> {
+    // Diagnostics carry "line N" (typer: "line N, in `..`"; parser/lexer:
+    // "name: line N:" / "at line N, col M").
+    let idx = diag.find("line ")?;
+    let rest = &diag[idx + 5..];
+    let digits: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
+    let line_no: usize = digits.parse().ok()?;
+    let source = match err {
+        // Parse/lex diagnostics are prefixed "<file>: ".
+        CompileError::Lex(_) | CompileError::Parse(_) => {
+            let name = diag.split(':').next()?.trim();
+            files.iter().find(|(n, _)| n == name).map(|(_, s)| s)
+        }
+        // Type/emit diagnostics carry no file; only unambiguous for
+        // single-file programs.
+        _ => (files.len() == 1).then(|| &files[0].1),
+    }?;
+    let text = source.lines().nth(line_no.saturating_sub(1))?;
+    let trimmed = text.trim_end();
+    if trimmed.trim().is_empty() {
+        return None;
+    }
+    let gutter = line_no.to_string().len().max(3);
+    let indent = trimmed.len() - trimmed.trim_start().len();
+    Some(format!(
+        "{:>gutter$} |\n{:>gutter$} | {}\n{:>gutter$} | {}{}",
+        "",
+        line_no,
+        trimmed,
+        "",
+        " ".repeat(indent),
+        "^".repeat(trimmed.trim().chars().count().max(1)),
+        gutter = gutter
+    ))
+}
+
 /// Compile source text into an Aura [`Module`].
 pub fn compile(source: &str, module_name: &str) -> Result<Module, CompileError> {
     compile_files(&[(module_name.to_string(), source.to_string())], module_name)

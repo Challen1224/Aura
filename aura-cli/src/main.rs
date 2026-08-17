@@ -82,7 +82,7 @@ fn main() -> Result<()> {
     match cli.command {
         Command::Compile { paths } => {
             let (files, name) = load(&paths)?;
-            let module = compile_files(&files, &name)?;
+            let module = compile_rendered(&files, &name)?;
             println!("{:#?}", module);
             Ok(())
         }
@@ -98,7 +98,7 @@ fn main() -> Result<()> {
             gc_stats,
         } => {
             let (files, name) = load(&paths)?;
-            let module = Arc::new(compile_files(&files, &name)?);
+            let module = Arc::new(compile_rendered(&files, &name)?);
             let mut vm = Vm::new(module);
             if jit {
                 vm.enable_jit();
@@ -171,7 +171,7 @@ threshold {} bytes, nursery {} bytes",
         Command::Dap => dap::serve(),
         Command::Debug { paths, breakpoints } => {
             let (files, name) = load(&paths)?;
-            let module = Arc::new(compile_files(&files, &name)?);
+            let module = Arc::new(compile_rendered(&files, &name)?);
             let mut vm = Vm::new(module);
             for line in breakpoints {
                 vm.add_breakpoint(line);
@@ -320,6 +320,15 @@ w <path>, unw <path>, locals, p <path>, dis, bt, q(uit)"
             }
         }
     }
+}
+
+/// Compile, rendering failures with source context (line snippets,
+/// did-you-mean suggestions, one block per diagnostic).
+fn compile_rendered(
+    files: &[(String, String)],
+    name: &str,
+) -> Result<aura_bytecode::Module, anyhow::Error> {
+    compile_files(files, name).map_err(|e| anyhow::anyhow!("{}", e.render(files)))
 }
 
 /// Read every source file; the program is named after the first file.

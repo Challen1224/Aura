@@ -759,6 +759,39 @@ impl<'a> Parser<'a> {
                 self.advance();
                 decls.push(Decl::Class(self.parse_extension()?));
             } else {
+                // Common newcomer mistakes get targeted hints before the
+                // generic expectation message.
+                let hint = match self.peek() {
+                    Some(Token::Ident(word)) => match word.as_str() {
+                        "fn" | "func" | "function" | "def" => Some((
+                            word.clone(),
+                            "free functions are not supported; declare a method inside a class \
+(e.g. `class Program { static void Main() { ... } }`)",
+                        )),
+                        "struct" => {
+                            Some((word.clone(), "Aura has no `struct`; use `class` or `record`"))
+                        }
+                        _ => None,
+                    },
+                    // `let`/`var` are keywords, so they need their own arms.
+                    Some(Token::Let) => Some((
+                        "let".to_string(),
+                        "top-level variables are not supported; declare fields inside a class",
+                    )),
+                    Some(Token::Var) => Some((
+                        "var".to_string(),
+                        "top-level variables are not supported; declare fields inside a class",
+                    )),
+                    _ => None,
+                };
+                if let Some((word, hint)) = hint {
+                    return Err(format!(
+                        "line {}: unexpected `{}` at top level — {}",
+                        self.cur_line(),
+                        word,
+                        hint
+                    ));
+                }
                 self.consume(Token::Class, "expected `class`, `record`, or `interface`")?;
                 decls.push(Decl::Class(self.parse_class(false, false, false)?));
             }

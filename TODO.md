@@ -1402,11 +1402,41 @@
 #### ⏳ Planned
 
 **P0 - Critical**
-- [ ] **Error messages**
-  - [ ] Better syntax error messages
-  - [ ] Error spans and source context
-  - [ ] Suggestion for common mistakes
-  - [ ] Multiple error reporting
+- [x] **Error messages**
+  - [x] Better syntax error messages — parse errors already carried
+    `line N: expected ... (found <token>)`; added targeted top-level
+    hints for the classic newcomer mistakes: `fn`/`func`/`def` ("free
+    functions are not supported; declare a method inside a class"),
+    `struct` ("use `class` or `record`"), `let`/`var` at top level.
+  - [x] Error spans and source context — `CompileError::render(files)`
+    produces rustc-style output: the diagnostic, then the offending
+    source line in a numbered gutter with an underline; the CLI routes
+    every compile (run/debug/compile) through it. Spans are
+    line-granularity (the typer tracks statements via line marks, not
+    columns) so the underline covers the statement — stated, not
+    implied. Multi-file attribution: parse/lex errors carry their file
+    name; type errors attach context only for single-file programs.
+    `Display` is unchanged, so every existing error-needle test still
+    pins the same text.
+  - [x] Suggestion for common mistakes — did-you-mean via
+    length-capped Levenshtein (cap = 1 + len/4, early-exit) for unknown
+    types (classes ∪ enums ∪ newtypes), instance/static methods
+    (inherited included), fields (inherited included), and variables
+    (locals in scope) — `unknown type \`Pont\` — did you mean
+    \`Point\`?`. Distant names get no suggestion (pinned by a test).
+  - [x] Multiple error reporting — the typer records one error per
+    broken method body (the rest of that method is skipped: its
+    statements would cascade) and keeps checking the remaining methods
+    and classes, capped at 20 diagnostics; single-error programs keep
+    the exact old one-line format. Parser and lexer remain first-error
+    (statement-level parse recovery is future work — stated).
+  Verified: aura-compiler/tests/diagnostics.rs (7 tests: multi-error
+  count/locations, single-error format stability, four suggestion kinds
+  and no-suggestion-for-distant-names, parser hints, rendered source
+  context for type and parse errors, 20-error cap, error-kind
+  preservation), full battery green with zero error-needle regressions
+  (206 aura-vm / 216 workspace), examples 72/72, warnings 114 =
+  baseline, qemu x86-64 ×3.
 
 - [ ] **Operator precedence parsing**
   - [ ] Precedence climbing or Pratt parser
