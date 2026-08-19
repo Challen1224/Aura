@@ -593,6 +593,7 @@ fn property_accessor_decl(class_name: String, p: &PropertyDecl, is_getter: bool)
         }
     };
     MethodDecl {
+        line: 0,
         is_static: p.is_static,
         visibility: p.visibility,
         is_virtual: false,
@@ -629,6 +630,7 @@ fn record_primary_constructor(class: &ClassDecl) -> MethodDecl {
         })
         .collect();
     MethodDecl {
+        line: 0,
         is_static: false,
         visibility: Visibility::Public,
         is_virtual: false,
@@ -2900,6 +2902,7 @@ impl<'a> MethodEmitter<'a> {
         self.lifted.push((
             id,
             MethodDecl {
+                line: 0,
                 is_static: true,
                 visibility: crate::ast::Visibility::Public,
                 is_virtual: false,

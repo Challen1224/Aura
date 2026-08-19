@@ -84,6 +84,32 @@ cargo run -p aura-cli -- run examples/records.aura
 cargo run -p aura-cli -- run examples/generics.aura
 ```
 
+## Projects and tooling
+
+`aura init` scaffolds a project described by `aura.toml` (entry file, source
+roots, output directory, and default VM options):
+
+```bash
+aura init myapp && cd myapp
+aura run              # compile and run the project
+aura run --watch      # re-run on every source change
+aura run --stats      # compile/run timing and JIT counters
+aura test             # run tests/*.aura (each is a program; throwing = failure)
+aura build            # emit build/myapp.aurac (binary bytecode module)
+aura run build/myapp.aurac
+```
+
+Developer tools work on projects or explicit files:
+
+```bash
+aura repl             # interactive session (declarations, statements, expressions)
+aura fmt [--check]    # normalize indentation — token-safe by construction
+aura lint             # unused locals, unreachable code, empty catch blocks
+aura doc -o api.md    # Markdown API docs from declarations and /// comments
+aura debug src/main.aura --break 10   # source-level debugger
+aura dap              # Debug Adapter Protocol for VS Code / nvim-dap
+```
+
 ## Components
 
 | Crate           | Role                                                        |

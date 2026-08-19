@@ -1,3 +1,15 @@
+aura (1.1.0) unstable; urgency=medium
+
+  * Tooling & ecosystem: aura.toml projects (aura init / build / test with
+    [run] defaults), interactive REPL, token-safe formatter (aura fmt),
+    linter (aura lint: unused locals, unreachable code, empty catch),
+    Markdown doc generator from /// comments (aura doc), watch mode
+    (aura run --watch), and timing/JIT stats (aura run --stats).
+  * aura build emits binary bytecode modules (.aurac) that aura run
+    executes directly.
+
+ -- Aura Contributors <charxard1332@icloud.com>  Wed, 19 Aug 2026 13:30:00 -0500
+
 aura (1.0.0) unstable; urgency=medium
 
   * First release. Linux packaged as .deb (this package), Windows x64 as MSI.

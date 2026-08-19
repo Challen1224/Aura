@@ -35,6 +35,14 @@ cargo run -p aura-cli -- run examples/hello.aura
 cargo run -p aura-cli -- compile examples/hello.aura
 ```
 
+The CLI also has a project workflow (`aura init` / `build` / `test` with an
+`aura.toml` manifest) and developer tools (`repl`, `fmt`, `lint`, `doc`,
+`run --watch`, `run --stats`) — see the README. Their end-to-end tests live
+in `aura-cli/tests/cli_tools.rs`; `aura fmt` in particular must stay
+token-safe (it re-lexes its output and refuses any change to the token
+stream), so formatter changes need a run of the fmt tests plus the
+examples-sweep.
+
 There are 70+ example programs under [`examples/`](examples/) that exercise the
 language; a change to the compiler or VM should keep them all running.
 `tools/examples-sweep.sh` runs every example under both tiers and fails if any

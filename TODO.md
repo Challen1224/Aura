@@ -16,7 +16,10 @@
 > (`List`/`Map`/`Set`), string methods, `Console.ReadLine`, and text `File`
 > I/O are implemented and verified under both interpreter and JIT, including
 > mid-run tier transitions; still missing: networking, async, reflection,
-> binary I/O, string builder/formatting (see §4). Tooling: early.
+> binary I/O, string builder/formatting (see §4).
+> Tooling: `aura.toml` projects (`init`/`build`/`test`, `[run]`
+> defaults), a REPL, `fmt` (token-safe), `lint`, `doc` (from `///`
+> comments), `run --watch`/`--stats`, plus the debugger and DAP adapter.
 > Platforms: Linux (primary) and Windows x64 — the JIT's executable-memory
 > layer has a `kernel32` path, JIT boundary calls are pinned to the System V
 > ABI via `extern "sysv64"`, and a Windows installer
@@ -24,7 +27,7 @@
 > installs `aura.exe` onto `PATH`. Linux ships as a per-architecture
 > `.deb` (`packaging/debian/build-deb.sh`; arm64 verified end-to-end).  
 > **Last Updated:** 2026-08-19  
-> **Current Version:** 1.0.0
+> **Current Version:** 1.1.0
 
 ---
 
@@ -1312,14 +1315,10 @@
   code on non-x86 hosts until `stack_trace()` began reading it), qemu
   x86-64 ×3.
 
-- [ ] **REPL / Interactive mode**
-  ```bash
-  $ aura repl
-  Aura 0.1.0
-  >>> let x = 42;
-  >>> x + 10
-  52
-  ```
+- [x] **REPL / Interactive mode** — `aura repl` (see §5.1 for the
+      design: accumulate-and-replay with output-delta printing, exact
+      because the VM is deterministic). Declarations, statements, and
+      bare expressions all work; `--jit` runs sessions under the JIT.
 
 **P1 - High Priority**
 - [x] **Debugger integration** (see docs/debugging.md)
@@ -1821,33 +1820,73 @@ catchable Aura exceptions.
 #### ⏳ Planned
 
 **P0 - Critical**
-- [ ] **Additional commands**
-  ```bash
-  aura build          # Build project
-  aura test           # Run tests
-  aura repl           # Start REPL
-  aura fmt <file>     # Format code
-  aura lint <file>    # Lint code
-  aura doc            # Generate documentation
-  ```
+- [x] **Additional commands** — all six, each with real semantics:
+  - [x] `aura build` — compiles the project to a binary bytecode module
+        (`build/<name>.aurac`, via the existing encode format);
+        `aura run <file>.aurac` runs one directly.
+  - [x] `aura test` — project test runner: each `tests/*.aura` file is
+        its own program (it provides its own `Program.Main`), compiled
+        with every source file except the entry; a test passes when Main
+        exits without a runtime error, so failures are ordinary throws.
+        `aura test <substring>` filters by file name; failing runs print
+        their error and fail the command.
+  - [x] `aura repl` — real interactive session despite the language
+        having no top-level statements: declarations accumulate at top
+        level, statements accumulate in a synthesized `Program.Main`,
+        and each input recompiles and reruns the session with output
+        captured — only the delta beyond the last successful run is
+        shown, which is exact because the VM is deterministic. Bare
+        expressions wrap in `print(...)`; unbalanced braces continue on
+        the next line; failed inputs (compile or runtime) are reported
+        and discarded without poisoning the session. `:show` prints the
+        synthesized program. Stated limitation: `Console.ReadLine`
+        shares stdin with the REPL and reruns replay, so interactive
+        input doesn't belong in sessions.
+  - [x] `aura fmt` — whitespace normalizer, deliberately scoped to what
+        cannot change meaning: leading indentation (4 spaces per bracket
+        depth, +1 for continuation lines), trailing whitespace, final
+        newline. Interiors of block comments, `"""` strings, and
+        multi-line raw strings are verbatim. Safety net: the result is
+        re-lexed and its token stream compared to the original — any
+        difference aborts without writing (this net caught a real
+        multi-line-raw-string bug during development). `--check` mode
+        for CI. Verified: formatting all 75 example files is idempotent
+        and leaves every program's output byte-identical.
+  - [x] `aura lint` — AST-based checks: unused locals (assignment alone
+        is not a use; `_`-prefix exempts; parameters, pattern bindings,
+        and `using` bindings exempt by design), unreachable code after
+        `return`/`throw`/`break`/`continue`, and empty catch blocks.
+        Exits non-zero on findings. Shadowing via pattern bindings can
+        mask an unused outer local — imprecision errs toward silence,
+        never false reports.
+  - [x] `aura doc` — Markdown API docs from the AST (public/protected
+        members, signatures rendered with modifiers/generics/`throws`)
+        plus `///` doc comments, attached via new `line` fields on
+        class/method declarations (0 for synthesized ones). Extension
+        methods hide their `__self` desugar parameter.
 
 - [ ] **Build configuration**
-  - [ ] `aura.toml` or `aura.json` project file
-  - [ ] Dependencies
+  - [x] `aura.toml` project file — `[package]` name/version, `[build]`
+        entry/sources/output, `[run]` jit/gc defaults (flags override).
+        Discovered by walking up from the cwd like Cargo; unknown keys
+        are parse errors (serde `deny_unknown_fields`), so typos can't
+        silently do nothing. `aura init [name]` scaffolds a project
+        (manifest, `src/main.aura`, sample test, `.gitignore`).
+  - [ ] Dependencies (needs a package registry — see 5.2)
   - [ ] Build targets
-  - [ ] Compiler options
+  - [x] Compiler options — `[run]` covers the VM/JIT surface; the
+        compiler itself has no configurable options yet.
 
 **P1 - High Priority**
-- [ ] **Watch mode**
-  ```bash
-  aura run --watch    # Re-run on file changes
-  ```
+- [x] **Watch mode** — `aura run --watch`: re-compiles and re-runs on
+      any source mtime change (1s polling, dependency-free); compile
+      and runtime failures are reported and watched through rather than
+      fatal. Requires source files (a compiled module has no sources).
 
-- [ ] **Verbose output**
-  ```bash
-  aura run --verbose  # Show compilation details
-  aura run --stats    # Show performance stats
-  ```
+- [x] **Verbose output** — `aura run --stats` prints compile time, run
+      time, and JIT-compiled method count to stderr (on top of the
+      existing `--gc-stats`). A separate `--verbose` was folded into
+      `--stats` rather than duplicated.
 
 **P2 - Medium Priority**
 - [ ] **Cross-compilation**
@@ -1864,12 +1903,10 @@ catchable Aura exceptions.
 
 **P1 - High Priority**
 - [ ] **Package manager**
-  ```bash
-  aura init           # Initialize new project
-  aura add <package>  # Add dependency
-  aura remove <pkg>   # Remove dependency
-  aura update         # Update dependencies
-  ```
+  - [x] `aura init` — scaffolds a project (aura.toml, src, tests; see
+        §5.1 Build configuration)
+  - [ ] `aura add <package>` / `aura remove <pkg>` / `aura update`
+        (need a registry and a dependency model first)
 
 - [ ] **Package registry**
   - [ ] Central package repository
@@ -1937,10 +1974,14 @@ catchable Aura exceptions.
       });
   }
   ```
-  - [ ] Test runner
+  - [x] Test runner — `aura test` (file-level: each `tests/*.aura` is a
+        program that fails by throwing; see §5.1). The annotation-based
+        method-level framework sketched above (`@Test`, assertions,
+        `assertThrows`) needs an annotation system and stays open.
   - [ ] Assertions library
-  - [ ] Test discovery
-  - [ ] Test reporting
+  - [x] Test discovery — `tests/` directory scan with name filtering
+  - [x] Test reporting — per-test PASS/FAIL with the failure's error,
+        summary line, non-zero exit on failure
 
 - [ ] **Test coverage**
   - [ ] Line coverage

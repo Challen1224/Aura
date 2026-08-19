@@ -804,6 +804,7 @@ impl<'a> Parser<'a> {
         // (fields `message` and `stackTrace`, populated by the VM on throw).
         decls.insert(0, Decl::Class(ClassDecl {
             name: "Exception".to_string(),
+            line: 0,
             module: String::new(),
             is_static: false,
             generic_params: vec![],
@@ -869,6 +870,7 @@ impl<'a> Parser<'a> {
     /// every method becomes static with a leading `__self` parameter of the
     /// target type, and `this` in bodies parses as `__self`.
     fn parse_extension(&mut self) -> Result<ClassDecl, String> {
+        let decl_line = self.cur_line();
         let name = self.consume_ident("expected extension name")?;
         match self.peek() {
             Some(Token::Ident(k)) if k == "on" => {
@@ -945,6 +947,7 @@ impl<'a> Parser<'a> {
         }
         Ok(ClassDecl {
             name,
+            line: decl_line,
             module: String::new(),
             is_static: true,
             generic_params: Vec::new(),
@@ -967,6 +970,7 @@ impl<'a> Parser<'a> {
         is_sealed: bool,
         is_record: bool,
     ) -> Result<ClassDecl, String> {
+        let decl_line = self.cur_line();
         let name = self.consume_ident("expected class name")?;
         let mut generic_params = if self.check(Token::Lt) {
             self.parse_generic_params()?
@@ -1013,6 +1017,7 @@ impl<'a> Parser<'a> {
             // `record Point(int x, int y);` shorthand: no explicit members.
             return Ok(ClassDecl {
                 name,
+                line: decl_line,
             module: String::new(),
             is_static: false,
                 generic_params,
@@ -1084,6 +1089,7 @@ impl<'a> Parser<'a> {
         self.consume(Token::RBrace, "expected `}`")?;
         Ok(ClassDecl {
             name,
+            line: decl_line,
             module: String::new(),
             is_static: false,
             generic_params,
@@ -1376,6 +1382,7 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_member(&mut self, in_interface: bool, class_name: &str) -> Result<Member, String> {
+        let decl_line = self.cur_line();
         let mut is_static = false;
         let mut visibility = Visibility::Public;
         let mut is_virtual = false;
@@ -1488,6 +1495,7 @@ impl<'a> Parser<'a> {
                     self.consume(Token::LBrace, "expected `{`")?;
                     let body = self.parse_block()?;
                     return Ok(Member::Method(MethodDecl {
+                        line: decl_line,
                         is_static: false,
                         visibility,
                         is_virtual: false,
@@ -1626,6 +1634,7 @@ impl<'a> Parser<'a> {
                 self.parse_block()?
             };
             Ok(Member::Method(MethodDecl {
+                line: decl_line,
                 is_static,
                 visibility,
                 is_virtual,

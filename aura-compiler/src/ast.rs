@@ -96,6 +96,9 @@ pub struct EnumVariantField {
 pub struct ClassDecl {
     /// Class name.
     pub name: String,
+    /// 1-based source line of the declaration keyword (0 for synthesized
+    /// classes). Used by tooling (`aura doc`) to associate `///` comments.
+    pub line: usize,
     /// Source module (file stem) this class was declared in; `internal`
     /// members are only accessible from classes with the same module.
     /// Empty for single-source compilation and synthesized classes.
@@ -246,6 +249,9 @@ pub struct FieldDecl {
 /// Method declaration.
 #[derive(Debug, Clone, PartialEq)]
 pub struct MethodDecl {
+    /// 1-based source line of the declaration (0 for synthesized methods).
+    /// Used by tooling (`aura doc`) to associate `///` comments.
+    pub line: usize,
     /// Whether the method is static.
     pub is_static: bool,
     /// Member visibility.
