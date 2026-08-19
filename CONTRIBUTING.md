@@ -103,6 +103,22 @@ The WiX source is `packaging/windows/aura.wxs`. Its `UpgradeCode` GUID is
 permanent — never change it, or upgrades will stack installs instead of
 replacing them.
 
+## Building the Debian package
+
+`packaging/debian/build-deb.sh` builds `target/aura_<version>_<arch>.deb` for
+the architecture it runs on (arm64 on an ARM machine, amd64 on x86-64) — only
+a Rust toolchain and `dpkg-deb` are needed:
+
+```bash
+packaging/debian/build-deb.sh
+sudo dpkg -i target/aura_*_$(dpkg --print-architecture).deb
+```
+
+Shared-library dependencies are computed from the built binary with
+`dpkg-shlibdeps`, so the control file's `Depends` tracks the toolchain
+instead of being hand-maintained. Bump `packaging/debian/changelog` when
+cutting a release.
+
 ## Style
 
 - Run `cargo fmt` before submitting changes.

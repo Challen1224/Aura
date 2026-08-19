@@ -1,0 +1,8 @@
+aura (1.0.0) unstable; urgency=medium
+
+  * First release. Linux packaged as .deb (this package), Windows x64 as MSI.
+  * Full toolchain: compiler, bytecode VM with generational GC (opt-in
+    concurrent collector), tiered x86-64 JIT, source-level debugger and DAP
+    adapter, 74 example programs.
+
+ -- Aura Contributors <charxard1332@icloud.com>  Wed, 19 Aug 2026 11:59:00 -0500

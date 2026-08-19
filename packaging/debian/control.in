@@ -1,0 +1,17 @@
+Package: aura
+Version: @VERSION@
+Architecture: @ARCH@
+Maintainer: Aura Contributors <charxard1332@icloud.com>
+Installed-Size: @SIZE@
+Depends: @DEPS@
+Section: devel
+Priority: optional
+Homepage: https://github.com/Challen1224/Aura
+Description: Aura programming language
+ A statically-typed, object-oriented programming language and runtime,
+ architected like C# / .NET CLR and written entirely in Rust.
+ .
+ Ships the aura CLI: compile and run .aura programs on a bytecode VM with
+ a generational GC and (on x86-64 hosts) a tiered JIT, plus a source-level
+ debugger (aura debug) and a DAP adapter (aura dap) for VS Code/nvim-dap.
+ Example programs are installed under /usr/share/aura/examples.

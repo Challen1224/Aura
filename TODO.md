@@ -21,7 +21,8 @@
 > layer has a `kernel32` path, JIT boundary calls are pinned to the System V
 > ABI via `extern "sysv64"`, and a Windows installer
 > (`packaging/windows/build-msi.sh`, cross-built from Linux with wixl)
-> installs `aura.exe` onto `PATH`.  
+> installs `aura.exe` onto `PATH`. Linux ships as a per-architecture
+> `.deb` (`packaging/debian/build-deb.sh`; arm64 verified end-to-end).  
 > **Last Updated:** 2026-08-19  
 > **Current Version:** 1.0.0
 
@@ -1803,6 +1804,13 @@ catchable Aura exceptions.
 - [x] `aura compile <file>` - Compile source to bytecode
 - [x] `aura run <file>` - Compile and run source
 - [x] Basic error reporting
+- [x] Debian package — `packaging/debian/build-deb.sh` builds
+      `aura_<version>_<arch>.deb` natively for the host architecture
+      (arm64 verified end-to-end: installed via dpkg, `aura` on PATH,
+      examples run from `/usr/share/aura/examples`, clean removal).
+      Depends are computed from the binary with `dpkg-shlibdeps`;
+      docs/examples install under `/usr/share/aura`, copyright and
+      changelog under `/usr/share/doc/aura`.
 - [x] Windows installer — `packaging/windows/build-msi.sh` builds
       `Aura-<version>-x64.msi` from Linux (mingw cross-compile + msitools
       wixl; no Windows machine or WiX toolset needed). Per-machine
@@ -2054,7 +2062,10 @@ catchable Aura exceptions.
   - [ ] macOS support (the JIT would need an `mmap`-via-libc path and
         `MAP_JIT`/`pthread_jit_write_protect` handling; interpreter
         likely works today, unverified)
-  - [x] Linux support (primary)
+  - [x] Linux support (primary) — packaged as a `.deb`
+        (`packaging/debian/build-deb.sh`, per-architecture; arm64
+        verified installed-and-running, amd64 buildable on any x86-64
+        machine the same way)
   - [ ] BSD support
 
 - [ ] **WebAssembly**

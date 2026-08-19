@@ -45,7 +45,20 @@ aura run "C:\Program Files\Aura\examples\hello.aura"
 The installer is built from Linux — no Windows machine or WiX toolset needed —
 by [`packaging/windows/build-msi.sh`](packaging/windows/build-msi.sh).
 
-**Linux / anywhere with Rust:** build from source (below).
+**Debian/Ubuntu:** download the `.deb` for your architecture from the releases
+page and install it:
+
+```bash
+sudo dpkg -i aura_1.0.0_arm64.deb   # or _amd64.deb on x86-64
+aura run /usr/share/aura/examples/hello.aura
+```
+
+The package installs `aura` to `/usr/bin` with the examples and docs under
+`/usr/share/aura`. It is built by
+[`packaging/debian/build-deb.sh`](packaging/debian/build-deb.sh), which
+packages for whatever architecture it runs on.
+
+**Anywhere else with Rust:** build from source (below).
 
 ## Quick start
 
