@@ -29,8 +29,11 @@ macro_rules! try_vm {
 }
 
 /// Signature of the helper dispatcher. Generated code calls this with `rdi` =
-/// native frame, `rsi` = argument array, `rdx` = argument count.
-pub type JitFunction = unsafe extern "C" fn(*mut NativeFrame, *const Value, usize) -> u64;
+/// native frame, `rsi` = argument array, `rdx` = argument count. Explicitly
+/// `sysv64`: generated code always speaks the System V ABI, so on Windows
+/// (whose native C ABI differs) Rust marshals these boundary calls correctly
+/// without any per-OS codegen.
+pub type JitFunction = unsafe extern "sysv64" fn(*mut NativeFrame, *const Value, usize) -> u64;
 
 // Offsets into [`NativeFrame`]; generated code relies on these constants.
 pub const NF_VM: i32 = 0x00;
@@ -616,7 +619,7 @@ fn exec(vm: &mut Vm, op: &Op, args: &[Value]) -> Result<Option<Value>, Result<Va
 
 /// The dispatcher entry point. `status` in `rax`: 0 ok / 1 exception /
 /// 2 vm error. The result or exception is written to `native_frame.result`.
-unsafe extern "C" fn dispatcher(nf: *mut NativeFrame, args: *const Value, argc: usize) -> u64 {
+unsafe extern "sysv64" fn dispatcher(nf: *mut NativeFrame, args: *const Value, argc: usize) -> u64 {
     let nf = &mut *nf;
     let vm = &mut *nf.vm;
     let op = (&*nf.helpers)[nf.op_id as usize].clone();
@@ -665,7 +668,7 @@ pub fn dispatcher_addr() -> usize {
 
 /// Set `vm.jit_error` to an overflow error (called by inlined arithmetic when
 /// overflow checking is enabled and the overflow flag trips).
-unsafe extern "C" fn raise_overflow(vm: *mut Vm) {
+unsafe extern "sysv64" fn raise_overflow(vm: *mut Vm) {
     (*vm).jit_error = Some(VmError::Overflow);
 }
 

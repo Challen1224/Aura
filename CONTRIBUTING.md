@@ -35,8 +35,10 @@ cargo run -p aura-cli -- run examples/hello.aura
 cargo run -p aura-cli -- compile examples/hello.aura
 ```
 
-There are 40+ example programs under [`examples/`](examples/) that exercise the
+There are 70+ example programs under [`examples/`](examples/) that exercise the
 language; a change to the compiler or VM should keep them all running.
+`tools/examples-sweep.sh` runs every example under both tiers and fails if any
+example errors or the interpreter and JIT outputs differ.
 
 ## Testing
 
@@ -60,18 +62,12 @@ tests using a cross-toolchain plus QEMU user-mode emulation. QEMU executes the
 JIT's generated x86-64 machine code, so the full 9-test suite runs:
 
 ```bash
-# Debian/Ubuntu: install the cross linker and qemu
-sudo apt install -y gcc-x86-64-linux-gnu qemu-user-static
+# Debian/Ubuntu: install the cross toolchain and qemu
+sudo apt install -y gcc-x86-64-linux-gnu libc6-dev-amd64-cross qemu-user
+rustup target add x86_64-unknown-linux-gnu
 
-# Point cargo at them (this is a per-user, machine-specific setting)
-mkdir -p ~/.cargo
-cat >> ~/.cargo/config.toml <<'EOF'
-[target.x86_64-unknown-linux-gnu]
-linker = "x86_64-linux-gnu-gcc"
-runner = "qemu-x86_64-static"
-EOF
-
-# Compile and run the whole JIT test suite under QEMU
+# The repo's .cargo/config.toml already points this target at the cross
+# linker and a qemu runner, so this just works:
 cargo test -p aura-vm --target x86_64-unknown-linux-gnu
 
 # Or run a real program with the JIT enabled
@@ -80,6 +76,32 @@ cargo run -p aura-cli --target x86_64-unknown-linux-gnu -- run --jit examples/fi
 
 Remember QEMU emulates the compiled code, so this verifies *correctness*, not
 performance — there is no speedup compared with the interpreter.
+
+Tests that spawn the built `aura` binary as a child process (the DAP test)
+additionally need binfmt-level qemu and the x86-64 loader/libc visible at
+their standard paths:
+
+```bash
+sudo apt install -y qemu-user-binfmt
+sudo ln -s /usr/x86_64-linux-gnu/lib /lib64
+for f in /usr/x86_64-linux-gnu/lib/*.so*; do sudo ln -sf "$f" /usr/lib/x86_64-linux-gnu/; done
+```
+
+## Building the Windows installer
+
+`packaging/windows/build-msi.sh` cross-compiles `aura.exe` for
+`x86_64-pc-windows-gnu` and packages `target/Aura-<version>-x64.msi`, entirely
+from Linux:
+
+```bash
+sudo apt install -y gcc-mingw-w64-x86-64 wixl
+rustup target add x86_64-pc-windows-gnu
+packaging/windows/build-msi.sh
+```
+
+The WiX source is `packaging/windows/aura.wxs`. Its `UpgradeCode` GUID is
+permanent — never change it, or upgrades will stack installs instead of
+replacing them.
 
 ## Style
 

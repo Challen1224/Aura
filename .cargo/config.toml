@@ -1,0 +1,14 @@
+# Cross-compilation targets.
+#
+# x86_64-unknown-linux-gnu: run the x86-64 JIT test battery from an arm64
+# host via qemu-user (`cargo test --target x86_64-unknown-linux-gnu`).
+#
+# x86_64-pc-windows-gnu: the Windows release build packaged by
+# packaging/windows/build-msi.sh.
+
+[target.x86_64-unknown-linux-gnu]
+linker = "x86_64-linux-gnu-gcc"
+runner = "qemu-x86_64 -L /usr/x86_64-linux-gnu"
+
+[target.x86_64-pc-windows-gnu]
+linker = "x86_64-w64-mingw32-gcc"

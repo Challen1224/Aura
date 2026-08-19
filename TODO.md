@@ -16,9 +16,14 @@
 > (`List`/`Map`/`Set`), string methods, `Console.ReadLine`, and text `File`
 > I/O are implemented and verified under both interpreter and JIT, including
 > mid-run tier transitions; still missing: networking, async, reflection,
-> binary I/O, string builder/formatting (see §4). Tooling: early.  
-> **Last Updated:** 2026-08-16  
-> **Current Version:** 0.27.0
+> binary I/O, string builder/formatting (see §4). Tooling: early.
+> Platforms: Linux (primary) and Windows x64 — the JIT's executable-memory
+> layer has a `kernel32` path, JIT boundary calls are pinned to the System V
+> ABI via `extern "sysv64"`, and a Windows installer
+> (`packaging/windows/build-msi.sh`, cross-built from Linux with wixl)
+> installs `aura.exe` onto `PATH`.  
+> **Last Updated:** 2026-08-19  
+> **Current Version:** 1.0.0
 
 ---
 
@@ -1798,6 +1803,12 @@ catchable Aura exceptions.
 - [x] `aura compile <file>` - Compile source to bytecode
 - [x] `aura run <file>` - Compile and run source
 - [x] Basic error reporting
+- [x] Windows installer — `packaging/windows/build-msi.sh` builds
+      `Aura-<version>-x64.msi` from Linux (mingw cross-compile + msitools
+      wixl; no Windows machine or WiX toolset needed). Per-machine
+      install to `Program Files\Aura`, appends `bin` to the system PATH
+      (removed on uninstall), bundles examples/docs/README/LICENSE,
+      permanent UpgradeCode so future versions upgrade in place.
 
 #### ⏳ Planned
 
@@ -2015,9 +2026,35 @@ catchable Aura exceptions.
 
 **P2 - Medium Priority**
 - [ ] **Cross-platform**
-  - [ ] Windows support
-  - [ ] macOS support
-  - [ ] Linux support (primary)
+  - [x] Windows support (x64) — full toolchain including the JIT. The
+        executable-memory layer (`aura-vm/src/jit/x64/mem.rs`) gained a
+        `VirtualAlloc`/`VirtualProtect`/`VirtualFree` path declared
+        directly against `kernel32` (keeping the crate's zero-dependency
+        property, the Windows analogue of the raw-syscall Linux path);
+        the three JIT ABI boundaries (entry pointer, helper dispatcher,
+        overflow raiser) are declared `extern "sysv64"`, so generated
+        code speaks System V on every OS and Rust marshals the
+        difference — zero per-OS codegen. Prologue frames larger than a
+        page are now allocated page-by-page with probe stores, because
+        Windows faults if `sub rsp` skips its stack guard page (emitted
+        on all OSes to keep codegen identical; harmless on Linux). On
+        any other OS, executable-memory allocation fails cleanly and
+        tier-up falls back to the interpreter permanently. Shipped as an
+        MSI installer: `packaging/windows/build-msi.sh`
+        cross-compiles `x86_64-pc-windows-gnu` and builds
+        `Aura-<version>-x64.msi` with msitools' wixl entirely from
+        Linux — per-machine install, appends `bin` to the system PATH,
+        bundles examples/docs/LICENSE, stable UpgradeCode with major
+        upgrades configured (details in §5.1). Honest limits: the Windows exe is
+        cross-built and its MSI tables verified with msitools
+        (file/upgrade/environment tables inspected, layout extracted
+        and checked); the JIT ABI/probe changes are verified by the
+        full battery under qemu x86-64 on Linux, but the binary has not
+        been executed on a real Windows machine from this environment.
+  - [ ] macOS support (the JIT would need an `mmap`-via-libc path and
+        `MAP_JIT`/`pthread_jit_write_protect` handling; interpreter
+        likely works today, unverified)
+  - [x] Linux support (primary)
   - [ ] BSD support
 
 - [ ] **WebAssembly**

@@ -1,26 +1,62 @@
 //! Executable memory management for the JIT.
 //!
-//! Uses raw Linux x86-64 syscalls (`mmap`/`mprotect`/`munmap`) so the VM has
-//! no dependency on `libc`. Memory is allocated writable, populated with
+//! On Linux this uses raw x86-64 syscalls (`mmap`/`mprotect`/`munmap`) so the
+//! VM has no dependency on `libc`; on Windows it calls the `kernel32` virtual
+//! memory API (`VirtualAlloc`/`VirtualProtect`/`VirtualFree`) directly for the
+//! same zero-dependency property. Memory is allocated writable, populated with
 //! machine code, and then marked read+execute (W^X) before being called.
+//!
+//! On any other OS, [`ExecutableMemory::allocate`] fails cleanly; tier-up
+//! records the method as uncompilable and the interpreter keeps running it.
 
 use std::fmt;
+#[cfg(any(target_os = "linux", windows))]
 use std::ptr;
 
 /// `mmap` syscall number on Linux x86-64.
+#[cfg(target_os = "linux")]
 const SYS_MMAP: u64 = 9;
 /// `mprotect` syscall number on Linux x86-64.
+#[cfg(target_os = "linux")]
 const SYS_MPROTECT: u64 = 10;
 /// `munmap` syscall number on Linux x86-64.
+#[cfg(target_os = "linux")]
 const SYS_MUNMAP: u64 = 11;
 
+#[cfg(target_os = "linux")]
 const PROT_READ: u64 = 0x1;
+#[cfg(target_os = "linux")]
 const PROT_WRITE: u64 = 0x2;
+#[cfg(target_os = "linux")]
 const PROT_EXEC: u64 = 0x4;
+#[cfg(target_os = "linux")]
 const MAP_PRIVATE: u64 = 0x02;
+#[cfg(target_os = "linux")]
 const MAP_ANONYMOUS: u64 = 0x20;
 
-/// Page size on x86-64 Linux.
+/// Windows virtual-memory API, declared directly against `kernel32` (which
+/// every Windows process links) so no `winapi`/`windows-sys` dependency is
+/// needed — the Windows analogue of the raw-syscall approach used on Linux.
+#[cfg(windows)]
+mod win {
+    #[link(name = "kernel32")]
+    extern "system" {
+        pub fn VirtualAlloc(addr: *mut u8, size: usize, alloc_type: u32, protect: u32) -> *mut u8;
+        pub fn VirtualProtect(addr: *mut u8, size: usize, protect: u32, old: *mut u32) -> i32;
+        pub fn VirtualFree(addr: *mut u8, size: usize, free_type: u32) -> i32;
+        pub fn GetLastError() -> u32;
+    }
+
+    pub const MEM_COMMIT: u32 = 0x1000;
+    pub const MEM_RESERVE: u32 = 0x2000;
+    pub const MEM_RELEASE: u32 = 0x8000;
+    pub const PAGE_READWRITE: u32 = 0x04;
+    pub const PAGE_EXECUTE_READ: u32 = 0x20;
+}
+
+/// Page size on x86-64 (both Linux and Windows use 4KB pages; Windows'
+/// 64KB VirtualAlloc granularity only affects reservation alignment, which
+/// the kernel handles).
 pub const PAGE_SIZE: usize = 4096;
 
 /// Round `n` up to the nearest multiple of [`PAGE_SIZE`].
@@ -30,6 +66,7 @@ pub fn page_align_up(n: usize) -> usize {
 
 /// Raw `mmap` syscall. Returns the mapped address, or an `Err` containing the
 /// kernel errno when the mapping fails.
+#[cfg(target_os = "linux")]
 unsafe fn sys_mmap(addr: u64, len: u64, prot: u64, flags: u64, fd: u64, off: u64) -> Result<usize, i64> {
     let ret: u64;
     core::arch::asm!(
@@ -54,6 +91,7 @@ unsafe fn sys_mmap(addr: u64, len: u64, prot: u64, flags: u64, fd: u64, off: u64
 }
 
 /// Raw `mprotect` syscall.
+#[cfg(target_os = "linux")]
 unsafe fn sys_mprotect(addr: usize, len: usize, prot: u64) -> Result<(), i64> {
     let ret: u64;
     core::arch::asm!(
@@ -75,6 +113,7 @@ unsafe fn sys_mprotect(addr: usize, len: usize, prot: u64) -> Result<(), i64> {
 }
 
 /// Raw `munmap` syscall.
+#[cfg(target_os = "linux")]
 unsafe fn sys_munmap(addr: usize, len: usize) -> Result<(), i64> {
     let ret: u64;
     core::arch::asm!(
@@ -119,6 +158,7 @@ pub struct ExecutableMemory {
 
 impl ExecutableMemory {
     /// Allocate a fresh page-aligned region of at least `size` bytes, writable.
+    #[cfg(target_os = "linux")]
     pub fn allocate(size: usize) -> Result<Self, MemoryError> {
         let len = page_align_up(size);
         let ptr = unsafe {
@@ -130,6 +170,36 @@ impl ExecutableMemory {
             len,
             frozen: false,
         })
+    }
+
+    /// Allocate a fresh page-aligned region of at least `size` bytes, writable.
+    #[cfg(windows)]
+    pub fn allocate(size: usize) -> Result<Self, MemoryError> {
+        let len = page_align_up(size);
+        let ptr = unsafe {
+            win::VirtualAlloc(
+                ptr::null_mut(),
+                len,
+                win::MEM_COMMIT | win::MEM_RESERVE,
+                win::PAGE_READWRITE,
+            )
+        };
+        if ptr.is_null() {
+            let err = unsafe { win::GetLastError() };
+            return Err(MemoryError(format!("VirtualAlloc failed with error {err}")));
+        }
+        Ok(Self {
+            ptr,
+            len,
+            frozen: false,
+        })
+    }
+
+    /// Executable memory is not implemented for this OS; the VM stays on the
+    /// interpreter tier (tier-up records the method as uncompilable).
+    #[cfg(not(any(target_os = "linux", windows)))]
+    pub fn allocate(_size: usize) -> Result<Self, MemoryError> {
+        Err(MemoryError("executable memory is not supported on this OS".into()))
     }
 
     /// Write the given code bytes into the region, then mark it read+execute.
@@ -145,12 +215,22 @@ impl ExecutableMemory {
                 self.len
             )));
         }
+        #[cfg(any(target_os = "linux", windows))]
         unsafe {
             ptr::copy_nonoverlapping(code.as_ptr(), self.ptr, code.len());
         }
+        #[cfg(target_os = "linux")]
         unsafe {
             sys_mprotect(self.ptr as usize, self.len, PROT_READ | PROT_EXEC)
                 .map_err(|e| MemoryError(format!("mprotect failed with errno {e}")))?;
+        }
+        #[cfg(windows)]
+        unsafe {
+            let mut old = 0u32;
+            if win::VirtualProtect(self.ptr, self.len, win::PAGE_EXECUTE_READ, &mut old) == 0 {
+                let err = win::GetLastError();
+                return Err(MemoryError(format!("VirtualProtect failed with error {err}")));
+            }
         }
         self.frozen = true;
         Ok(())
@@ -174,8 +254,14 @@ impl ExecutableMemory {
 
 impl Drop for ExecutableMemory {
     fn drop(&mut self) {
+        #[cfg(target_os = "linux")]
         unsafe {
             let _ = sys_munmap(self.ptr as usize, self.len);
+        }
+        #[cfg(windows)]
+        unsafe {
+            // MEM_RELEASE requires size 0 and releases the whole reservation.
+            let _ = win::VirtualFree(self.ptr, 0, win::MEM_RELEASE);
         }
     }
 }
@@ -199,11 +285,15 @@ impl JitFunction {
     /// Call the function with the given pointer-sized arguments (SysV x86-64:
     /// up to six 64-bit arguments in `rdi, rsi, rdx, rcx, r8, r9`).
     ///
+    /// Generated code always uses the System V ABI, even on Windows — the
+    /// explicit `extern "sysv64"` makes Rust marshal correctly on any x86-64
+    /// OS, so the codegen needs no per-OS calling-convention support.
+    ///
     /// # Safety
     /// The caller must pass arguments matching the function's expected ABI and
     /// ensure the function was compiled correctly.
     pub unsafe fn call_abi(&self, args: &[u64]) -> u64 {
-        let entry: extern "C" fn(u64, u64, u64, u64, u64, u64) -> u64 =
+        let entry: extern "sysv64" fn(u64, u64, u64, u64, u64, u64) -> u64 =
             std::mem::transmute(self.memory.ptr());
         let mut a = [0u64; 6];
         for (dst, src) in a.iter_mut().zip(args.iter()) {

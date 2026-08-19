@@ -1,0 +1,64 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  WiX source for the Aura Windows x64 installer, built on any OS with
+  msitools' wixl (see build-msi.sh; no Windows machine or WiX toolset
+  needed). Preprocessor variables, passed by the build script:
+
+    Version   - product version, taken from the workspace Cargo.toml
+    StageDir  - staged install tree (bin/aura.exe, LICENSE, README.md,
+                examples/, docs/)
+
+  The UpgradeCode is permanent: it identifies "Aura" to Windows Installer
+  across every future version so upgrades replace instead of stacking.
+  Never change it. Product Id="*" is regenerated per build, as major
+  upgrades require.
+-->
+<Wix xmlns="http://schemas.microsoft.com/wix/2006/wi">
+  <Product Id="*"
+           Name="Aura Programming Language"
+           UpgradeCode="766450e2-8898-4e38-8357-c744d990440a"
+           Language="1033"
+           Version="$(var.Version)"
+           Manufacturer="Aura Contributors">
+
+    <Package InstallerVersion="500"
+             Compressed="yes"
+             Description="Aura programming language $(var.Version)"
+             Comments="Compiler, VM with x86-64 JIT, debugger, and DAP adapter" />
+
+    <!-- Per-machine install (Program Files, system PATH). -->
+    <Property Id="ALLUSERS" Value="1" />
+
+    <MajorUpgrade DowngradeErrorMessage="A newer version of Aura is already installed." />
+
+    <Media Id="1" Cabinet="aura.cab" EmbedCab="yes" />
+
+    <Directory Id="TARGETDIR" Name="SourceDir">
+      <Directory Id="ProgramFiles64Folder">
+        <Directory Id="INSTALLDIR" Name="Aura">
+          <Directory Id="BINDIR" Name="bin">
+            <Component Id="C.AuraExe" Guid="8b0f43ab-2f39-4d76-9f2e-6c1a25d70a11" Win64="yes">
+              <File Id="F.AuraExe" Name="aura.exe" Source="$(var.StageDir)/bin/aura.exe" KeyPath="yes" />
+            </Component>
+            <!-- Appends the bin directory to the system PATH so `aura` works
+                 in any new terminal; removed again on uninstall. The registry
+                 value exists only to serve as the component's key path
+                 (Environment entries cannot be key paths). -->
+            <Component Id="C.PathEnv" Guid="24db8fcc-dd9d-4168-bbaf-59c483307ecd" Win64="yes">
+              <RegistryValue Root="HKLM" Key="Software\Aura" Name="InstallDir"
+                             Type="string" Value="[INSTALLDIR]" KeyPath="yes" />
+              <Environment Id="E.Path" Name="PATH" Value="[BINDIR]"
+                           Part="last" Action="set" Permanent="no" System="yes" />
+            </Component>
+          </Directory>
+        </Directory>
+      </Directory>
+    </Directory>
+
+    <Feature Id="Main" Title="Aura" Level="1">
+      <ComponentRef Id="C.AuraExe" />
+      <ComponentRef Id="C.PathEnv" />
+      <ComponentGroupRef Id="CG.Files" />
+    </Feature>
+  </Product>
+</Wix>

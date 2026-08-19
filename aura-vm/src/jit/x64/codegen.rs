@@ -142,7 +142,21 @@ impl<'a> Codegen<'a> {
         self.asm.push(R14);
         self.asm.push(R15);
         self.asm.push(RBX);
-        self.asm.sub_rsp_imm(self.frame as u32);
+        // Windows grows the stack via a guard page that must be touched in
+        // order, so a frame larger than one page is allocated page by page
+        // with a probe store on each step (harmless on Linux; emitted
+        // unconditionally to keep codegen identical across OSes).
+        const PAGE: u32 = 4096;
+        let mut remaining = self.frame as u32;
+        if remaining > PAGE {
+            self.asm.xor_rr(RAX, RAX);
+            while remaining > PAGE {
+                self.asm.sub_rsp_imm(PAGE);
+                self.asm.mov_mr(Mem::new(RSP, 0), RAX);
+                remaining -= PAGE;
+            }
+        }
+        self.asm.sub_rsp_imm(remaining);
         self.asm.mov_rr(R13, RSP);
 
         // Save the native frame pointer passed in rdi, and publish this

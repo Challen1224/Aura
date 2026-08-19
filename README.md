@@ -31,6 +31,22 @@ class Program {
 - **Tiered JIT** (x86-64) — hot methods compile to native code; the rest run on
   a bytecode interpreter
 
+## Install
+
+**Windows (x64):** download `Aura-<version>-x64.msi` from the releases page and
+run it. The installer puts `aura.exe` on your `PATH` (open a new terminal after
+installing), along with the examples and docs under
+`C:\Program Files\Aura`. Then:
+
+```
+aura run "C:\Program Files\Aura\examples\hello.aura"
+```
+
+The installer is built from Linux — no Windows machine or WiX toolset needed —
+by [`packaging/windows/build-msi.sh`](packaging/windows/build-msi.sh).
+
+**Linux / anywhere with Rust:** build from source (below).
+
 ## Quick start
 
 ```bash
@@ -47,7 +63,7 @@ cargo run -p aura-cli -- run --jit examples/hello.aura
 cargo run -p aura-cli -- compile examples/hello.aura
 ```
 
-Try one of the 40+ programs under [`examples/`](examples/):
+Try one of the 70+ programs under [`examples/`](examples/):
 
 ```bash
 cargo run -p aura-cli -- run examples/fib.aura
@@ -73,8 +89,12 @@ emitter. Complex operations (allocation, calls, field access, exceptions,
 `div`/`rem`) delegate to VM helper stubs that reuse the interpreter's exact
 semantics.
 
-The JIT is enabled through the VM API (`vm.enable_jit()`), requires an x86-64
-host, and falls back to a stub on other architectures.
+The JIT is enabled through the VM API (`vm.enable_jit()`) or `aura run --jit`,
+and requires an x86-64 host — on Linux it maps executable pages with raw
+syscalls, on Windows through the `kernel32` virtual-memory API (both
+dependency-free). Generated code always speaks the System V ABI; the Rust
+boundary functions are declared `extern "sysv64"`, so no per-OS codegen is
+needed. Other architectures fall back to the interpreter.
 
 ## Architecture
 
