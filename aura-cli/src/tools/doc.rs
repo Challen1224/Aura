@@ -63,10 +63,12 @@ fn harvest_doc_comments(source: &str) -> HashMap<usize, String> {
         let line = raw.trim();
         if let Some(text) = line.strip_prefix("///") {
             block.push(text.strip_prefix(' ').unwrap_or(text));
-        } else if line.is_empty() && block.is_empty() {
-            // Blank line before any doc block: nothing to carry.
+        } else if line.is_empty() {
+            // Blank lines are carried over: a block still attaches to the
+            // next declaration even with blank lines between them.
         } else if !block.is_empty() {
-            // First non-doc line after a block: the declaration it documents.
+            // First substantive line after a block: the declaration it
+            // documents.
             docs.insert(idx + 1, block.join("\n"));
             block.clear();
         }

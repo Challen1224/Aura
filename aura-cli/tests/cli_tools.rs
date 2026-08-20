@@ -164,6 +164,22 @@ fn lint_reports_and_doc_renders() {
     assert!(stdout.contains("`int32 Go()`"), "{stdout}");
     assert!(stdout.contains("Runs the frob."), "{stdout}");
 
+    // A blank line between the /// block and its declaration must not
+    // detach the docs (the conventional spaced style).
+    let spaced = dir.join("spaced.aura");
+    fs::write(
+        &spaced,
+        "/// Widget docs survive a blank line.\n\nclass Widget {\n    int Id() {\n        return 1;\n    }\n}\n",
+    )
+    .unwrap();
+    let out = aura().arg("doc").arg(&spaced).output().unwrap();
+    assert!(out.status.success());
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("Widget docs survive a blank line."),
+        "doc block dropped across blank line: {stdout}"
+    );
+
     // A clean file exits zero.
     let clean = dir.join("clean.aura");
     fs::write(&clean, "class C {\n    int V() {\n        return 1;\n    }\n}\n").unwrap();
