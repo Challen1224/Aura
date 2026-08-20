@@ -2031,11 +2031,27 @@ catchable Aura exceptions.
   - [ ] Semantics
   - [ ] Memory model
 
-- [ ] **Tutorial**
-  - [ ] Getting started guide
-  - [ ] Language basics
-  - [ ] Advanced topics
-  - [ ] Examples and exercises
+- [x] **Tutorial** — a professional documentation set under `docs/`:
+      `index.md` (home + doc map), `getting-started.md` (install →
+      project → tests in five minutes), an eight-chapter language guide
+      (`docs/guide/01`–`08`: basics, OOP, type system, functions/lambdas,
+      pattern matching, error handling, async, stdlib), and `tooling.md`
+      (full CLI + aura.toml + GC-flag reference). Quality gate:
+      `tools/check-doc-examples.sh` extracts every ```aura block — full
+      programs must compile and run, blocks marked `// ERROR` must fail
+      to compile — so the docs cannot drift from the language (60 samples
+      verified). Writing the docs surfaced and fixed a real parser bug:
+      match-arm guards ending in an identifier (`if w == h =>`) or
+      parenthesized (`if (w == h) =>`) mis-parsed as lambdas; guards now
+      suppress top-level lambda interpretation, cleared inside parens so
+      lambda arguments in guards still work
+      (aura-compiler/tests/guard_lambda_ambiguity.rs). Both installers
+      ship the docs (research notes excluded).
+  - [x] Getting started guide
+  - [x] Language basics
+  - [x] Advanced topics
+  - [x] Examples and exercises — 70+ verified programs in `examples/`,
+        referenced throughout the guide
 
 **P1 - High Priority**
 - [ ] **API documentation**

@@ -18,12 +18,13 @@ cargo build --release --target "$TARGET" -p aura-cli
 
 echo "Staging install tree..."
 rm -rf "$STAGE"
-mkdir -p "$STAGE/bin" "$STAGE/docs"
+mkdir -p "$STAGE/bin"
 cp "target/$TARGET/release/aura.exe" "$STAGE/bin/"
 x86_64-w64-mingw32-strip "$STAGE/bin/aura.exe"
 cp LICENSE README.md "$STAGE/"
 cp -r examples "$STAGE/examples"
-cp docs/*.md "$STAGE/docs/"
+cp -r docs "$STAGE/docs"
+rm -rf "$STAGE/docs/research"   # internal design studies; not user docs
 
 # Harvest everything except aura.exe (which has an explicit component in
 # aura.wxs, since it anchors the PATH entry and key paths).

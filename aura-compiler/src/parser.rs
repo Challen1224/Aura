@@ -705,12 +705,18 @@ pub struct Parser<'a> {
     /// Inside an extension body: `this` in expressions parses as the
     /// synthesized `__self` receiver parameter.
     substitute_this: bool,
+    /// Inside a match-arm guard, at guard top level: `ident =>` and
+    /// `(...) =>` belong to the *arm*, not a lambda, so lambda
+    /// interpretation is suppressed. Cleared inside any parentheses
+    /// (where the arm's `=>` cannot occur), so lambdas in guard
+    /// sub-expressions like `xs.Any(x => x > 2)` still parse.
+    suppress_lambda: bool,
 }
 
 impl<'a> Parser<'a> {
     /// Create a parser over a token slice.
     pub fn new(tokens: &'a [Token], lines: &'a [usize]) -> Self {
-        Self { tokens, lines, pos: 0, substitute_this: false }
+        Self { tokens, lines, pos: 0, substitute_this: false, suppress_lambda: false }
     }
 
     /// Source line of the current token (or the last one at EOF).
@@ -2783,8 +2789,9 @@ impl<'a> Parser<'a> {
                 if name == "this" && self.substitute_this {
                     name = "__self".to_string();
                 }
-                // Single-parameter lambda: `x => x + 1`.
-                if self.check(Token::FatArrow) {
+                // Single-parameter lambda: `x => x + 1`. In a match-arm
+                // guard the `=>` is the arm's, not a lambda's.
+                if self.check(Token::FatArrow) && !self.suppress_lambda {
                     self.advance();
                     let body = self.parse_lambda_body()?;
                     return Ok(Expr::Lambda { params: vec![(name, None)], body });
@@ -2820,29 +2827,36 @@ impl<'a> Parser<'a> {
             Some(Token::LParen) => {
                 // Parenthesized lambda: `() => ...`, `(a, b) => ...`,
                 // `(int x) => ...` — decided by scanning for `) =>`.
-                if self.lookahead_is_lambda() {
+                // A guard's `(cond) =>` is grouping, not parameters.
+                if !self.suppress_lambda && self.lookahead_is_lambda() {
                     return self.parse_lambda_parenthesized();
                 }
                 self.advance();
-                let expr = self.parse_expr()?;
-                if self.match_token(Token::Comma) {
-                    // This is a tuple literal
-                    let mut elements = vec![expr];
-                    if !self.check(Token::RParen) {
-                        loop {
-                            elements.push(self.parse_expr()?);
-                            if !self.match_token(Token::Comma) {
-                                break;
+                let saved = self.suppress_lambda;
+                self.suppress_lambda = false;
+                let result: Result<Expr, String> = (|| {
+                    let expr = self.parse_expr()?;
+                    if self.match_token(Token::Comma) {
+                        // This is a tuple literal
+                        let mut elements = vec![expr];
+                        if !self.check(Token::RParen) {
+                            loop {
+                                elements.push(self.parse_expr()?);
+                                if !self.match_token(Token::Comma) {
+                                    break;
+                                }
                             }
                         }
+                        self.consume(Token::RParen, "expected `)`")?;
+                        Ok(Expr::Tuple(elements))
+                    } else {
+                        // This is a parenthesized expression
+                        self.consume(Token::RParen, "expected `)`")?;
+                        Ok(expr)
                     }
-                    self.consume(Token::RParen, "expected `)`")?;
-                    Ok(Expr::Tuple(elements))
-                } else {
-                    // This is a parenthesized expression
-                    self.consume(Token::RParen, "expected `)`")?;
-                    Ok(expr)
-                }
+                })();
+                self.suppress_lambda = saved;
+                result
             }
             Some(t) => Err(format!("line {}: unexpected token {}", self.cur_line(), t)),
             None => Err("unexpected end of input".to_string()),
@@ -2947,7 +2961,15 @@ impl<'a> Parser<'a> {
         }
         
         let guard = if self.match_token(Token::If) {
-            Some(self.parse_expr()?)
+            // The guard runs up to the arm's `=>`: suppress top-level
+            // lambda interpretation so a guard ending in an identifier
+            // (`if w == h =>`) or parenthesized (`if (w == h) =>`) is not
+            // mistaken for a lambda parameter list.
+            let saved = self.suppress_lambda;
+            self.suppress_lambda = true;
+            let guard = self.parse_expr();
+            self.suppress_lambda = saved;
+            Some(guard?)
         } else {
             None
         };
@@ -3073,16 +3095,25 @@ impl<'a> Parser<'a> {
 
     fn parse_args(&mut self) -> Result<Vec<Expr>, String> {
         self.consume(Token::LParen, "expected `(`")?;
+        // Inside an argument list the enclosing guard's `=>` cannot occur,
+        // so lambda arguments parse normally even in guard position.
+        let saved = self.suppress_lambda;
+        self.suppress_lambda = false;
         let mut args = Vec::new();
-        if !self.check(Token::RParen) {
-            loop {
-                args.push(self.parse_expr()?);
-                if !self.match_token(Token::Comma) {
-                    break;
+        let result: Result<(), String> = (|| {
+            if !self.check(Token::RParen) {
+                loop {
+                    args.push(self.parse_expr()?);
+                    if !self.match_token(Token::Comma) {
+                        break;
+                    }
                 }
             }
-        }
-        self.consume(Token::RParen, "expected `)`")?;
+            self.consume(Token::RParen, "expected `)`")?;
+            Ok(())
+        })();
+        self.suppress_lambda = saved;
+        result?;
         Ok(args)
     }
 

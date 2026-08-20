@@ -7,6 +7,12 @@ aura (1.1.0) unstable; urgency=medium
     (aura run --watch), and timing/JIT stats (aura run --stats).
   * aura build emits binary bytecode modules (.aurac) that aura run
     executes directly.
+  * New user documentation under /usr/share/aura/docs: getting started,
+    an eight-chapter language guide, and a tooling reference — every full
+    program in them machine-verified against this toolchain.
+  * Parser fix: match-arm guards ending in an identifier or written
+    parenthesized (e.g. `E.P(w, h) if w == h =>`) no longer mis-parse as
+    lambdas.
 
  -- Aura Contributors <charxard1332@icloud.com>  Wed, 19 Aug 2026 13:30:00 -0500
 

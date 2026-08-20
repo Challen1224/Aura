@@ -159,6 +159,16 @@ Every `Value` is a fixed 16-byte `[tag, payload]` pair, which lets the JIT and
 interpreter share one compact representation and lets compiled code treat a
 value as two registers.
 
+## Documentation
+
+The full documentation lives under [`docs/`](docs/index.md):
+[Getting Started](docs/getting-started.md), an eight-chapter
+[Language Guide](docs/index.md#the-language-guide), and the
+[Tooling Reference](docs/tooling.md). Every complete program in the guide
+is verified against the current toolchain by
+`tools/check-doc-examples.sh`, so the docs cannot silently drift from the
+language.
+
 ## Roadmap
 
 See [TODO.md](TODO.md) for the feature roadmap and current status.

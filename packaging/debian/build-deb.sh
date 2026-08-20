@@ -29,6 +29,7 @@ install -m 755 target/release/aura "$STAGE/usr/bin/aura"
 strip "$STAGE/usr/bin/aura"
 cp -r examples "$STAGE/usr/share/aura/examples"
 cp -r docs "$STAGE/usr/share/aura/docs"
+rm -rf "$STAGE/usr/share/aura/docs/research"   # internal design studies
 cp README.md "$STAGE/usr/share/doc/aura/"
 cp LICENSE "$STAGE/usr/share/doc/aura/copyright"
 gzip -9 -n -c packaging/debian/changelog > "$STAGE/usr/share/doc/aura/changelog.gz"
